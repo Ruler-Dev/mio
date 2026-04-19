@@ -2825,12 +2825,41 @@ function renderArtifactPreview(body, art) {
     return;
   }
   if (art.type === 'application/vnd.ant.mermaid') {
-    // Clean the content before handing to mermaid:
-    //  - strip ```mermaid / ``` code fences the model often wraps around it
-    //  - convert literal \n (two chars) into real newlines
-    //    (models sometimes emit escaped strings instead of raw text)
+    // Clean the content before handing to mermaid. Models often
+    // emit a single-line blob wrapped in code fences with statements
+    // mashed together by spaces; mermaid needs one statement per line.
     let _src = String(art.content || "").trim();
-    _src = _src.replace(/^```(?:mermaid)?\s*\n?/i, "").replace(/\n?```\s*$/, "");
+    // 1. Strip an opening "mermaid" language tag or "```mermaid" fence.
+    _src = _src.replace(/^```(?:mermaid)?\s*/i, "").replace(/```\s*$/, "");
+    _src = _src.replace(/^mermaid\s+/i, "");
+    // 2. Inside a single-line blob, split diagram-header + statements.
+    if (!/\n/.test(_src)) {
+      // Header (flowchart TD / graph LR / classDiagram / …) on its own line.
+      _src = _src.replace(
+        /^(flowchart\s+\w+|graph\s+\w+|classDiagram|sequenceDiagram|stateDiagram-v2|stateDiagram|erDiagram|gantt|pie|journey|mindmap|timeline|gitGraph)\s+/i,
+        "$1\n"
+      );
+      // Statement separator: a closing ] ) } " OR a bare identifier
+      // (after `| label | B`-style edge labels) followed by whitespace
+      // + new identifier + arrow.
+      _src = _src.replace(
+        /([\]\)\}\"])\s+([A-Za-z_]\w*)\s*(-->|---|==>|-\.->|-\.\.->|o--|<-->|<--)/g,
+        "$1\n$2 $3"
+      );
+      // Bare-node target followed by a new statement:
+      // `|Changes Requested| B E --> F`  →  `|Changes Requested| B\nE --> F`
+      _src = _src.replace(
+        /(\|[^|]+\|\s*\w+)\s+(\w+\s*(?:-->|---|==>|-\.->))/g,
+        "$1\n$2"
+      );
+      _src = _src.replace(/\b(subgraph\s+\w+)/g, "\n$1");
+      _src = _src.replace(/\b(end)\b/g, "\n$1\n");
+    }
+    // 3. Unwrap literal \\n ONLY inside already-multiline content —
+    //    inside labels they may have meant real line breaks or the
+    //    mermaid <br/> idiom. Keep it minimal: replace \\n between
+    //    a word char and a word char (i.e. inside a label) with a
+    //    real newline, since mermaid 10 accepts newlines inside "...".
     _src = _src.replace(/\\n/g, "\n");
     art = { ...art, content: _src };
     const iframe = document.createElement('iframe');
