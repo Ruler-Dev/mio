@@ -1132,6 +1132,46 @@ async def flow_run_events(run_id: str):
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
+# --- Daily Note --------------------------------------------------
+
+def _journal_path(date_str: str | None = None) -> Path:
+    import datetime as _dt
+    d = date_str or _dt.date.today().isoformat()
+    p = Path.home() / ".mio" / "journal" / f"{d}.md"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+@router.get("/api/journal/today")
+async def journal_today():
+    p = _journal_path()
+    content = p.read_text() if p.exists() else ""
+    # Pull yesterday's tail (last 600 chars) so a "today + yesterday"
+    # view feels continuous.
+    import datetime as _dt
+    yesterday_date = (_dt.date.today() - _dt.timedelta(days=1)).isoformat()
+    yp = _journal_path(yesterday_date)
+    yesterday_tail = ""
+    if yp.exists():
+        ytext = yp.read_text()
+        yesterday_tail = ytext[-600:] if len(ytext) > 600 else ytext
+    return {
+        "date":             _dt.date.today().isoformat(),
+        "path":             str(p),
+        "content":          content,
+        "yesterday_date":   yesterday_date,
+        "yesterday_tail":   yesterday_tail,
+    }
+
+
+@router.post("/api/journal/today")
+async def journal_save(body: dict):
+    p = _journal_path()
+    content = (body or {}).get("content", "")
+    p.write_text(content)
+    return {"ok": True, "path": str(p), "size": len(content.encode())}
+
+
 @router.post("/api/reveal")
 async def reveal_in_finder(body: dict):
     """Open a local path in the user's file browser (Finder on macOS)."""
