@@ -596,6 +596,130 @@ async def upload_attachment(file: UploadFile = File(...)):
     return result
 
 
+# --- Browser-extension ingest: stash web content into Mio ---
+@router.post("/api/ingest")
+async def ingest_from_browser(body: dict):
+    """Receive a payload from the Mio browser extension.
+
+    Expected JSON body:
+        {
+          "url":       "https://…",            // required
+          "title":     "Page title",           // optional
+          "text":      "readable plain text",  // required (readability-extracted)
+          "html":      "<article>…</article>",  // optional raw HTML
+          "selection": "highlighted text only",// optional
+          "tags":      ["optional", "tags"],   // optional
+          "target":    "rag"|"attach"|"chat"   // how Mio should handle it
+        }
+
+    Saves the document under ~/.mio/ingest/ as a timestamped markdown file,
+    adds it to the local RAG index (if SQLite FTS5 is initialised), and
+    returns { id, path, summary } so the extension can link to it and the
+    chat UI can @-mention it.
+    """
+    import datetime as _dt
+    import hashlib
+    import json as _json
+    from pathlib import Path as _P
+
+    url = (body or {}).get("url") or ""
+    if not url:
+        return {"error": "url required"}
+    title = (body.get("title") or "").strip() or url
+    selection = (body.get("selection") or "").strip()
+    text = (body.get("text") or "").strip()
+    effective_text = selection or text
+    if not effective_text:
+        return {"error": "text or selection required"}
+
+    tags = body.get("tags") or []
+    target = (body.get("target") or "rag").strip().lower()
+
+    root = _P.home() / ".mio" / "ingest"
+    root.mkdir(parents=True, exist_ok=True)
+    stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    slug = hashlib.sha1(url.encode()).hexdigest()[:8]
+    md_path = root / f"{stamp}-{slug}.md"
+
+    frontmatter = (
+        "---\n"
+        f"title: {title!r}\n"
+        f"source: {url}\n"
+        f"fetched: {_dt.datetime.now().isoformat(timespec='seconds')}\n"
+        f"tags: {tags}\n"
+        f"selection_only: {bool(selection)}\n"
+        "---\n\n"
+    )
+    md_path.write_text(frontmatter + f"# {title}\n\n" + effective_text)
+
+    summary = effective_text[:280].replace("\n", " ")
+    doc_id = f"{stamp}-{slug}"
+
+    # Add to RAG index if available
+    indexed = False
+    if target in ("rag", ""):
+        try:
+            from mio.webui.skills_rag import index_folder
+            index_folder(str(root))
+            indexed = True
+        except Exception:
+            pass
+
+    return {
+        "id":       doc_id,
+        "path":     str(md_path),
+        "url":      url,
+        "title":    title,
+        "summary":  summary,
+        "chars":    len(effective_text),
+        "tags":     tags,
+        "indexed":  indexed,
+        "target":   target,
+    }
+
+
+@router.get("/api/ingest")
+async def list_ingested(limit: int = 50):
+    """List everything the browser extension has stashed, newest first."""
+    from pathlib import Path as _P
+    import re as _re
+    root = _P.home() / ".mio" / "ingest"
+    if not root.exists():
+        return {"items": []}
+    items = []
+    for p in sorted(root.glob("*.md"), reverse=True)[:limit]:
+        head = p.read_text()[:2048]
+        title = url = ""
+        m = _re.search(r"^title:\s*['\"]?(.*?)['\"]?$", head, _re.MULTILINE)
+        if m: title = m.group(1)
+        m = _re.search(r"^source:\s*(.*?)$", head, _re.MULTILINE)
+        if m: url = m.group(1)
+        items.append({
+            "id":    p.stem,
+            "path":  str(p),
+            "title": title or p.stem,
+            "url":   url,
+            "size":  p.stat().st_size,
+            "mtime": p.stat().st_mtime,
+        })
+    return {"items": items}
+
+
+@router.delete("/api/ingest/{doc_id}")
+async def delete_ingested(doc_id: str):
+    """Remove a stashed ingest file (and leave the RAG index to self-heal
+    on next re-index — cheap)."""
+    from pathlib import Path as _P
+    root = _P.home() / ".mio" / "ingest"
+    # Prevent path traversal
+    safe = doc_id.replace("/", "_").replace("..", "_")
+    target = root / f"{safe}.md"
+    if target.exists() and target.is_file() and target.resolve().is_relative_to(root.resolve()):
+        target.unlink()
+        return {"deleted": True, "id": doc_id}
+    return {"deleted": False, "error": "not found"}
+
+
 # --- Global search across saved sessions ---
 @router.get("/api/search")
 async def global_search(q: str, limit: int = 30):

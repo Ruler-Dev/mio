@@ -1,0 +1,90 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Mio Clip</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --fg: #e8e9ec;
+      --muted: #8a8f98;
+      --accent: #7aa2f7;
+      --border: #252932;
+      --card: #171a21;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 16px;
+      min-width: 320px;
+      font-family: -apple-system, "SF Pro Text", system-ui, sans-serif;
+      font-size: 13px;
+      background: var(--bg);
+      color: var(--fg);
+    }
+    h1 {
+      margin: 0 0 4px;
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+    .sub { color: var(--muted); font-size: 12px; margin-bottom: 16px; }
+    .row { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+    label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+    input {
+      width: 100%;
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: var(--fg);
+      font-size: 13px;
+      font-family: inherit;
+    }
+    input:focus { outline: none; border-color: var(--accent); }
+    .btn-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 4px; }
+    button {
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: var(--fg);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: border-color 120ms ease, background 120ms ease;
+    }
+    button:hover { border-color: var(--accent); background: #1d212a; }
+    button.primary { background: var(--accent); color: #0f1115; border-color: var(--accent); }
+    button.primary:hover { background: #9ab8ff; }
+    .status { min-height: 16px; font-size: 12px; color: var(--muted); margin-top: 10px; }
+    .status.ok { color: #7fd07f; }
+    .status.err { color: #f47b7b; }
+    .endpoint { font-size: 11px; color: var(--muted); margin-top: 14px; }
+    .endpoint input { font-size: 11px; padding: 6px 8px; margin-top: 4px; }
+  </style>
+</head>
+<body>
+  <h1>Mio Clip</h1>
+  <div class="sub">Send this page into your local Mio stack.</div>
+
+  <div class="row">
+    <label for="tags">Tags (comma-separated, optional)</label>
+    <input id="tags" type="text" placeholder="research, agents, ui" />
+  </div>
+
+  <div class="btn-row">
+    <button id="clip-selection">Selection only</button>
+    <button id="clip-page" class="primary">Whole page</button>
+  </div>
+
+  <div id="status" class="status"></div>
+
+  <div class="endpoint">
+    <label for="endpoint">Mio endpoint</label>
+    <input id="endpoint" type="text" placeholder="http://localhost:9090/ui/api/ingest" />
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
