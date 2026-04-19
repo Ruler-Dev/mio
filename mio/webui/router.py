@@ -1196,6 +1196,24 @@ async def knowledge_graph():
     return {"nodes": nodes, "edges": edges}
 
 
+# --- Scratchpad --------------------------------------------------
+
+@router.get("/api/scratchpad")
+async def scratchpad_get():
+    p = Path.home() / ".mio" / "scratchpad.md"
+    if not p.exists():
+        return {"content": ""}
+    return {"content": p.read_text(), "path": str(p)}
+
+
+@router.post("/api/scratchpad")
+async def scratchpad_set(body: dict):
+    p = Path.home() / ".mio" / "scratchpad.md"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text((body or {}).get("content", ""))
+    return {"ok": True, "size": p.stat().st_size}
+
+
 # --- Daily Note --------------------------------------------------
 
 def _journal_path(date_str: str | None = None) -> Path:

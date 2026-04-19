@@ -3681,3 +3681,80 @@ body.focus-mode .input-area { max-width: 720px; }
   z-index: 10000;
   animation: pop-in 180ms ease;
 }
+
+/* ===== Scratchpad ======================================= */
+.mio-pad {
+  position: fixed;
+  right: 24px;
+  bottom: 90px; /* above sovereignty bar + voice fab */
+  width: 400px;
+  max-width: calc(100vw - 48px);
+  height: 480px;
+  max-height: calc(100vh - 140px);
+  background: var(--bg-page);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 16px 40px rgba(0,0,0,0.22);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  z-index: 500;
+  animation: pop-in 180ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.mio-pad header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-sidebar);
+  font-size: 12px;
+}
+.mio-pad header strong { font-weight: 600; }
+.mio-pad header .muted {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.mio-pad header code {
+  background: var(--bg-page);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 10px;
+}
+.mio-pad header button {
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-page);
+  color: var(--text-secondary);
+  padding: 3px 8px;
+  font-size: 11px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.mio-pad header button:hover { color: var(--text-primary); border-color: var(--border); }
+.mio-pad-src {
+  flex: 1;
+  border: 0;
+  background: var(--bg-page);
+  color: var(--text-primary);
+  padding: 12px 14px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.6;
+  resize: none;
+  outline: none;
+}
+.mio-pad-preview {
+  flex: 1;
+  padding: 12px 16px;
+  overflow: auto;
+  font-size: 13px;
+  line-height: 1.6;
+  background: var(--bg-sidebar);
+}
+.mio-pad footer {
+  padding: 5px 12px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-sidebar);
+  font-size: 11px;
+  color: var(--text-muted);
+}
