@@ -2233,14 +2233,26 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
   }
 
   function extractArtifact(text) {
-    // Grab the contents of the first <antArtifact …>…</antArtifact>.
-    // For the Blender kind we repackage the Python code as a tiny HTML
-    // viewer that shows the code + a "Send to Blender" button (which
-    // calls the blender_exec skill).
+    // Preferred shape: <antArtifact …>…</antArtifact>
+    let attrs = "", body = null;
     const m = text.match(/<antArtifact([^>]*)>([\s\S]*?)<\/antArtifact>/);
-    if (!m) return null;
-    const attrs = m[1] || "";
-    const body = m[2].trim();
+    if (m) {
+      attrs = m[1] || "";
+      body  = m[2].trim();
+    } else {
+      // Fallback 1: ```html … ``` / ```HTML … ``` code fence.
+      const fence = text.match(/```(?:html|HTML|xml|svg)?\s*\n([\s\S]*?)\n```/);
+      if (fence) body = fence[1].trim();
+      // Fallback 2: a bare <!doctype html>…</html> or <html>…</html>.
+      if (!body) {
+        const html = text.match(/<!doctype html[\s\S]*?<\/html>/i)
+                  || text.match(/<html[\s\S]*?<\/html>/i);
+        if (html) body = html[0].trim();
+      }
+    }
+    if (!body) return null;
+
+    // Blender kind: repackage python code in a mini viewer.
     if (/type\s*=\s*"application\/vnd\.pimio\.blender"/i.test(attrs) ||
         (state._kind === "blender")) {
       return buildBlenderViewer(body);
