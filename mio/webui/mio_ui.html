@@ -2717,6 +2717,9 @@ function _normalizeArtifactType(t) {
     'application/vnd.ant.revealjs': 'application/vnd.pimio.revealjs',
     'application/vnd.ant.slides':   'application/vnd.pimio.revealjs',
     'application/vnd.ant.timeline': 'application/vnd.pimio.timeline',
+    // Mermaid: canonical in this codebase is vnd.ant.mermaid (the
+    // mermaid renderer lives under that key); remap pimio variant.
+    'application/vnd.pimio.mermaid': 'application/vnd.ant.mermaid',
     // Backward compat variations
     'text/x-threejs':               'application/vnd.pimio.threejs',
     'application/javascript+threejs': 'application/vnd.pimio.threejs',
@@ -2822,6 +2825,14 @@ function renderArtifactPreview(body, art) {
     return;
   }
   if (art.type === 'application/vnd.ant.mermaid') {
+    // Clean the content before handing to mermaid:
+    //  - strip ```mermaid / ``` code fences the model often wraps around it
+    //  - convert literal \n (two chars) into real newlines
+    //    (models sometimes emit escaped strings instead of raw text)
+    let _src = String(art.content || "").trim();
+    _src = _src.replace(/^```(?:mermaid)?\s*\n?/i, "").replace(/\n?```\s*$/, "");
+    _src = _src.replace(/\\n/g, "\n");
+    art = { ...art, content: _src };
     const iframe = document.createElement('iframe');
     iframe.className = 'artifact-iframe';
     iframe.sandbox = 'allow-scripts';
