@@ -2373,6 +2373,21 @@ function cmdFilter() {
                      desc: artifactTypeLabel(a.type), run: () => { closeCmd(); openArtifact(a.id); }});
     }
   });
+  // Fallback: unmatched query always gets a "Ask Mio" affordance so
+  // ⌘K is never a dead-end (Raycast pattern).
+  if (q && !cmdItems.length) {
+    cmdItems.push({
+      kind: 'cmd', title: `Ask Mio: "${q}"`,
+      desc: 'Send this as a chat message',
+      run: () => {
+        closeCmd();
+        const input = document.getElementById('inputArea');
+        if (input) { input.value = q; input.focus();
+          if (typeof sendMessage === 'function') sendMessage();
+        }
+      },
+    });
+  }
   cmdSel = 0;
   renderCmdList();
 }
