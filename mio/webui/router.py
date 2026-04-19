@@ -1034,6 +1034,65 @@ async def design_export(body: dict):
     )
 
 
+@router.post("/api/reveal")
+async def reveal_in_finder(body: dict):
+    """Open a local path in the user's file browser (Finder on macOS)."""
+    import subprocess, sys
+    from pathlib import Path as _P
+    path_str = (body or {}).get("path", "").strip() or "~/.mio"
+    p = _P(path_str).expanduser()
+    p.mkdir(parents=True, exist_ok=True)
+    try:
+        if sys.platform == "darwin":
+            subprocess.run(["open", str(p)], check=False)
+        elif sys.platform == "win32":
+            subprocess.run(["explorer", str(p)], check=False)
+        else:
+            subprocess.run(["xdg-open", str(p)], check=False)
+        return {"ok": True, "path": str(p)}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@router.post("/api/export-workspace")
+async def export_workspace():
+    """Zip everything under ~/.mio into a single archive and stream it back.
+    Skips large caches (image-cache/, web-cache/, files-cache/) — the user
+    can re-download those. Includes sessions, projects, memory, journal,
+    todos/habits SQLite dbs, ingest, obsidian config, rag.sqlite.
+    """
+    import io, zipfile as _zip
+    from pathlib import Path as _P
+    from fastapi.responses import StreamingResponse
+
+    root = _P.home() / ".mio"
+    if not root.exists():
+        return {"error": "no ~/.mio yet"}
+
+    SKIP_DIRS = {"image-cache", "web-cache", "files-cache", "__pycache__"}
+
+    buf = io.BytesIO()
+    with _zip.ZipFile(buf, "w", compression=_zip.ZIP_DEFLATED) as z:
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(root)
+            if any(part in SKIP_DIRS for part in rel.parts):
+                continue
+            try:
+                z.write(path, arcname=str(rel))
+            except Exception:
+                continue
+    buf.seek(0)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    filename = f"mio-workspace-{stamp}.zip"
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.post("/api/obsidian/reindex")
 async def obsidian_reindex():
     """Full-text index the vault into the local RAG store so `@note:`
