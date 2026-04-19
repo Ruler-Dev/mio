@@ -507,10 +507,27 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
     wrap.innerHTML = state.history.map((m, i) => `
       <div class="design-msg design-msg-${m.role}">
         <div class="design-msg-role">${m.role}</div>
-        <div class="design-msg-text">${escapeHtml(m.text || "")}</div>
+        <div class="design-msg-text">${renderMsgMd(m.text || "")}</div>
       </div>
     `).join("");
     wrap.scrollTop = wrap.scrollHeight;
+    // Let Prism colourise any fenced code blocks.
+    try { window.Prism?.highlightAllUnder?.(wrap); } catch {}
+  }
+
+  function renderMsgMd(text) {
+    // Render the chat-side message as markdown so fenced blocks
+    // (```html…```) turn into real code boxes instead of a wall of
+    // escaped text. Falls back to escaped text if marked.js isn't
+    // loaded yet.
+    if (!window.marked?.parse) return escapeHtml(text);
+    try {
+      // Force escape of raw HTML so the artifact body doesn't render
+      // as live DOM inside the sidebar.
+      return window.marked.parse(text, { breaks: true, gfm: true, mangle: false, headerIds: false });
+    } catch {
+      return escapeHtml(text);
+    }
   }
 
   function renderVersions(host) {
@@ -2220,22 +2237,47 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
     return full;
   }
 
-  // Shorten the streamed body for preview in the chat log: strip the
-  // <antArtifact> block (it's massive) and replace with a compact tag
-  // so the user sees what's streaming without the whole HTML scrolling.
+  // Shorten the streamed body for preview in the chat log: when the
+  // model is emitting the big HTML/code body, collapse it to a short
+  // "📄 …writing artifact…" marker so the sidebar doesn't vomit
+  // thousands of tokens of code. Handles three emission styles:
+  //   1. <antArtifact …>…</antArtifact>
+  //   2. ```html / ```HTML / ```xml / ```svg / ```python  code fence
+  //   3. a bare <!doctype html> / <html> document body
   function streamPreview(full) {
     let t = full;
-    const open = t.indexOf("<antArtifact");
-    if (open >= 0) {
-      const close = t.indexOf("</antArtifact>", open);
-      if (close >= 0) {
-        t = t.slice(0, open) + "📄 …artifact ready…" + t.slice(close + "</antArtifact>".length);
+    // 1. <antArtifact>
+    const aOpen = t.indexOf("<antArtifact");
+    if (aOpen >= 0) {
+      const aClose = t.indexOf("</antArtifact>", aOpen);
+      if (aClose >= 0) {
+        t = t.slice(0, aOpen) + "📄 …artifact ready…" + t.slice(aClose + "</antArtifact>".length);
       } else {
-        t = t.slice(0, open) + "📄 …writing artifact…";
+        return t.slice(0, aOpen).trim() + " 📄 …writing artifact…";
       }
     }
-    // Keep the tail (latest words) rather than the head — more relevant
-    // while streaming. Cap at 600 chars.
+    // 2. Fenced code block (html / xml / svg / python / plain ``` )
+    const fenceOpen = t.search(/```(?:html|HTML|xml|svg|python|py|js|javascript|jsx|tsx)?/);
+    if (fenceOpen >= 0) {
+      // Look for the closing fence after it
+      const after = t.indexOf("\n```", fenceOpen + 3);
+      if (after >= 0) {
+        t = t.slice(0, fenceOpen) + "📄 …artifact ready…" + t.slice(after + 4);
+      } else {
+        return t.slice(0, fenceOpen).trim() + " 📄 …writing artifact…";
+      }
+    }
+    // 3. Bare <!doctype html> or <html> in the middle of prose
+    const docStart = t.search(/<!doctype\s+html|<html\b/i);
+    if (docStart >= 0) {
+      const docEnd = t.toLowerCase().indexOf("</html>", docStart);
+      if (docEnd >= 0) {
+        t = t.slice(0, docStart) + "📄 …artifact ready…" + t.slice(docEnd + "</html>".length);
+      } else {
+        return t.slice(0, docStart).trim() + " 📄 …writing artifact…";
+      }
+    }
+    // Keep the tail (latest words) rather than the head.
     if (t.length > 600) t = "…" + t.slice(t.length - 600);
     return t;
   }

@@ -4110,3 +4110,39 @@ html.mio-focus body { background: var(--bg-page); }
   border-color: var(--accent);
   transform: scale(1.08);
 }
+
+/* ===== Design Mode: chat message markdown ============== */
+.design-msg-text pre {
+  margin: 6px 0;
+  padding: 8px 10px;
+  background: #0d1117;
+  color: #c9d1d9;
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.5;
+  overflow: auto;
+  max-height: 180px;
+  white-space: pre;
+}
+.design-msg-text pre code {
+  background: transparent !important;
+  padding: 0 !important;
+  font-size: inherit;
+  color: inherit;
+  display: block;
+  min-width: max-content;
+}
+.design-msg-text code:not(pre code) {
+  background: var(--bg-page);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.design-msg-text p { margin: 4px 0; }
+.design-msg-text ul, .design-msg-text ol { margin: 4px 0; padding-left: 20px; }
+.design-msg-text h1, .design-msg-text h2, .design-msg-text h3 {
+  font-size: 13px;
+  margin: 6px 0 2px;
+}
