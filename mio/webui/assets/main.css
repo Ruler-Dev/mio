@@ -2206,3 +2206,33 @@ body.focus-mode .input-area { max-width: 720px; }
 /* Center the whole device inside the canvas, allow scroll when larger */
 .design-canvas { padding: 24px; }
 .design-sizer { transition: width 180ms ease, height 180ms ease; }
+
+/* ===== Design Mode: token presets ========================= */
+.design-token-presets,
+.design-token-presets-bar {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  padding: 8px 10px 6px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.design-preset-chip {
+  padding: 3px 8px;
+  font-size: 10px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-sidebar);
+  color: var(--text-secondary);
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 120ms ease, color 120ms ease, background 120ms ease;
+}
+.design-preset-chip:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.design-preset-chip.suggested {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-subtle);
+}

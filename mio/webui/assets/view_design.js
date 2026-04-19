@@ -910,6 +910,135 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
     });
   }
 
+  // --- Platform token presets ------------------------------------------
+  // Click any preset to seed the current design's token overrides with
+  // a known-good palette for that platform. Overrides apply live via
+  // the token panel's existing setProperty pipeline, and "Bake into
+  // prompt" carries them into the next generation.
+
+  const TOKEN_PRESETS = {
+    "iOS System Light": {
+      "--system-blue":              "#007AFF",
+      "--system-green":              "#34C759",
+      "--system-indigo":              "#5856D6",
+      "--system-orange":              "#FF9500",
+      "--system-pink":                "#FF2D55",
+      "--system-red":                 "#FF3B30",
+      "--system-background":          "#FFFFFF",
+      "--secondary-system-background": "#F2F2F7",
+      "--label":                      "#000000",
+      "--secondary-label":            "#3C3C4399",
+      "--separator":                  "#3C3C4349",
+      "--radius-card":                "12px",
+      "--radius-sheet":               "14px",
+    },
+    "iOS System Dark": {
+      "--system-blue":              "#0A84FF",
+      "--system-green":              "#30D158",
+      "--system-indigo":              "#5E5CE6",
+      "--system-orange":              "#FF9F0A",
+      "--system-pink":                "#FF375F",
+      "--system-red":                 "#FF453A",
+      "--system-background":          "#000000",
+      "--secondary-system-background": "#1C1C1E",
+      "--label":                      "#FFFFFF",
+      "--secondary-label":            "#EBEBF599",
+      "--separator":                  "#54545899",
+      "--radius-card":                "12px",
+      "--radius-sheet":               "14px",
+    },
+    "Material 3 Light": {
+      "--md-primary":              "#6750A4",
+      "--md-on-primary":            "#FFFFFF",
+      "--md-primary-container":     "#EADDFF",
+      "--md-on-primary-container":  "#21005D",
+      "--md-secondary":             "#625B71",
+      "--md-tertiary":              "#7D5260",
+      "--md-surface":               "#FFFBFE",
+      "--md-on-surface":            "#1C1B1F",
+      "--md-surface-variant":       "#E7E0EC",
+      "--md-outline":               "#79747E",
+      "--md-background":            "#FFFBFE",
+      "--md-error":                 "#B3261E",
+      "--md-shape-sm":              "4px",
+      "--md-shape-md":              "12px",
+      "--md-shape-lg":              "16px",
+      "--md-shape-xl":              "28px",
+    },
+    "Material 3 Dark": {
+      "--md-primary":              "#D0BCFF",
+      "--md-on-primary":            "#381E72",
+      "--md-primary-container":     "#4F378B",
+      "--md-on-primary-container":  "#EADDFF",
+      "--md-secondary":             "#CCC2DC",
+      "--md-tertiary":              "#EFB8C8",
+      "--md-surface":               "#1C1B1F",
+      "--md-on-surface":            "#E6E1E5",
+      "--md-surface-variant":       "#49454F",
+      "--md-outline":               "#938F99",
+      "--md-background":            "#1C1B1F",
+      "--md-error":                 "#F2B8B5",
+      "--md-shape-sm":              "4px",
+      "--md-shape-md":              "12px",
+      "--md-shape-lg":              "16px",
+      "--md-shape-xl":              "28px",
+    },
+    "Tailwind Slate": {
+      "--color-accent":   "#0ea5e9",
+      "--color-bg":       "#ffffff",
+      "--color-surface":  "#f8fafc",
+      "--color-text":     "#0f172a",
+      "--color-muted":    "#475569",
+      "--color-border":   "#e2e8f0",
+      "--radius-sm":      "4px",
+      "--radius-md":      "8px",
+      "--radius-lg":      "12px",
+    },
+    "Tailwind Zinc Dark": {
+      "--color-accent":   "#f472b6",
+      "--color-bg":       "#09090b",
+      "--color-surface":  "#18181b",
+      "--color-text":     "#fafafa",
+      "--color-muted":    "#a1a1aa",
+      "--color-border":   "#27272a",
+      "--radius-sm":      "4px",
+      "--radius-md":      "8px",
+      "--radius-lg":      "12px",
+    },
+  };
+
+  function renderTokenPresets(host, wrap) {
+    if (!wrap) return;
+    const platform = state._platform || "web";
+    const suggested = new Set();
+    if (platform === "ios" || platform === "ipad") {
+      suggested.add("iOS System Light"); suggested.add("iOS System Dark");
+    } else if (platform === "android") {
+      suggested.add("Material 3 Light"); suggested.add("Material 3 Dark");
+    } else {
+      suggested.add("Tailwind Slate"); suggested.add("Tailwind Zinc Dark");
+    }
+    const names = Object.keys(TOKEN_PRESETS).sort(
+      (a, b) => (suggested.has(b) - suggested.has(a)));
+    wrap.innerHTML = names.map((n) =>
+      `<button class="design-preset-chip${suggested.has(n) ? " suggested" : ""}" data-preset="${escapeAttr(n)}">${escapeHtml(n)}</button>`
+    ).join("");
+    wrap.querySelectorAll(".design-preset-chip").forEach((btn) => {
+      btn.addEventListener("click", () => applyTokenPreset(host, btn.dataset.preset));
+    });
+  }
+
+  function applyTokenPreset(host, name) {
+    const preset = TOKEN_PRESETS[name];
+    if (!preset) return;
+    state._tokenOverrides = { ...(state._tokenOverrides || {}), ...preset };
+    saveSession();
+    for (const [k, v] of Object.entries(preset)) applyTokenOverride(host, k, v);
+    // Re-open the tokens panel so the user sees the new rows
+    const panel = host.querySelector(".design-tokens-panel");
+    if (panel) { panel.remove(); toggleTokens(host); }
+  }
+
   // --- Design tokens panel ---------------------------------------------
   // Pulls any --var: value declaration from the active version's HTML,
   // lets the user tweak them with live swatches/sliders, and posts a
@@ -946,7 +1075,15 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
     if (existing) { existing.remove(); return; }
     const v = state.versions[state.activeVersion];
     if (!v) return;
-    const tokens = extractTokens(v.html);
+    const fromHtml = extractTokens(v.html);
+    // Also include any tokens the user has seeded via a preset but that
+    // the HTML doesn't declare yet, so they appear as editable rows.
+    const overrides = state._tokenOverrides || {};
+    const seen = new Set(fromHtml.map((t) => t.name));
+    const extras = Object.entries(overrides)
+      .filter(([name]) => !seen.has(name))
+      .map(([name, value]) => ({ name, value }));
+    const tokens = fromHtml.concat(extras);
     const panel = document.createElement("aside");
     panel.className = "design-tokens-panel";
     if (!tokens.length) {
@@ -954,9 +1091,12 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
         <header><strong>Design tokens</strong><button data-action="close" aria-label="Close">×</button></header>
         <div class="design-tokens-empty">
           <p>No CSS custom properties (<code>--name: value</code>) found in this design.</p>
-          <p class="muted">Ask the model to "define your colors as CSS variables" to unlock live tweaking.</p>
+          <p class="muted">Seed a token preset to start tweaking:</p>
+          <div class="design-token-presets" id="design-token-presets"></div>
+          <p class="muted" style="margin-top:14px">…or ask the model to "define colors as CSS variables" and regenerate.</p>
         </div>
       `;
+      renderTokenPresets(host, panel.querySelector("#design-token-presets"));
     } else {
       panel.innerHTML = `
         <header>
@@ -965,12 +1105,14 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
           <div style="flex:1"></div>
           <button data-action="close" aria-label="Close">×</button>
         </header>
+        <div class="design-token-presets-bar" id="design-token-presets-bar"></div>
         <div class="design-tokens-list" id="design-tokens-list"></div>
         <footer>
           <button data-action="reset">Reset</button>
           <button data-action="bake" title="Include these overrides in the next Generate so they persist">Bake into prompt</button>
         </footer>
       `;
+      renderTokenPresets(host, panel.querySelector("#design-token-presets-bar"));
     }
     host.querySelector(".design-right").appendChild(panel);
     panel.querySelector('[data-action="close"]').addEventListener("click", () => panel.remove());
