@@ -2870,12 +2870,15 @@ function renderArtifactPreview(body, art) {
     const payload = safeJSONForScript(art.content);
     const src = `<!doctype html><html><head><style>
 body{margin:0;padding:20px;background:#fff;font-family:-apple-system,sans-serif;color:#333}
+#out{display:block}
 #err{display:none;padding:18px;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;color:#7f1d1d;font-size:13px;line-height:1.5}
 #err h3{margin:0 0 6px;font-size:14px}
 #err pre{background:#fff;border:1px solid #fecaca;border-radius:6px;padding:10px;margin:10px 0 0;white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:11px;color:#333;max-height:60vh;overflow:auto}
 #err button{margin-top:8px;padding:5px 10px;background:#dc2626;color:#fff;border:0;border-radius:5px;font-size:11px;cursor:pointer}
+/* Mermaid v10 paints a bomb SVG into the DOM on failure — nuke it. */
+.error-icon, .error-text, [id^="mermaid-"] { display:none !important; }
 </style></head><body>
-<div id="m" class="mermaid"></div>
+<div id="out"></div>
 <div id="err"><h3>Mermaid couldn't parse this diagram</h3>
 <div id="why">…</div>
 <pre id="src"></pre>
@@ -2883,19 +2886,28 @@ body{margin:0;padding:20px;background:#fff;font-family:-apple-system,sans-serif;
 <script type="module">
 import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
 const src = ${payload};
-mermaid.initialize({startOnLoad:false, theme:'default', securityLevel:'loose'});
-try {
-  await mermaid.parse(src);
-  const { svg } = await mermaid.render('g', src);
-  document.getElementById('m').innerHTML = svg;
-} catch (e) {
-  document.getElementById('m').style.display = 'none';
+mermaid.initialize({startOnLoad:false, theme:'default', securityLevel:'loose', suppressErrorRendering:true});
+function showErr(msg) {
+  document.getElementById('out').style.display = 'none';
+  // Remove any mermaid-injected bomb/error DOM that slipped through.
+  document.querySelectorAll('svg[id^="mermaid-"], .error-icon, .error-text').forEach(n => n.remove());
   document.getElementById('err').style.display = 'block';
-  document.getElementById('why').textContent = String(e && (e.message || e)).slice(0, 400);
+  document.getElementById('why').textContent = String(msg || "").slice(0, 400);
   document.getElementById('src').textContent = src;
   document.getElementById('copy').addEventListener('click', async () => {
     try { await navigator.clipboard.writeText(src); } catch (_) {}
   });
+}
+try {
+  // Parse first — throws on syntax error without painting the bomb.
+  let ok = true;
+  try { await mermaid.parse(src); } catch (pe) { ok = false; showErr(pe && (pe.message || pe)); }
+  if (ok) {
+    const { svg } = await mermaid.render('mio-mermaid-' + Date.now(), src);
+    document.getElementById('out').innerHTML = svg;
+  }
+} catch (e) {
+  showErr(e && (e.message || e));
 }
 <\/script></body></html>`;
     iframe.srcdoc = src;
