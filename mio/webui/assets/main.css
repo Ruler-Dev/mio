@@ -734,3 +734,183 @@ body.focus-mode .input-area { max-width: 720px; }
   border-radius: 3px;
   font-size: 12px;
 }
+
+/* ===== Workspaces view ===================================== */
+.workspaces-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 14px;
+}
+.ws-card {
+  --ws-accent: #3b82f6;
+  background: var(--bg-sidebar);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition: border-color 140ms ease, transform 140ms ease;
+}
+.ws-card:hover {
+  border-color: var(--border-strong);
+  transform: translateY(-1px);
+}
+.ws-card-stripe {
+  height: 4px;
+  background: var(--ws-accent);
+}
+.ws-card-body {
+  padding: 14px 14px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+}
+.ws-card-icon {
+  font-size: 22px;
+  line-height: 1;
+  margin-bottom: 6px;
+  color: var(--ws-accent);
+}
+.ws-card-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+.ws-card-desc {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+  min-height: 2.9em;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.ws-card-meta {
+  margin-top: auto;
+  font-size: 11px;
+  color: var(--text-muted);
+  display: flex;
+  gap: 5px;
+}
+.ws-card-actions {
+  display: flex;
+  gap: 4px;
+  padding: 10px 10px 10px;
+  border-top: 1px solid var(--border-subtle);
+}
+.ws-card-actions button {
+  flex: 1;
+  padding: 6px 8px;
+  font-size: 11px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-primary);
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.ws-card-actions button:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-subtle);
+  color: var(--ws-accent);
+}
+.ws-card-actions button.danger:hover { color: #dc2626; }
+.ws-card-new {
+  border: 1.5px dashed var(--border);
+  background: transparent;
+  cursor: pointer;
+  min-height: 180px;
+}
+.ws-card-new:hover { border-color: var(--accent); }
+.ws-empty {
+  grid-column: 1 / -1;
+  padding: 40px 20px 10px;
+  text-align: center;
+  color: var(--text-muted);
+}
+.ws-empty h2 { margin: 0 0 6px; font-size: 15px; color: var(--text-secondary); }
+
+.ws-editor-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 5000;
+  animation: ws-fade-in 120ms ease;
+}
+@keyframes ws-fade-in { from { opacity: 0 } to { opacity: 1 } }
+.ws-editor {
+  background: var(--bg-page);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 22px 22px 18px;
+  width: min(520px, calc(100vw - 40px));
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+  box-shadow: var(--shadow-lg);
+}
+.ws-editor h2 {
+  margin: 0 0 14px;
+  font-size: 16px;
+  font-weight: 600;
+}
+.ws-editor label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+.ws-editor label > span {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.ws-editor input[type="text"],
+.ws-editor input[type="color"],
+.ws-editor textarea,
+.ws-editor select {
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-sidebar);
+  color: var(--text-primary);
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: inherit;
+  width: 100%;
+  box-sizing: border-box;
+}
+.ws-editor input[type="color"] { height: 32px; padding: 3px; }
+.ws-editor textarea { resize: vertical; min-height: 60px; }
+.ws-editor-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 10px;
+}
+.ws-editor-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+.ws-editor-actions button {
+  padding: 7px 14px;
+  border: 1px solid var(--border);
+  background: var(--bg-sidebar);
+  color: var(--text-primary);
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.ws-editor-actions button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.ws-editor-actions button.primary:hover { filter: brightness(1.05); }

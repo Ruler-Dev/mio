@@ -277,7 +277,15 @@ async def save_project(body: dict):
         "description": body.get("description", ""),
         "system_prompt": body.get("system_prompt", ""),
         "color": body.get("color", "#3b82f6"),
-        "files": body.get("files", []),  # list of filenames in ~/Downloads
+        "icon": body.get("icon", ""),           # optional emoji/icon
+        "files": body.get("files", []),          # list of filenames in ~/Downloads
+        # Optional per-workspace model / context overrides. Unset = use
+        # global defaults. The UI reads these to pre-apply a tier before
+        # sending the first message of a session in that workspace.
+        "tier": body.get("tier") or None,
+        "context_window": body.get("context_window") or None,
+        "caveman_level": body.get("caveman_level") or None,
+        "pinned_prompts": body.get("pinned_prompts", []),
         "updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     projs = [p for p in projs if p.get("id") != pid]
