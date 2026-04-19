@@ -1009,6 +1009,7 @@ from mio.webui.skills_life import (
     blender_status as _g_blender_status,
     blender_exec as _g_blender_exec,
     blender_snapshot as _g_blender_snapshot,
+    import_shadertoy as _g_import_shadertoy,
 )
 
 SKILLS["http_request"] = {
@@ -1427,6 +1428,21 @@ SKILLS["blender_exec"] = {
             "code": {"type": "string", "description": "Python code to exec inside Blender"},
         },
         "required": ["code"],
+    },
+}
+
+SKILLS["import_shadertoy"] = {
+    "function": _g_import_shadertoy,
+    "description": (
+        "Import a shader from shadertoy.com by ID (e.g. 'XsXXDn') or full URL. "
+        "Returns a self-contained WebGL2 HTML artifact that runs the original "
+        "mainImage() function with iTime / iResolution / iMouse uniforms. Use "
+        "when the user wants 'that shader I saw at shadertoy.com/view/…'."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {"id_or_url": {"type": "string", "description": "ShaderToy ID or URL"}},
+        "required": ["id_or_url"],
     },
 }
 

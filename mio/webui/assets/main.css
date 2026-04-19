@@ -2717,3 +2717,25 @@ body.focus-mode .input-area { max-width: 720px; }
   color: var(--text-secondary);
   background: var(--bg-page);
 }
+
+/* ===== Vim-G toast ==================================== */
+.mio-g-toast {
+  position: fixed;
+  bottom: 52px;
+  left: 50%;
+  transform: translateX(-50%) translateY(10px);
+  background: var(--text-primary);
+  color: var(--bg-page);
+  padding: 6px 12px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  border-radius: 6px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease, transform 120ms ease;
+  z-index: 9999;
+}
+.mio-g-toast.show {
+  opacity: 0.92;
+  transform: translateX(-50%) translateY(0);
+}

@@ -848,6 +848,87 @@ def meeting_notes(transcript: str) -> dict:
     }
 
 
+# --- ShaderToy importer ----------------------------------------------
+def import_shadertoy(id_or_url: str) -> dict:
+    """Fetch a shader from shadertoy.com by ID or URL and return it
+    wrapped in a self-contained WebGL2 HTML artifact that runs the
+    mainImage() with iTime / iResolution / iMouse uniforms."""
+    import re as _re, urllib.request as _req, json as _json
+    raw = (id_or_url or "").strip()
+    if not raw:
+        return {"skill": "import_shadertoy", "error": "id or URL required"}
+    m = _re.search(r"/view/([A-Za-z0-9]+)", raw)
+    sid = m.group(1) if m else raw
+    url = f"https://www.shadertoy.com/api/v1/shaders/{sid}?key=NtHtw7"
+    try:
+        with _req.urlopen(url, timeout=8) as r:
+            data = _json.loads(r.read())
+    except Exception as e:
+        return {"skill": "import_shadertoy", "error": f"fetch failed: {e}"}
+    shader = data.get("Shader", {}) or {}
+    info = shader.get("info", {}) or {}
+    code = ""
+    for p in shader.get("renderpass", []):
+        if p.get("type") == "image" or p.get("name", "").lower() == "image":
+            code = p.get("code", "")
+            break
+    if not code.strip():
+        return {"skill": "import_shadertoy", "error": "no image-pass code found"}
+    title  = info.get("name", "") or sid
+    author = info.get("username", "")
+    esc = code.replace("\\", "\\\\").replace("`", "\\`")
+    html = (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        f"<title>{title}</title>"
+        "<style>html,body{margin:0;background:#000;overflow:hidden;height:100%;color:#aaa;font-family:system-ui}"
+        "canvas{display:block;width:100%;height:100%}"
+        ".hud{position:absolute;left:8px;bottom:8px;font:11px/1.3 system-ui;opacity:0.65;pointer-events:none}</style>"
+        "</head><body><canvas id='c'></canvas>"
+        f"<div class='hud'>{title} — {author} · ShaderToy</div>"
+        "<script>\n"
+        "const canvas=document.getElementById('c');\n"
+        "const gl=canvas.getContext('webgl2',{antialias:false,alpha:false});\n"
+        "if(!gl)document.body.innerHTML='WebGL2 required';\n"
+        "const vs=`#version 300 es\\nin vec2 p;void main(){gl_Position=vec4(p,0,1);}`;\n"
+        f"const userCode=`// {title} — by {author} (via ShaderToy)\\n{esc}`;\n"
+        "const fs=`#version 300 es\\n"
+        "precision highp float;\\n"
+        "uniform vec3 iResolution;\\nuniform float iTime;\\nuniform vec4 iMouse;\\n"
+        "out vec4 fragColor;\\n"
+        "${userCode}\\n"
+        "void main(){mainImage(fragColor, gl_FragCoord.xy);}`;\n"
+        "function compile(t,s){const sh=gl.createShader(t);gl.shaderSource(sh,s);gl.compileShader(sh);"
+        "if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS))console.error(gl.getShaderInfoLog(sh));return sh;}\n"
+        "const prog=gl.createProgram();gl.attachShader(prog,compile(gl.VERTEX_SHADER,vs));"
+        "gl.attachShader(prog,compile(gl.FRAGMENT_SHADER,fs));gl.linkProgram(prog);gl.useProgram(prog);\n"
+        "const buf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buf);"
+        "gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);\n"
+        "const loc=gl.getAttribLocation(prog,'p');gl.enableVertexAttribArray(loc);"
+        "gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);\n"
+        "const uR=gl.getUniformLocation(prog,'iResolution'),uT=gl.getUniformLocation(prog,'iTime'),"
+        "uM=gl.getUniformLocation(prog,'iMouse');\n"
+        "let m=[0,0,0,0];canvas.addEventListener('mousemove',e=>{const r=canvas.getBoundingClientRect();"
+        "m[0]=e.clientX-r.left;m[1]=r.height-(e.clientY-r.top);});\n"
+        "function resize(){canvas.width=canvas.clientWidth*devicePixelRatio;"
+        "canvas.height=canvas.clientHeight*devicePixelRatio;gl.viewport(0,0,canvas.width,canvas.height);}\n"
+        "window.addEventListener('resize',resize);resize();\n"
+        "const t0=performance.now();\n"
+        "function frame(){gl.uniform3f(uR,canvas.width,canvas.height,1);"
+        "gl.uniform1f(uT,(performance.now()-t0)/1000);"
+        "gl.uniform4f(uM,m[0]*devicePixelRatio,m[1]*devicePixelRatio,m[2],m[3]);"
+        "gl.drawArrays(gl.TRIANGLES,0,3);requestAnimationFrame(frame);}"
+        "requestAnimationFrame(frame);\n"
+        "</script></body></html>"
+    )
+    return {
+        "skill":   "import_shadertoy",
+        "id":      info.get("id") or sid,
+        "title":   title,
+        "author":  author,
+        "artifact_html": html,
+    }
+
+
 # --- Blender bridge ---------------------------------------------------
 # Talks to the community blender-mcp addon (ahujasid/blender-mcp).
 # The addon runs a TCP JSON socket inside Blender (default localhost:9876)
