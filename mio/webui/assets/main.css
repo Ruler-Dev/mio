@@ -2527,3 +2527,193 @@ body.focus-mode .input-area { max-width: 720px; }
   border: 1px solid var(--border-subtle);
   pointer-events: none;
 }
+
+/* ===== Dashboards view ==================================== */
+.view-dashboards {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.dash-split {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  flex: 1;
+  min-height: 0;
+}
+.dash-dock {
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.dash-dock > header {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+.dash-dock > footer {
+  padding: 10px 12px;
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  gap: 6px;
+}
+.dash-dock > footer button,
+.dash-dock > footer .dash-upload {
+  flex: 1;
+  padding: 6px 10px;
+  text-align: center;
+  font-size: 11px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-page);
+  color: var(--text-primary);
+  border-radius: 5px;
+  cursor: pointer;
+}
+.dash-dock > footer .dash-upload:hover,
+.dash-dock > footer button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.dash-source-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 10px;
+}
+.dash-source {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  margin-bottom: 4px;
+  background: var(--bg-page);
+  border: 1px solid var(--border-subtle);
+}
+.dash-source > div { flex: 1; min-width: 0; }
+.dash-source-name {
+  font-weight: 500;
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dash-source-meta {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+.dash-source-del {
+  border: 0;
+  background: transparent;
+  font-size: 16px;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0 4px;
+}
+.dash-source-del:hover { color: #dc2626; }
+.dash-grid {
+  padding: 18px 20px;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  grid-auto-rows: 240px;
+  gap: 12px;
+  align-content: start;
+}
+.dash-empty {
+  grid-column: 1 / -1;
+  padding: 60px 20px;
+  text-align: center;
+  color: var(--text-muted);
+}
+.dash-empty h2 {
+  font-size: 15px;
+  color: var(--text-secondary);
+  margin: 0 0 8px;
+}
+.dash-panel {
+  background: var(--bg-sidebar);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.dash-panel header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 12px;
+  background: var(--bg-page);
+}
+.dash-panel-title { font-weight: 500; color: var(--text-primary); }
+.dash-panel-actions { display: flex; gap: 4px; }
+.dash-panel-actions button {
+  border: 0;
+  background: transparent;
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.dash-panel-actions button:hover { background: var(--bg-hover); color: var(--text-primary); }
+.dash-panel-body {
+  flex: 1;
+  padding: 10px 12px;
+  overflow: hidden;
+  position: relative;
+}
+.dash-kpi {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 10px 4px;
+}
+.dash-kpi-value {
+  font-size: 36px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--accent);
+  line-height: 1;
+}
+.dash-kpi-label {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.dash-table-wrap {
+  overflow: auto;
+  height: 100%;
+}
+.dash-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.dash-table th, .dash-table td {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border-subtle);
+  text-align: left;
+  white-space: nowrap;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dash-table th {
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: var(--bg-page);
+}
