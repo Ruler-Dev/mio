@@ -934,6 +934,106 @@ async def obsidian_write_note(body: dict):
     return {"ok": True, "path": rel, "size": len(content.encode("utf-8"))}
 
 
+@router.post("/api/design/export")
+async def design_export(body: dict):
+    """Package a Design Mode session into a downloadable zip archive.
+
+    Body: {
+        title:    str,                     # display title
+        platform: str,                     # web | ios | android | ipad
+        versions: [{n, title, html, prompt, ts, ...}],
+        active:   int,                     # index of the "final" version
+        history:  [{role, text}],          # chat history
+    }
+
+    Contents of the archive:
+        index.html                         — active version (ready to host)
+        README.md                          — prompt + version log
+        versions/v{N}-{title}.html         — every version
+        notes.md                           — machine-readable manifest
+    """
+    import io
+    import zipfile as _zip
+    import re as _re
+    from fastapi.responses import StreamingResponse
+
+    body = body or {}
+    title    = (body.get("title") or "mio-design").strip() or "mio-design"
+    platform = (body.get("platform") or "web").strip()
+    versions = body.get("versions") or []
+    active   = max(0, min(int(body.get("active") or 0), len(versions) - 1)) if versions else 0
+    history  = body.get("history") or []
+
+    safe = _re.sub(r"[^A-Za-z0-9_\-]+", "-", title).strip("-") or "mio-design"
+
+    buf = io.BytesIO()
+    with _zip.ZipFile(buf, "w", compression=_zip.ZIP_DEFLATED) as z:
+        # index.html = active version
+        if versions:
+            z.writestr("index.html", versions[active].get("html") or "")
+        # README
+        readme_lines = [
+            f"# {title}",
+            "",
+            f"Exported from **Mio** Design Mode on {time.strftime('%Y-%m-%d %H:%M')}.",
+            f"Platform: `{platform}`",
+            "",
+            "## How to use",
+            "",
+            "Open `index.html` in a browser, or drop this entire folder onto any static host",
+            "(Netlify / Cloudflare Pages / GitHub Pages). `index.html` is the final version you",
+            "picked; `versions/` has every iteration so you can diff or roll back.",
+            "",
+            "## Iteration log",
+            "",
+        ]
+        for m in history:
+            role = (m.get("role") or "").strip()
+            text = (m.get("text") or "").strip()
+            if not text:
+                continue
+            prefix = "- **You:**  " if role == "user" else "- **Mio:** "
+            readme_lines.append(prefix + text.replace("\n", " "))
+        readme_lines.extend([
+            "",
+            "## Versions",
+            "",
+            "| # | Title | Prompt |",
+            "|---|-------|--------|",
+        ])
+        for i, v in enumerate(versions):
+            t = (v.get("title") or f"v{i+1}").replace("|", "\\|")
+            p = (v.get("prompt") or "").replace("|", "\\|").replace("\n", " ")
+            active_mark = " ← exported as index.html" if i == active else ""
+            readme_lines.append(f"| {i+1} | {t}{active_mark} | {p} |")
+        z.writestr("README.md", "\n".join(readme_lines))
+
+        # Each version as its own file
+        for i, v in enumerate(versions):
+            vt = _re.sub(r"[^A-Za-z0-9_\-]+", "-", (v.get("title") or f"v{i+1}")).strip("-")[:60]
+            z.writestr(f"versions/v{i+1}-{vt}.html", v.get("html") or "")
+
+        # Machine-readable manifest
+        z.writestr("notes.md", json.dumps({
+            "title":    title,
+            "platform": platform,
+            "active":   active,
+            "versions": [
+                {"n": i + 1, "title": v.get("title"), "prompt": v.get("prompt"), "ts": v.get("ts")}
+                for i, v in enumerate(versions)
+            ],
+            "exported": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }, indent=2))
+
+    buf.seek(0)
+    filename = f"{safe}.zip"
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.post("/api/obsidian/reindex")
 async def obsidian_reindex():
     """Full-text index the vault into the local RAG store so `@note:`

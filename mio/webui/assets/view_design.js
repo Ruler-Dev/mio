@@ -174,7 +174,8 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
             <button class="btn-ghost" data-action="tokens" title="Tweak colors, radii, fonts live (no model call)">Tokens</button>
             <button class="btn-ghost" data-action="fork" title="Fork a variant from this version">Fork</button>
             <button class="btn-ghost" data-action="copy">Copy HTML</button>
-            <button class="btn-ghost" data-action="download">Download</button>
+            <button class="btn-ghost" data-action="download" title="Download active version as index.html">HTML</button>
+            <button class="btn-ghost" data-action="export-zip" title="Download full session: every version, README, prompt history">.zip</button>
           </header>
           <div class="design-canvas" id="design-canvas"></div>
           <footer class="design-scrubber" id="design-scrubber"></footer>
@@ -795,6 +796,40 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
       a.download = (v.title || "design") + ".html";
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    });
+    host.querySelector('[data-action="export-zip"]').addEventListener("click", async () => {
+      if (!state.versions.length) return;
+      const btn = host.querySelector('[data-action="export-zip"]');
+      btn.disabled = true; btn.textContent = "Zipping…";
+      try {
+        const title = (state.versions[state.activeVersion]?.title || "mio-design")
+          .replace(/^v\d+(\s*\(.*?\))?\s*-?\s*/i, "") || "mio-design";
+        const res = await fetch("/ui/api/design/export", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title,
+            platform: state._platform || "web",
+            versions: state.versions,
+            active:   state.activeVersion,
+            history:  state.history,
+          }),
+        });
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const blob = await res.blob();
+        const cd = res.headers.get("Content-Disposition") || "";
+        const m = cd.match(/filename="([^"]+)"/);
+        const filename = m ? m[1] : (title + ".zip");
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = filename;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+      } catch (e) {
+        alert("Export failed: " + e.message);
+      } finally {
+        btn.disabled = false; btn.textContent = ".zip";
+      }
     });
     host.querySelector('[data-action="fork"]').addEventListener("click", () => {
       const v = state.versions[state.activeVersion];
