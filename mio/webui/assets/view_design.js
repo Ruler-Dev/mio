@@ -102,8 +102,15 @@ No explanations after the artifact. The artifact IS the design.`;
               <button class="design-tab"        data-tab="code"    role="tab">Code</button>
               <button class="design-tab"        data-tab="diff"    role="tab">Diff</button>
             </div>
+            <div class="design-widths" role="group" aria-label="Preview width">
+              <button class="design-width" data-width="mobile"  title="Mobile · 375 px"  aria-label="Mobile">📱</button>
+              <button class="design-width" data-width="tablet"  title="Tablet · 768 px"  aria-label="Tablet">📲</button>
+              <button class="design-width" data-width="desktop" title="Desktop · 1280 px" aria-label="Desktop">🖥️</button>
+              <button class="design-width active" data-width="fit" title="Fit pane" aria-label="Fit">⛶</button>
+            </div>
             <div class="design-version-label" id="design-version-label">No design yet</div>
             <div style="flex:1"></div>
+            <button class="btn-ghost" data-action="inspect" title="Click an element in the preview to edit it">Inspect</button>
             <button class="btn-ghost" data-action="fork" title="Fork a variant from this version">Fork</button>
             <button class="btn-ghost" data-action="copy">Copy HTML</button>
             <button class="btn-ghost" data-action="download">Download</button>
@@ -193,36 +200,57 @@ No explanations after the artifact. The artifact IS the design.`;
       }
     } else {
       canvas.innerHTML = "";
+      // Preview frame — wrapped in a sizer so we can constrain the iframe
+      // to real device widths (375 / 768 / 1280) or let it fill ("fit").
+      const sizer = document.createElement("div");
+      sizer.className = "design-sizer";
+      canvas.appendChild(sizer);
+
       const errorBar = document.createElement("div");
       errorBar.className = "design-error-bar";
       errorBar.hidden = true;
       canvas.appendChild(errorBar);
+
       const iframe = document.createElement("iframe");
       iframe.className = "design-iframe";
       iframe.sandbox = "allow-scripts";
-      iframe.srcdoc = injectErrorReporter(v.html || "");
-      canvas.appendChild(iframe);
-      // Listen once for error messages from this iframe.
+      iframe.srcdoc = injectRuntimeHelpers(v.html || "", { inspect: !!state._inspect });
+      sizer.appendChild(iframe);
+      applyWidth(sizer, state._width || "fit");
+
+      // Messages from the iframe — errors + element clicks in inspect mode.
       const handler = (e) => {
-        if (!e.data || e.data.__mioDesignError !== true) return;
-        if (e.source !== iframe.contentWindow) return;
-        showError(host, errorBar, e.data);
+        if (!e.data || e.source !== iframe.contentWindow) return;
+        if (e.data.__mioDesignError === true) {
+          showError(host, errorBar, e.data);
+        } else if (e.data.__mioDesignPick === true) {
+          onElementPicked(host, e.data);
+        }
       };
       window.addEventListener("message", handler);
-      // Clean up when the iframe is replaced
-      iframe.addEventListener("load", () => {
-        // Page reloaded inside iframe — reset the bar
-        errorBar.hidden = true;
-      });
+      iframe.addEventListener("load", () => { errorBar.hidden = true; });
     }
   }
 
-  // Injects a small script into the artifact HTML that forwards
-  // JS errors + unhandled rejections to the parent window. The
-  // iframe has no allow-same-origin, so postMessage is the only
-  // way to surface errors.
-  function injectErrorReporter(html) {
-    const script = `
+  function applyWidth(sizer, width) {
+    const map = { mobile: 375, tablet: 768, desktop: 1280 };
+    if (width === "fit" || !map[width]) {
+      sizer.style.width = "100%";
+      sizer.style.maxWidth = "none";
+    } else {
+      sizer.style.width = map[width] + "px";
+      sizer.style.maxWidth = "100%";
+    }
+  }
+
+  // Injects small helper scripts into the artifact HTML:
+  //   - error reporter (always on) — forwards JS errors to parent
+  //   - inspect mode (opt-in) — on click, outlines the element and
+  //     posts a selector + outerHTML snippet back to parent
+  // The iframe has sandbox="allow-scripts" only, so postMessage is
+  // the only channel back.
+  function injectRuntimeHelpers(html, { inspect = false } = {}) {
+    const errorScript = `
 <script>
 (function(){
   function post(err){ try { parent.postMessage({__mioDesignError:true, message:String(err.message||err), stack:String(err.stack||''), source:String(err.filename||''), line:err.lineno||0, col:err.colno||0}, '*'); } catch(_){} }
@@ -230,9 +258,75 @@ No explanations after the artifact. The artifact IS the design.`;
   window.addEventListener('unhandledrejection', (e) => post({message: 'Unhandled rejection: ' + (e.reason?.message || e.reason), stack: e.reason?.stack}));
 })();
 </script>`;
-    if (/<\/head>/i.test(html)) return html.replace(/<\/head>/i, script + "</head>");
-    if (/<body/i.test(html))    return html.replace(/<body([^>]*)>/i, "<body$1>" + script);
-    return script + html;
+    const inspectScript = !inspect ? "" : `
+<style>
+  html.__mio_insp, html.__mio_insp * { cursor: crosshair !important; }
+  html.__mio_insp *:hover { outline: 2px dashed #7aa2f7 !important; outline-offset: 2px; }
+  .__mio_insp_picked { outline: 2px solid #7aa2f7 !important; outline-offset: 2px; box-shadow: 0 0 0 4px rgba(122,162,247,0.25) !important; }
+</style>
+<script>
+(function(){
+  document.documentElement.classList.add('__mio_insp');
+  function cssPath(el){
+    if (!(el instanceof Element)) return '';
+    const parts = [];
+    while (el && el.nodeType === 1 && parts.length < 6) {
+      let name = el.nodeName.toLowerCase();
+      if (el.id) { name += '#' + el.id; parts.unshift(name); break; }
+      const cls = (el.className || '').toString().trim().split(/\\s+/).filter(Boolean).slice(0,2);
+      if (cls.length) name += '.' + cls.join('.');
+      const parent = el.parentElement;
+      if (parent) {
+        const sibs = [...parent.children].filter(c => c.nodeName === el.nodeName);
+        if (sibs.length > 1) name += ':nth-of-type(' + (sibs.indexOf(el) + 1) + ')';
+      }
+      parts.unshift(name);
+      el = parent;
+    }
+    return parts.join(' > ');
+  }
+  document.addEventListener('click', function(e){
+    e.preventDefault(); e.stopPropagation();
+    const t = e.target;
+    document.querySelectorAll('.__mio_insp_picked').forEach(n => n.classList.remove('__mio_insp_picked'));
+    try { t.classList.add('__mio_insp_picked'); } catch(_){}
+    const outer = (t.outerHTML || '').slice(0, 800);
+    const textHint = (t.innerText || '').trim().slice(0, 80);
+    try {
+      parent.postMessage({__mioDesignPick:true, selector: cssPath(t), tag: t.tagName.toLowerCase(), textHint, outer}, '*');
+    } catch(_) {}
+  }, true);
+})();
+</script>`;
+    const head = errorScript + inspectScript;
+    if (/<\/head>/i.test(html)) return html.replace(/<\/head>/i, head + "</head>");
+    if (/<body/i.test(html))    return html.replace(/<body([^>]*)>/i, "<body$1>" + head);
+    return head + html;
+  }
+
+  function onElementPicked(host, pick) {
+    const input = host.querySelector("#design-input");
+    const hint = pick.textHint ? ` "${pick.textHint}"` : "";
+    const seed = `Change this specific element (${pick.tag}${hint}) at \`${pick.selector}\` so it `;
+    input.value = seed;
+    input.focus();
+    // Park the caret at the end so the user can type the change.
+    input.setSelectionRange(input.value.length, input.value.length);
+    // Seed the next gen with current HTML so we iterate in place.
+    const v = state.versions[state.activeVersion];
+    if (v) state._forkSeed = v.html;
+    // Turn inspect off after a pick so accidental clicks don't recur.
+    toggleInspect(host, false);
+  }
+
+  function toggleInspect(host, on) {
+    state._inspect = !!on;
+    saveSession();
+    const btn = host.querySelector('[data-action="inspect"]');
+    if (btn) btn.classList.toggle("active", !!on);
+    // Re-render so the iframe gets the helper script refreshed.
+    const v = state.versions[state.activeVersion];
+    if (v) showVersion(host, v);
   }
 
   function showError(host, bar, err) {
@@ -355,6 +449,29 @@ No explanations after the artifact. The artifact IS the design.`;
         if (v) showVersion(host, v);
       });
     });
+    // Width toggles (mobile / tablet / desktop / fit)
+    host.querySelectorAll(".design-width").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        state._width = btn.dataset.width;
+        saveSession();
+        host.querySelectorAll(".design-width").forEach((b) =>
+          b.classList.toggle("active", b === btn));
+        const sizer = host.querySelector(".design-sizer");
+        if (sizer) applyWidth(sizer, state._width);
+      });
+    });
+    // Restore persisted width on mount
+    if (state._width) {
+      host.querySelectorAll(".design-width").forEach((b) =>
+        b.classList.toggle("active", b.dataset.width === state._width));
+    }
+    // Inspect toggle
+    host.querySelector('[data-action="inspect"]').addEventListener("click", () => {
+      toggleInspect(host, !state._inspect);
+    });
+    if (state._inspect) {
+      host.querySelector('[data-action="inspect"]')?.classList.add("active");
+    }
   }
 
   async function generate(host) {
