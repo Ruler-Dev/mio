@@ -3812,3 +3812,27 @@ body.focus-mode .input-area { max-width: 720px; }
   z-index: 9999;
   animation: pop-in 180ms ease;
 }
+
+/* ===== Focus mode ======================================== */
+html.mio-focus .nav-rail,
+html.mio-focus .mio-sovereignty,
+html.mio-focus .mio-voice-fab,
+html.mio-focus .sidebar { display: none !important; }
+html.mio-focus .main { left: 0 !important; }
+html.mio-focus .app { padding-bottom: 0; }
+html.mio-focus body { background: var(--bg-page); }
+
+.mio-focus-toast {
+  position: fixed;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0,0,0,0.8);
+  color: #fff;
+  padding: 7px 16px;
+  font-size: 12px;
+  border-radius: 6px;
+  backdrop-filter: blur(8px);
+  z-index: 10000;
+  animation: pop-in 180ms ease;
+}
