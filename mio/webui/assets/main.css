@@ -1267,8 +1267,12 @@ body.focus-mode .input-area { max-width: 720px; }
 .design-composer-foot {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
+  flex-wrap: wrap;
 }
+.design-composer-foot > [data-action="generate"] { flex: 1 0 auto; min-width: 90px; order: 99; }
+.design-composer-foot > [data-action="research"] { flex: 1 1 auto; min-width: 0; }
+.design-composer-foot > [data-action="research"] { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .design-check {
   font-size: 11px;
   color: var(--text-secondary);
@@ -1294,10 +1298,12 @@ body.focus-mode .input-area { max-width: 720px; }
 .design-right-head {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 16px;
+  gap: 8px;
+  padding: 8px 14px;
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-sidebar);
+  flex-wrap: wrap;
+  row-gap: 6px;
 }
 .design-tabs {
   display: flex;

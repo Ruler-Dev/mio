@@ -339,7 +339,7 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
                 <input type="checkbox" id="design-variants"> 3 variants
               </label>
               <div style="flex:1"></div>
-              <button class="btn-ghost" data-action="research" title="Do a web search for inspiration, then generate">🔎 Research + Generate</button>
+              <button class="btn-ghost" data-action="research" title="Do a web search for inspiration, then generate">🔎 Research</button>
               <button class="btn-ghost design-generate" data-action="generate">Generate</button>
             </div>
           </div>
