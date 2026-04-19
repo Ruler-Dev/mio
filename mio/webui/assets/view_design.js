@@ -219,6 +219,20 @@ No explanations after the artifact. The artifact IS the design.`;
   function showVersion(host, v) {
     const canvas = host.querySelector("#design-canvas");
     const tab = host.querySelector(".design-tab.active").dataset.tab;
+
+    // Variant comparison takes precedence over the normal view — once
+    // the user has fired "3 variants", show them side-by-side until
+    // they click one to keep.
+    if (state._pendingCompare) {
+      const group = state._pendingCompare;
+      const variants = state.versions.filter((ver) => ver.variantGroup === group);
+      if (variants.length > 1) {
+        renderVariantGrid(host, canvas, variants);
+        return;
+      }
+      // Single-member group; clear the flag and fall through.
+      state._pendingCompare = null;
+    }
     if (tab === "code") {
       canvas.innerHTML = `<pre class="design-code"><code>${escapeHtml(v.html || "")}</code></pre>`;
     } else if (tab === "diff") {
@@ -268,6 +282,49 @@ No explanations after the artifact. The artifact IS the design.`;
         }
       });
     }
+  }
+
+  function renderVariantGrid(host, canvas, variants) {
+    canvas.innerHTML = `
+      <div class="design-compare">
+        <div class="design-compare-head">
+          <strong>Pick a variant</strong>
+          <span class="muted">${variants.length} generated · click "Keep" to continue with that one</span>
+          <button class="btn-ghost" data-action="skip-compare">Skip (keep all)</button>
+        </div>
+        <div class="design-compare-grid" style="grid-template-columns: repeat(${variants.length}, 1fr);"></div>
+      </div>
+    `;
+    const grid = canvas.querySelector(".design-compare-grid");
+    variants.forEach((v, i) => {
+      const cell = document.createElement("div");
+      cell.className = "design-compare-cell";
+      cell.innerHTML = `
+        <div class="design-compare-label">${escapeHtml(v.title)}</div>
+        <div class="design-compare-frame-wrap"></div>
+        <div class="design-compare-actions">
+          <button class="btn-ghost design-compare-keep" data-keep="${state.versions.indexOf(v)}">Keep this one</button>
+        </div>
+      `;
+      const wrap = cell.querySelector(".design-compare-frame-wrap");
+      const iframe = document.createElement("iframe");
+      iframe.className = "design-compare-frame";
+      iframe.sandbox = "allow-scripts";
+      iframe.srcdoc = injectRuntimeHelpers(v.html || "", { inspect: false });
+      wrap.appendChild(iframe);
+      cell.querySelector(".design-compare-keep").addEventListener("click", () => {
+        state._pendingCompare = null;
+        state.activeVersion = parseInt(cell.querySelector(".design-compare-keep").dataset.keep, 10);
+        saveSession();
+        renderVersions(host);
+      });
+      grid.appendChild(cell);
+    });
+    canvas.querySelector('[data-action="skip-compare"]').addEventListener("click", () => {
+      state._pendingCompare = null;
+      saveSession();
+      renderVersions(host);
+    });
   }
 
   function applyWidth(sizer, width) {
@@ -736,21 +793,28 @@ No explanations after the artifact. The artifact IS the design.`;
         runs.push(runOne(messages, temp));
       }
       const results = await Promise.all(runs);
-      for (const text of results) {
+      const variantGroup = variants > 1 ? Date.now() : null;
+      const startIdx = state.versions.length;
+      for (let i = 0; i < results.length; i++) {
+        const text = results[i];
         const html = extractArtifact(text);
         const versionNum = state.versions.length + 1;
         state.versions.push({
           n:     versionNum,
-          title: `v${versionNum}` + (results.length > 1 ? ` (variant)` : ""),
+          title: `v${versionNum}` + (variantGroup ? ` (variant ${String.fromCharCode(65 + i)})` : ""),
           html:  html || renderErrorHTML(text),
           prompt,
           ts:    Date.now(),
+          variantGroup,
         });
       }
       state.activeVersion = state.versions.length - 1;
+      // When we have variants, stage them for comparison on the next
+      // showVersion — the user gets a 3-up grid until they pick one.
+      state._pendingCompare = variantGroup;
       state.history.push({
         role: "assistant",
-        text: variants > 1 ? `Generated ${variants} variants. v${state.versions.length - 2 + 1}–v${state.versions.length} on the scrubber.`
+        text: variantGroup ? `Generated ${variants} variants — pick one to keep (the others stay in the scrubber).`
                            : `Generated v${state.versions.length}.`,
       });
       saveSession();

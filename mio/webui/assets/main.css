@@ -1793,3 +1793,92 @@ body.focus-mode .input-area { max-width: 720px; }
   border-radius: 3px;
   font-size: 11px;
 }
+
+/* ===== Design Mode: variant comparison grid ============= */
+.design-compare {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  background: var(--bg-page);
+}
+.design-compare-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-sidebar);
+  font-size: 12px;
+}
+.design-compare-head strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+.design-compare-head .muted {
+  color: var(--text-muted);
+}
+.design-compare-head > button {
+  margin-left: auto;
+}
+.design-compare-grid {
+  flex: 1;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  min-height: 0;
+}
+.design-compare-cell {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-sidebar);
+  transition: border-color 120ms ease, transform 120ms ease;
+  min-height: 0;
+}
+.design-compare-cell:hover {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+.design-compare-label {
+  padding: 7px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-subtle);
+  font-family: var(--font-mono);
+}
+.design-compare-frame-wrap {
+  flex: 1;
+  background: #fff;
+  overflow: hidden;
+  min-height: 180px;
+}
+[data-theme="dark"] .design-compare-frame-wrap { background: #18181b; }
+.design-compare-frame {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  transform: scale(0.75);
+  transform-origin: top left;
+  width: 133.33%;
+  height: 133.33%;
+}
+.design-compare-actions {
+  padding: 8px;
+  border-top: 1px solid var(--border-subtle);
+}
+.design-compare-keep {
+  width: 100%;
+  padding: 6px 10px;
+  background: var(--accent);
+  color: #fff;
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.design-compare-keep:hover { filter: brightness(1.05); }
