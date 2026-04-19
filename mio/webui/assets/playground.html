@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mio Skill Playground</title>
+<style>
+:root {
+  --bg: #0a0a14; --panel: #161621; --border: #2a2a38; --accent: #3b82f6;
+  --text: #e5e5e5; --muted: #9ca3af; --input: #1f1f2e;
+}
+* { box-sizing: border-box; }
+body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: var(--bg); color: var(--text); font-size: 14px; }
+.header { padding: 18px 28px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 16px; }
+.title { font-size: 18px; font-weight: 600; }
+.subtitle { color: var(--muted); font-size: 12px; }
+.back { margin-left: auto; color: var(--accent); text-decoration: none; font-size: 13px; }
+.layout { display: grid; grid-template-columns: 320px 1fr; height: calc(100vh - 61px); }
+.list { border-right: 1px solid var(--border); overflow-y: auto; padding: 12px 0; }
+.filter { padding: 8px 16px; }
+.filter input { width: 100%; background: var(--input); border: 1px solid var(--border); color: var(--text); padding: 8px 12px; border-radius: 8px; font-size: 13px; }
+.filter input:focus { outline: 0; border-color: var(--accent); }
+.skill-row { padding: 8px 16px; cursor: pointer; border-left: 3px solid transparent; font-size: 13px; }
+.skill-row:hover { background: var(--panel); }
+.skill-row.active { background: var(--panel); border-left-color: var(--accent); }
+.skill-row .n { font-family: ui-monospace,monospace; color: var(--text); font-size: 12.5px; font-weight: 500; }
+.skill-row .d { color: var(--muted); font-size: 11.5px; margin-top: 2px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.detail { overflow-y: auto; padding: 24px 28px; }
+.detail h2 { font-size: 20px; margin: 0 0 4px; font-family: ui-monospace,monospace; color: var(--accent); }
+.detail .desc { color: var(--muted); font-size: 13px; line-height: 1.55; margin-bottom: 20px; }
+.field { margin-bottom: 14px; }
+.field label { display: block; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; font-family: ui-monospace,monospace; margin-bottom: 4px; }
+.field label .required { color: #ef4444; }
+.field label .hint { color: var(--muted); text-transform: none; font-size: 11px; margin-left: 6px; font-family: -apple-system,sans-serif; }
+.field input, .field textarea { width: 100%; background: var(--input); border: 1px solid var(--border); color: var(--text); padding: 8px 12px; border-radius: 8px; font-size: 13px; font-family: inherit; }
+.field input:focus, .field textarea:focus { outline: 0; border-color: var(--accent); }
+.field textarea { min-height: 80px; font-family: ui-monospace,monospace; font-size: 12.5px; resize: vertical; }
+.field .type { color: var(--muted); font-family: ui-monospace,monospace; font-size: 11px; }
+.actions { display: flex; gap: 10px; margin: 20px 0; }
+.run-btn { background: var(--accent); color: #fff; border: 0; padding: 10px 20px; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; }
+.run-btn:hover { background: #2563eb; }
+.run-btn:disabled { opacity: 0.5; cursor: default; }
+.reset-btn { background: transparent; border: 1px solid var(--border); color: var(--muted); padding: 10px 16px; border-radius: 8px; font-size: 13px; cursor: pointer; }
+.result { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-top: 16px; }
+.result h3 { margin: 0 0 10px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; }
+.result pre { background: #0f0f18; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 12px; margin: 0; }
+.result.error { border-color: #ef4444; }
+.result.error h3 { color: #ef4444; }
+.empty { color: var(--muted); padding: 60px 0; text-align: center; font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="header">
+  <div>
+    <div class="title">Skill Playground</div>
+    <div class="subtitle">Try any registered skill with live form-driven inputs</div>
+  </div>
+  <a href="/ui" class="back">← back to chat</a>
+</div>
+<div class="layout">
+  <div class="list">
+    <div class="filter"><input id="filter" placeholder="Filter skills…" oninput="filter()"></div>
+    <div id="skillList"></div>
+  </div>
+  <div class="detail" id="detail">
+    <div class="empty">Pick a skill from the list to try it out.</div>
+  </div>
+</div>
+<script>
+let SKILLS = [];
+let active = null;
+
+fetch('/ui/api/skills').then(r => r.json()).then(d => {
+  SKILLS = d.skills || [];
+  render();
+});
+
+function render() {
+  const q = (document.getElementById('filter').value || '').toLowerCase();
+  const matches = SKILLS.filter(s => !q || s.name.toLowerCase().includes(q) || s.description.toLowerCase().includes(q));
+  const list = document.getElementById('skillList');
+  list.innerHTML = matches.map(s => `
+    <div class="skill-row${active === s.name ? ' active' : ''}" onclick="select('${s.name}')">
+      <div class="n">${s.name}</div>
+      <div class="d">${escapeHTML(s.description || '')}</div>
+    </div>
+  `).join('');
+}
+
+function filter() { render(); }
+
+function select(name) {
+  active = name;
+  render();
+  const skill = SKILLS.find(s => s.name === name);
+  if (!skill) return;
+  const params = skill.parameters || {};
+  const props = params.properties || {};
+  const required = params.required || [];
+  const fields = Object.entries(props).map(([key, schema]) => {
+    const isReq = required.includes(key);
+    const type = schema.type || 'string';
+    const desc = schema.description || '';
+    const widget = (type === 'object' || type === 'array')
+      ? `<textarea id="arg-${key}" placeholder='${type === 'array' ? '[]' : '{}'}' data-key="${key}" data-type="${type}"></textarea>`
+      : type === 'boolean'
+        ? `<input id="arg-${key}" type="checkbox" data-key="${key}" data-type="boolean">`
+        : type === 'integer' || type === 'number'
+          ? `<input id="arg-${key}" type="number" data-key="${key}" data-type="${type}">`
+          : `<input id="arg-${key}" type="text" data-key="${key}" data-type="${type}" placeholder="${escapeHTML(desc)}">`;
+    return `
+      <div class="field">
+        <label>${key} <span class="type">(${type})</span>${isReq ? ' <span class="required">*</span>' : ''}
+          ${desc ? `<span class="hint">${escapeHTML(desc)}</span>` : ''}
+        </label>
+        ${widget}
+      </div>`;
+  }).join('');
+  document.getElementById('detail').innerHTML = `
+    <h2>${skill.name}</h2>
+    <div class="desc">${escapeHTML(skill.description)}</div>
+    <form id="runForm" onsubmit="event.preventDefault(); run();">
+      ${fields || '<div class="empty">No parameters — just hit Run.</div>'}
+      <div class="actions">
+        <button type="submit" class="run-btn" id="runBtn">▶ Run skill</button>
+        <button type="button" class="reset-btn" onclick="select(active)">Reset form</button>
+      </div>
+    </form>
+    <div id="result"></div>
+  `;
+}
+
+async function run() {
+  const btn = document.getElementById('runBtn');
+  btn.disabled = true;
+  btn.textContent = 'Running…';
+  const inputs = document.querySelectorAll('#runForm [data-key]');
+  const args = {};
+  for (const el of inputs) {
+    const key = el.dataset.key;
+    const type = el.dataset.type;
+    let v;
+    if (type === 'boolean') v = el.checked;
+    else if (type === 'integer' || type === 'number') v = el.value === '' ? undefined : Number(el.value);
+    else if (type === 'array' || type === 'object') {
+      const raw = el.value.trim();
+      if (!raw) continue;
+      try { v = JSON.parse(raw); } catch (e) { showResult({ error: 'Invalid JSON for ' + key + ': ' + e.message }, true); btn.disabled = false; btn.textContent = '▶ Run skill'; return; }
+    } else v = el.value;
+    if (v !== undefined && v !== '') args[key] = v;
+  }
+  try {
+    const res = await fetch('/ui/api/skills/run', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ name: active, args }),
+    });
+    const data = await res.json();
+    showResult(data.result || data, !data.ok);
+  } catch (e) {
+    showResult({ error: e.message }, true);
+  }
+  btn.disabled = false;
+  btn.textContent = '▶ Run skill';
+}
+
+function showResult(r, err) {
+  const el = document.getElementById('result');
+  el.className = 'result' + (err ? ' error' : '');
+  el.innerHTML = `<h3>${err ? 'Error' : 'Result'}</h3><pre>${escapeHTML(JSON.stringify(r, null, 2))}</pre>`;
+}
+
+function escapeHTML(s) {
+  return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,63 @@
+[project]
+name = "mio"
+version = "0.1.0"
+description = "Fast local MLX inference for Apple Silicon — DFlash speculative decoding + PolarQuant 4-bit KV-cache + Caveman token compression"
+requires-python = ">=3.10"
+license = "MIT"
+# One install = full experience. All UI / skill / multimodal libraries are
+# included so `pip install -e .` gives you everything in one shot. Skill-side
+# imports are try/except-gated anyway, so a missing system binary (e.g.
+# tesseract for OCR) degrades gracefully.
+dependencies = [
+    # Inference core
+    "mlx>=0.22.0,<1.0.0",
+    "mlx-lm>=0.21.0,<1.0.0",
+    "mlx-vlm>=0.1.0",           # VLM loader (image-in-prompt Qwen variants)
+    # API + CLI
+    "fastapi>=0.115.0",
+    "uvicorn>=0.34.0",
+    "pydantic>=2.0",            # imported directly in server.py
+    "python-multipart>=0.0.9",
+    "huggingface-hub>=0.26.0",
+    "rich>=13.0.0",
+    "numpy",
+    "certifi",
+    # Documents
+    "fpdf2>=2.7",
+    "python-docx>=1.1",
+    "openpyxl>=3.1",
+    "python-pptx>=1.0",
+    "reportlab>=4.2",
+    "pdfplumber>=0.11",
+    "pypdf>=5.0",
+    "markdown>=3.6",
+    "markdownify>=0.13",
+    # Data / dev utilities
+    "matplotlib>=3.9",
+    "pyyaml>=6.0",
+    "pyjwt>=2.9",
+    "jsonpath-ng>=1.6",
+    "sympy>=1.13",
+    "pint>=0.24",
+    "textstat>=0.7",
+    "feedparser>=6.0",
+    "faker>=28.0",
+    "langdetect>=1.0.9",
+    # Images / QR / barcodes
+    "pillow>=10.0",
+    "qrcode[pil]>=7.4",
+    "python-barcode>=0.15",
+    "pytesseract>=0.3.13",      # needs `tesseract` system binary for describe_image OCR
+    # Calendar
+    "icalendar>=5.0",
+]
+
+[project.scripts]
+mio = "mio.main:main"
+
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["mio*"]

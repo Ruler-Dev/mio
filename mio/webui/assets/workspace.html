@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mio Workspace</title>
+<style>
+:root {
+  --bg: #0a0a14; --panel: #161621; --border: #2a2a38; --accent: #3b82f6;
+  --text: #e5e5e5; --muted: #9ca3af; --input: #1f1f2e; --good: #10b981; --warn: #f59e0b; --bad: #ef4444;
+}
+* { box-sizing: border-box; }
+body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: var(--bg); color: var(--text); font-size: 14px; }
+.header { padding: 18px 28px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 16px; }
+.title { font-size: 18px; font-weight: 600; }
+.subtitle { color: var(--muted); font-size: 12px; }
+.back { margin-left: auto; color: var(--accent); text-decoration: none; font-size: 13px; }
+.tabs { display: flex; gap: 4px; padding: 0 28px; background: var(--bg); border-bottom: 1px solid var(--border); }
+.tab { padding: 10px 16px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; font-size: 13px; }
+.tab.active { color: var(--text); border-bottom-color: var(--accent); }
+.content { padding: 24px 28px; max-width: 900px; margin: 0 auto; }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; margin-bottom: 16px; }
+.card h2 { font-size: 16px; margin: 0 0 8px; }
+.card .meta { color: var(--muted); font-size: 12px; margin-bottom: 12px; }
+.row { display: flex; gap: 10px; margin-bottom: 10px; align-items: center; }
+.row label { width: 110px; color: var(--muted); font-size: 12px; font-family: ui-monospace,monospace; text-transform: uppercase; letter-spacing: 0.4px; }
+input[type=text], input[type=number], textarea, select { background: var(--input); border: 1px solid var(--border); color: var(--text); padding: 8px 12px; border-radius: 6px; font-size: 13px; font-family: inherit; }
+input[type=text], input[type=number], select { flex: 1; }
+textarea { width: 100%; min-height: 70px; font-family: ui-monospace,monospace; font-size: 12.5px; resize: vertical; }
+button { background: var(--accent); color: #fff; border: 0; padding: 7px 16px; border-radius: 6px; cursor: pointer; font-size: 12.5px; font-weight: 500; }
+button.ghost { background: transparent; border: 1px solid var(--border); color: var(--muted); }
+button.ghost:hover { border-color: var(--accent); color: var(--text); }
+button.danger { background: transparent; border: 1px solid var(--bad); color: var(--bad); }
+button.danger:hover { background: rgba(239,68,68,0.1); }
+.item { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin-bottom: 10px; }
+.item .top { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+.item .nm { font-weight: 600; }
+.item .sub { color: var(--muted); font-size: 12px; font-family: ui-monospace,monospace; }
+.item .desc { color: var(--muted); font-size: 13px; margin-top: 4px; }
+.item .actions { display: flex; gap: 6px; margin-left: auto; }
+.tag { display: inline-block; padding: 2px 8px; background: rgba(59,130,246,0.15); color: var(--accent); border-radius: 999px; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.5px; }
+.tag.ok { background: rgba(16,185,129,0.15); color: var(--good); }
+.tag.warn { background: rgba(245,158,11,0.15); color: var(--warn); }
+.log { background: #0d0d17; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-top: 6px; font-family: ui-monospace,monospace; font-size: 11.5px; max-height: 160px; overflow-y: auto; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<div class="header">
+  <div>
+    <div class="title">Workspace</div>
+    <div class="subtitle">Scheduled prompts, webhooks, and indexed folders</div>
+  </div>
+  <a href="/ui" class="back">← back to chat</a>
+</div>
+<div class="tabs">
+  <div class="tab active" data-tab="schedules" onclick="switchTab('schedules')">Schedules</div>
+  <div class="tab" data-tab="webhooks" onclick="switchTab('webhooks')">Webhooks</div>
+  <div class="tab" data-tab="indexes" onclick="switchTab('indexes')">Indexed folders</div>
+</div>
+<div class="content" id="content"></div>
+<script>
+let TAB = 'schedules';
+function switchTab(t) {
+  TAB = t;
+  document.querySelectorAll('.tab').forEach(el => el.classList.toggle('active', el.dataset.tab === t));
+  render();
+}
+
+async function render() {
+  const c = document.getElementById('content');
+  c.innerHTML = '<div style="color:var(--muted)">Loading…</div>';
+  if (TAB === 'schedules') return renderSchedules(c);
+  if (TAB === 'webhooks')  return renderWebhooks(c);
+  if (TAB === 'indexes')   return renderIndexes(c);
+}
+
+async function renderSchedules(c) {
+  const r = await fetch('/ui/api/schedules').then(r => r.json());
+  c.innerHTML = `
+    <div class="card">
+      <h2>New schedule</h2>
+      <div class="row"><label>Name</label><input id="sc-name" type="text" placeholder="Morning news brief"></div>
+      <div class="row"><label>Cadence</label>
+        <select id="sc-kind" onchange="toggleCadenceFields()">
+          <option value="daily">Daily</option>
+          <option value="weekly">Weekly</option>
+          <option value="interval">Every N seconds</option>
+        </select>
+        <input id="sc-hour" type="number" min="0" max="23" value="9" placeholder="hour" style="max-width:80px">
+        <input id="sc-minute" type="number" min="0" max="59" value="0" placeholder="min" style="max-width:80px">
+        <select id="sc-weekday" style="max-width:120px;display:none">
+          <option value="0">Mon</option><option value="1">Tue</option><option value="2">Wed</option>
+          <option value="3">Thu</option><option value="4">Fri</option><option value="5">Sat</option><option value="6">Sun</option>
+        </select>
+        <input id="sc-interval" type="number" min="60" value="3600" placeholder="seconds" style="max-width:120px;display:none">
+      </div>
+      <div class="row"><label>Prompt</label><textarea id="sc-prompt" placeholder="Summarize yesterday's AI news in 5 bullets."></textarea></div>
+      <div class="row"><label></label><button onclick="createSchedule()">Create</button></div>
+    </div>
+    <h2 style="margin:22px 0 10px">Scheduled prompts</h2>
+    ${(r.schedules || []).map(s => `
+      <div class="item">
+        <div class="top">
+          <div>
+            <div class="nm">${escapeHTML(s.name)} ${s.enabled ? '<span class="tag ok">on</span>' : '<span class="tag warn">off</span>'}</div>
+            <div class="sub">${describeCadence(s.cadence)} · tier ${s.tier || 'auto'} · last run ${s.last_run || '—'}</div>
+          </div>
+          <div class="actions">
+            <button class="ghost" onclick="toggleSchedule('${s.id}', ${!s.enabled})">${s.enabled ? 'Pause' : 'Enable'}</button>
+            <button class="danger" onclick="deleteSchedule('${s.id}')">Delete</button>
+          </div>
+        </div>
+        <div class="desc">${escapeHTML((s.prompt || '').slice(0, 300))}</div>
+        ${s.last_result && s.last_result.output ? `<div class="log">${escapeHTML(s.last_result.output.slice(0, 1200))}</div>` : ''}
+      </div>
+    `).join('') || '<div style="color:var(--muted);padding:12px">No schedules yet.</div>'}
+  `;
+  toggleCadenceFields();
+}
+
+function toggleCadenceFields() {
+  const kind = document.getElementById('sc-kind').value;
+  document.getElementById('sc-hour').style.display = (kind === 'daily' || kind === 'weekly') ? '' : 'none';
+  document.getElementById('sc-minute').style.display = (kind === 'daily' || kind === 'weekly') ? '' : 'none';
+  document.getElementById('sc-weekday').style.display = (kind === 'weekly') ? '' : 'none';
+  document.getElementById('sc-interval').style.display = (kind === 'interval') ? '' : 'none';
+}
+
+function describeCadence(c) {
+  if (!c) return '—';
+  if (c.kind === 'daily') return `every day at ${String(c.hour).padStart(2,'0')}:${String(c.minute).padStart(2,'0')}`;
+  if (c.kind === 'weekly') return `every ${['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][c.weekday]} at ${String(c.hour).padStart(2,'0')}:${String(c.minute).padStart(2,'0')}`;
+  if (c.kind === 'interval') return `every ${c.every_seconds}s`;
+  return c.kind;
+}
+
+async function createSchedule() {
+  const kind = document.getElementById('sc-kind').value;
+  const cadence = kind === 'daily'
+    ? { kind, hour: +document.getElementById('sc-hour').value, minute: +document.getElementById('sc-minute').value }
+    : kind === 'weekly'
+      ? { kind, weekday: +document.getElementById('sc-weekday').value, hour: +document.getElementById('sc-hour').value, minute: +document.getElementById('sc-minute').value }
+      : { kind, every_seconds: +document.getElementById('sc-interval').value };
+  const body = {
+    name: document.getElementById('sc-name').value || 'schedule',
+    prompt: document.getElementById('sc-prompt').value,
+    cadence,
+  };
+  await fetch('/ui/api/schedules', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  render();
+}
+
+async function toggleSchedule(id, enabled) {
+  await fetch('/ui/api/schedules/' + id, { method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify({enabled}) });
+  render();
+}
+
+async function deleteSchedule(id) {
+  if (!confirm('Delete this schedule?')) return;
+  await fetch('/ui/api/schedules/' + id, { method: 'DELETE' });
+  render();
+}
+
+async function renderWebhooks(c) {
+  const r = await fetch('/ui/api/webhooks').then(r => r.json());
+  const origin = location.origin;
+  c.innerHTML = `
+    <div class="card">
+      <h2>New webhook</h2>
+      <div class="row"><label>Slug</label><input id="wh-slug" type="text" placeholder="morning-brief"></div>
+      <div class="row"><label>Prompt</label><textarea id="wh-prompt" placeholder="Summarize {{topic}} in 3 bullets."></textarea></div>
+      <div class="row"><label>Secret</label><input id="wh-secret" type="text" placeholder="optional shared secret"></div>
+      <div class="row"><label></label><button onclick="createWebhook()">Create</button></div>
+    </div>
+    <h2 style="margin:22px 0 10px">Webhooks</h2>
+    ${(r.webhooks || []).map(w => `
+      <div class="item">
+        <div class="top">
+          <div>
+            <div class="nm">${escapeHTML(w.slug)} ${w.secret ? '<span class="tag">secret</span>' : ''}</div>
+            <div class="sub">POST ${origin}/ui/api/webhook/${escapeHTML(w.slug)}</div>
+          </div>
+          <div class="actions">
+            <button class="ghost" onclick="copyWebhook('${w.slug}')">Copy URL</button>
+            <button class="danger" onclick="deleteWebhook('${w.slug}')">Delete</button>
+          </div>
+        </div>
+        <div class="desc">${escapeHTML((w.prompt || '').slice(0, 300))}</div>
+      </div>
+    `).join('') || '<div style="color:var(--muted);padding:12px">No webhooks yet.</div>'}
+  `;
+}
+
+async function createWebhook() {
+  const body = {
+    slug: document.getElementById('wh-slug').value,
+    prompt: document.getElementById('wh-prompt').value,
+    secret: document.getElementById('wh-secret').value || undefined,
+  };
+  const r = await fetch('/ui/api/webhooks', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) }).then(r => r.json());
+  if (r.error) alert(r.error);
+  render();
+}
+async function deleteWebhook(slug) {
+  if (!confirm('Delete webhook ' + slug + '?')) return;
+  await fetch('/ui/api/webhooks/' + slug, { method: 'DELETE' });
+  render();
+}
+function copyWebhook(slug) {
+  navigator.clipboard.writeText(location.origin + '/ui/api/webhook/' + slug);
+  alert('URL copied');
+}
+
+async function renderIndexes(c) {
+  const r = await fetch('/ui/api/skills/run', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ name: 'list_indexes', args: {} })
+  }).then(r => r.json());
+  const list = (r.result && r.result.indexes) || [];
+  c.innerHTML = `
+    <div class="card">
+      <h2>Index a folder</h2>
+      <div class="row"><label>Path</label><input id="ix-path" type="text" placeholder="/Users/…/notes"></div>
+      <div class="row"><label>Label</label><input id="ix-label" type="text" placeholder="Notes"></div>
+      <div class="row"><label></label><button onclick="indexFolder()">Index</button></div>
+    </div>
+    <h2 style="margin:22px 0 10px">Indexed folders</h2>
+    ${list.map(i => `
+      <div class="item">
+        <div class="top">
+          <div>
+            <div class="nm">${escapeHTML(i.label)} <span class="tag">${i.file_count} files</span></div>
+            <div class="sub">${escapeHTML(i.path)}</div>
+          </div>
+          <div class="actions">
+            <button class="danger" onclick="dropIndex(${i.id})">Drop</button>
+          </div>
+        </div>
+      </div>
+    `).join('') || '<div style="color:var(--muted);padding:12px">No folders indexed yet.</div>'}
+  `;
+}
+async function indexFolder() {
+  const body = { name: 'index_folder', args: {
+    path: document.getElementById('ix-path').value,
+    label: document.getElementById('ix-label').value || undefined,
+  }};
+  const r = await fetch('/ui/api/skills/run', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) }).then(r => r.json());
+  if (r.result && r.result.error) alert(r.result.error);
+  render();
+}
+async function dropIndex(id) {
+  if (!confirm('Drop this index?')) return;
+  await fetch('/ui/api/skills/run', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name: 'drop_index', args: { index_id: id } }) });
+  render();
+}
+
+function escapeHTML(s) {
+  return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+render();
+</script>
+</body>
+</html>

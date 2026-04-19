@@ -1,0 +1,45 @@
+# Model weights (root-level only, not mio/models/)
+/models/
+/spd/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# pytest
+.pytest_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Mio UI user data (chats, projects, prompts, memory)
+# These live at ~/.mio/ by default but are also excluded here if the
+# user relocates them into the repo tree.
+.mio/
+*.mio-memory.json
+*.mio-projects.json
+*.mio-prompts.json
+*.mio-sessions/
+
+# Any local-only user data dir
+user_data/
+.claude/

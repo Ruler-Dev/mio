@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mio — Side-by-side compare</title>
+<style>
+:root {
+  --bg: #0a0a14; --panel: #161621; --border: #2a2a38; --accent: #3b82f6;
+  --text: #e5e5e5; --muted: #9ca3af; --input: #1f1f2e;
+}
+* { box-sizing: border-box; }
+body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: var(--bg); color: var(--text); font-size: 14px; height: 100vh; display: flex; flex-direction: column; }
+.header { padding: 14px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 14px; }
+.title { font-size: 16px; font-weight: 600; }
+.back { margin-left: auto; color: var(--accent); text-decoration: none; font-size: 13px; }
+.input-row { padding: 12px 24px; border-bottom: 1px solid var(--border); display: flex; gap: 10px; align-items: center; }
+.input-row input[type=text] { flex: 1; background: var(--input); border: 1px solid var(--border); color: var(--text); padding: 10px 14px; border-radius: 8px; font-size: 14px; font-family: inherit; }
+.input-row button { background: var(--accent); color: #fff; border: 0; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 13px; }
+.columns { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; flex: 1; overflow: hidden; background: var(--border); }
+.col { background: var(--bg); display: flex; flex-direction: column; overflow: hidden; }
+.col-head { padding: 8px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; background: var(--panel); }
+.col-head select { background: var(--input); border: 1px solid var(--border); color: var(--text); padding: 5px 10px; border-radius: 6px; font-size: 12px; font-family: ui-monospace,monospace; }
+.col-head .metric { color: var(--muted); font-family: ui-monospace,monospace; font-size: 11px; margin-left: auto; }
+.col-body { flex: 1; overflow-y: auto; padding: 18px 20px; line-height: 1.6; white-space: pre-wrap; font-size: 13.5px; }
+.cursor { display: inline-block; width: 7px; height: 14px; background: var(--accent); vertical-align: middle; animation: blink 1s infinite; }
+@keyframes blink { 0%,50% { opacity: 1; } 51%,100% { opacity: 0; } }
+</style>
+</head>
+<body>
+<div class="header">
+  <div>
+    <div class="title">Side-by-side model compare</div>
+  </div>
+  <a href="/ui" class="back">← back to chat</a>
+</div>
+<div class="input-row">
+  <input id="prompt" type="text" placeholder="Ask both models the same thing…">
+  <button onclick="go()">▶ Run</button>
+</div>
+<div class="columns">
+  <div class="col">
+    <div class="col-head">
+      <label>Left:</label>
+      <select id="tier-l"></select>
+      <span class="metric" id="metric-l">—</span>
+    </div>
+    <div class="col-body" id="out-l"></div>
+  </div>
+  <div class="col">
+    <div class="col-head">
+      <label>Right:</label>
+      <select id="tier-r"></select>
+      <span class="metric" id="metric-r">—</span>
+    </div>
+    <div class="col-body" id="out-r"></div>
+  </div>
+</div>
+<script>
+let TIERS = [];
+
+async function loadTiers() {
+  try {
+    const d = await fetch('/v1/models').then(r => r.json());
+    TIERS = (d.data || []).map(m => m.id.replace(/^mio-/, ''));
+  } catch (e) { TIERS = ['small', 'medium', 'large', 'large-moe']; }
+  const mk = (sel, def) => {
+    sel.innerHTML = TIERS.map(t => `<option value="${t}">${t}</option>`).join('');
+    sel.value = def;
+  };
+  mk(document.getElementById('tier-l'), TIERS[0] || 'medium');
+  mk(document.getElementById('tier-r'), TIERS[TIERS.length-1] || 'large-moe');
+}
+loadTiers();
+
+function go() {
+  const prompt = document.getElementById('prompt').value.trim();
+  if (!prompt) return;
+  run('l');
+  run('r');
+}
+
+function run(side) {
+  const tier = document.getElementById('tier-' + side).value;
+  const prompt = document.getElementById('prompt').value.trim();
+  const out = document.getElementById('out-' + side);
+  const metric = document.getElementById('metric-' + side);
+  out.innerHTML = '<span class="cursor"></span>';
+  metric.textContent = 'starting…';
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const ws = new WebSocket(proto + '//' + location.host + '/ui/ws/chat');
+  let buf = '';
+  let startMs = null;
+  ws.onopen = () => {
+    ws.send(JSON.stringify({
+      action: 'chat',
+      tier,
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 1500,
+      skills: false,
+    }));
+  };
+  ws.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    if (m.type === 'start') startMs = Date.now();
+    if (m.type === 'token' && m.text) {
+      buf += m.text;
+      out.innerHTML = escapeHTML(buf) + '<span class="cursor"></span>';
+    }
+    if (m.type === 'done' || m.type === 'error') {
+      out.innerHTML = escapeHTML(m.full_text || buf);
+      const met = m.metrics || {};
+      const secs = startMs ? ((Date.now() - startMs) / 1000).toFixed(1) : '—';
+      metric.textContent = (met.completion_tokens || '?') + ' tok · ' + (met.generation_tps || '?') + ' tok/s · ' + secs + 's';
+      ws.close();
+    }
+  };
+  ws.onerror = () => { out.innerHTML += '\n\n[connection error]'; metric.textContent = 'error'; };
+}
+
+function escapeHTML(s) {
+  return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+document.getElementById('prompt').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); go(); }
+});
+</script>
+</body>
+</html>

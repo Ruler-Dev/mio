@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>Mio Attachments</title>
+<style>
+:root {
+  --bg: #0a0a14; --panel: #161621; --border: #2a2a38; --accent: #3b82f6;
+  --text: #e5e5e5; --muted: #9ca3af; --input: #1f1f2e;
+}
+* { box-sizing: border-box; }
+body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: var(--bg); color: var(--text); font-size: 14px; }
+.header { padding: 18px 28px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 16px; }
+.title { font-size: 18px; font-weight: 600; }
+.back { margin-left: auto; color: var(--accent); text-decoration: none; font-size: 13px; }
+.bar { padding: 12px 28px; border-bottom: 1px solid var(--border); display: flex; gap: 10px; align-items: center; }
+.bar input { flex: 1; background: var(--input); border: 1px solid var(--border); color: var(--text); padding: 8px 12px; border-radius: 8px; font-size: 13px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; padding: 20px 28px; }
+.file { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; cursor: pointer; transition: all 120ms; }
+.file:hover { border-color: var(--accent); transform: translateY(-2px); }
+.file .thumb { height: 100px; border-radius: 8px; background: var(--input); margin-bottom: 10px; display: flex; align-items: center; justify-content: center; font-size: 40px; overflow: hidden; }
+.file .thumb img { width: 100%; height: 100%; object-fit: cover; }
+.file .name { font-weight: 500; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file .meta { color: var(--muted); font-family: ui-monospace, monospace; font-size: 11px; margin-top: 4px; }
+</style></head>
+<body>
+<div class="header">
+  <div class="title">Attachment library</div>
+  <a class="back" href="/ui">← back to chat</a>
+</div>
+<div class="bar"><input id="filter" placeholder="Filter by name / extension…" oninput="render()"></div>
+<div id="grid" class="grid"></div>
+<script>
+let FILES = [];
+fetch('/ui/api/attachments').then(r => r.json()).then(d => {
+  FILES = d.files || [];
+  render();
+});
+
+const ICON = { '.pdf': '📕', '.docx': '📘', '.xlsx': '📗', '.pptx': '📙',
+  '.csv': '📊', '.ics': '📅', '.svg': '🖼', '.png': '🖼', '.jpg': '🖼',
+  '.jpeg': '🖼', '.md': '📝', '.txt': '📝', '.html': '🌐',
+  '.sqlite': '🗄', '.db': '🗄' };
+
+function render() {
+  const q = (document.getElementById('filter').value || '').toLowerCase();
+  const items = FILES.filter(f => !q || f.name.toLowerCase().includes(q) || f.ext.includes(q));
+  document.getElementById('grid').innerHTML = items.map(f => {
+    const thumb = ['.png', '.jpg', '.jpeg', '.svg'].includes(f.ext)
+      ? `<img src="${f.url}" alt="${f.name}">`
+      : `<span>${ICON[f.ext] || '📄'}</span>`;
+    return `
+      <a class="file" href="${f.url}" target="_blank">
+        <div class="thumb">${thumb}</div>
+        <div class="name">${escHTML(f.name)}</div>
+        <div class="meta">${fmtBytes(f.size)} · ${new Date(f.mtime*1000).toLocaleDateString()}</div>
+      </a>`;
+  }).join('');
+}
+
+function fmtBytes(n) {
+  if (!n) return '0 B';
+  const u = ['B','KB','MB','GB']; let i = 0; let v = n;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return (v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)) + ' ' + u[i];
+}
+
+function escHTML(s) {
+  return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+</script>
+</body>
+</html>

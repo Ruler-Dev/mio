@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>Mio Stats</title>
+<style>
+:root {
+  --bg: #0a0a14; --panel: #161621; --border: #2a2a38; --accent: #3b82f6;
+  --text: #e5e5e5; --muted: #9ca3af;
+}
+* { box-sizing: border-box; }
+body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: var(--bg); color: var(--text); font-size: 14px; }
+.header { padding: 18px 28px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 16px; }
+.title { font-size: 18px; font-weight: 600; }
+.back { margin-left: auto; color: var(--accent); text-decoration: none; font-size: 13px; }
+.grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; padding: 20px 28px; max-width: 1200px; margin: 0 auto; }
+.kpi { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; }
+.kpi .v { font-size: 28px; font-weight: 600; }
+.kpi .l { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
+.sect { padding: 10px 28px 30px; max-width: 1200px; margin: 0 auto; }
+.sect h2 { font-size: 15px; margin: 20px 0 10px; color: var(--text); }
+table { width: 100%; border-collapse: collapse; background: var(--panel); border-radius: 10px; overflow: hidden; }
+td, th { text-align: left; padding: 8px 14px; font-size: 13px; border-bottom: 1px solid var(--border); }
+th { color: var(--muted); font-weight: 500; text-transform: uppercase; letter-spacing: 0.4px; font-size: 11px; }
+.bar { display: inline-block; height: 8px; background: var(--accent); border-radius: 2px; vertical-align: middle; }
+</style></head>
+<body>
+<div class="header">
+  <div class="title">Mio stats</div>
+  <a class="back" href="/ui">← back to chat</a>
+</div>
+<div id="kpis" class="grid"></div>
+<div id="sections" class="sect"></div>
+<script>
+fetch('/ui/api/stats').then(r => r.json()).then(render);
+
+function render(d) {
+  document.getElementById('kpis').innerHTML = [
+    kpi('Sessions', d.sessions),
+    kpi('Messages', d.messages),
+    kpi('You', d.user_messages),
+    kpi('Mio', d.assistant_messages),
+  ].join('');
+  const byDay = (d.messages_by_day || []).slice(-30);
+  const maxDay = Math.max(1, ...byDay.map(([,v]) => v));
+  document.getElementById('sections').innerHTML = `
+    <h2>Messages per day (last 30)</h2>
+    <table><tbody>${byDay.map(([day, count]) =>
+      `<tr><td style="width:110px;font-family:ui-monospace,monospace;color:var(--muted)">${day}</td>
+      <td><div class="bar" style="width:${Math.round(count / maxDay * 500)}px"></div>&nbsp; ${count}</td></tr>`
+    ).join('')}</tbody></table>
+    <h2>Skills used</h2>
+    <table><tbody>${(d.skills_used || []).map(([k, v]) =>
+      `<tr><td style="width:200px;font-family:ui-monospace,monospace">${k}</td><td>${v}</td></tr>`
+    ).join('')}</tbody></table>
+    <h2>Artifact types</h2>
+    <table><tbody>${(d.artifact_types || []).map(([k, v]) =>
+      `<tr><td style="width:320px;font-family:ui-monospace,monospace;font-size:11px">${k}</td><td>${v}</td></tr>`
+    ).join('')}</tbody></table>
+    <h2>Personas invoked</h2>
+    <table><tbody>${(d.personas_used || []).map(([k, v]) =>
+      `<tr><td style="width:150px;font-family:ui-monospace,monospace">/as ${k}</td><td>${v}</td></tr>`
+    ).join('')}</tbody></table>
+  `;
+}
+
+function kpi(l, v) {
+  return `<div class="kpi"><div class="v">${v.toLocaleString ? v.toLocaleString() : v}</div><div class="l">${l}</div></div>`;
+}
+</script>
+</body>
+</html>
