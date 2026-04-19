@@ -1654,12 +1654,41 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
       // Unlock auto-classifier for next turn once the user has sent one.
       state._scopeLocked = false;
 
-      const runs = [];
-      for (let i = 0; i < variants; i++) {
-        const temp = variants === 1 ? 0.7 : 0.5 + (i * 0.25);
-        runs.push(runOne(messages, temp));
+      // Single-variant path streams incrementally into the chat history
+      // panel so the user sees tokens arriving. Variants stay
+      // non-streaming (rendering 3 streams live would be noise).
+      let results;
+      if (variants === 1) {
+        // Seed a live assistant entry in the chat log; we update its
+        // text on each delta.
+        const liveIdx = state.history.push({ role: "assistant", text: "", streaming: true }) - 1;
+        renderHistory(host);
+        const onDelta = (_delta, full) => {
+          state.history[liveIdx].text = streamPreview(full);
+          // Throttle DOM writes: render at most every 3 chunks
+          if (!onDelta._t) onDelta._t = true;
+          if (onDelta._pending) return;
+          onDelta._pending = true;
+          requestAnimationFrame(() => {
+            onDelta._pending = false;
+            renderHistory(host);
+          });
+        };
+        const text = await runOne(messages, 0.7, onDelta);
+        // Finalise the live entry: replace streamed preview with a
+        // terse final summary ("Generated v{N}") once the artifact
+        // parses; the actual HTML is in state.versions.
+        state.history[liveIdx].streaming = false;
+        state.history[liveIdx].text = `Generating v${state.versions.length + 1}…`;
+        results = [text];
+      } else {
+        const runs = [];
+        for (let i = 0; i < variants; i++) {
+          const temp = 0.5 + (i * 0.25);
+          runs.push(runOne(messages, temp));
+        }
+        results = await Promise.all(runs);
       }
-      const results = await Promise.all(runs);
       const variantGroup = variants > 1 ? Date.now() : null;
       const startIdx = state.versions.length;
       for (let i = 0; i < results.length; i++) {
@@ -1742,7 +1771,11 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
     };
   }
 
-  async function runOne(messages, temperature) {
+  async function runOne(messages, temperature, onDelta) {
+    // Streaming via OpenAI-spec SSE. Caller gets incremental deltas
+    // through onDelta(chunk). The full accumulated content is returned
+    // on finish. If onDelta is omitted we still stream (same cost) but
+    // nothing surfaces live.
     const res = await fetch("/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1751,12 +1784,60 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
         messages,
         temperature,
         max_tokens: 4096,
-        stream: false,
+        stream: true,
       }),
     });
     if (!res.ok) throw new Error("HTTP " + res.status);
-    const data = await res.json();
-    return data.choices?.[0]?.message?.content || "";
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    let full = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      // Parse any complete SSE events (data: …\n\n).
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) !== -1) {
+        const evt = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        for (const line of evt.split("\n")) {
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+          if (!payload || payload === "[DONE]") continue;
+          try {
+            const j = JSON.parse(payload);
+            const delta = j.choices?.[0]?.delta?.content || "";
+            if (delta) {
+              full += delta;
+              if (onDelta) onDelta(delta, full);
+            }
+          } catch { /* ignore malformed line */ }
+        }
+      }
+    }
+    return full;
+  }
+
+  // Shorten the streamed body for preview in the chat log: strip the
+  // <antArtifact> block (it's massive) and replace with a compact tag
+  // so the user sees what's streaming without the whole HTML scrolling.
+  function streamPreview(full) {
+    let t = full;
+    const open = t.indexOf("<antArtifact");
+    if (open >= 0) {
+      const close = t.indexOf("</antArtifact>", open);
+      if (close >= 0) {
+        t = t.slice(0, open) + "📄 …artifact ready…" + t.slice(close + "</antArtifact>".length);
+      } else {
+        t = t.slice(0, open) + "📄 …writing artifact…";
+      }
+    }
+    // Keep the tail (latest words) rather than the head — more relevant
+    // while streaming. Cap at 600 chars.
+    if (t.length > 600) t = "…" + t.slice(t.length - 600);
+    return t;
   }
 
   function extractArtifact(text) {
