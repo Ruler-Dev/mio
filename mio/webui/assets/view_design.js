@@ -362,6 +362,7 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
             <button class="btn-ghost" data-action="inspect" title="Click an element → draft a prompt to change it">Inspect</button>
             <button class="btn-ghost" data-action="edit" title="Click any element and edit its text + styles directly (no model call)">Edit</button>
             <button class="btn-ghost" data-action="tokens" title="Tweak colors, radii, fonts live (no model call)">Tokens</button>
+            <button class="btn-ghost" data-action="console" title="Show console + network activity from the preview"><span id="design-console-badge" hidden></span>Console</button>
             <button class="btn-ghost" data-action="fork" title="Fork a variant from this version">Fork</button>
             <button class="btn-ghost" data-action="copy">Copy HTML</button>
             <button class="btn-ghost" data-action="download" title="Download active version as index.html">HTML</button>
@@ -614,6 +615,10 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
           onEditPicked(host, iframe, e.data);
         } else if (e.data.__mioDesignEditText === true) {
           onEditText(host, e.data);
+        } else if (e.data.__mioDesignConsole === true) {
+          onConsoleEvent(host, { kind: "log", ...e.data });
+        } else if (e.data.__mioDesignNet === true) {
+          onConsoleEvent(host, { kind: "net", ...e.data });
         }
       };
       window.addEventListener("message", handler);
@@ -713,6 +718,97 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
     }
   }
 
+  // --- Console drawer --------------------------------------------------
+  // A bottom drawer that accumulates log + net events from the iframe.
+  // State is in-memory per Design-Mode session (not persisted — logs
+  // are ephemeral debug info).
+
+  state._consoleEvents = state._consoleEvents || [];
+  const MAX_CONSOLE_EVENTS = 200;
+
+  function onConsoleEvent(host, evt) {
+    state._consoleEvents.push(evt);
+    if (state._consoleEvents.length > MAX_CONSOLE_EVENTS) {
+      state._consoleEvents.splice(0, state._consoleEvents.length - MAX_CONSOLE_EVENTS);
+    }
+    // If drawer open, append live
+    const log = host.querySelector(".design-console-log");
+    if (log) appendConsoleLine(log, evt);
+    // Badge on the button
+    const badge = host.querySelector("#design-console-badge");
+    if (badge && !host.querySelector(".design-console")) {
+      const count = state._consoleEvents.length;
+      badge.hidden = false;
+      badge.textContent = count > 99 ? "99+" : String(count);
+    }
+  }
+
+  function toggleConsole(host) {
+    const existing = host.querySelector(".design-console");
+    if (existing) { existing.remove(); return; }
+    const panel = document.createElement("div");
+    panel.className = "design-console";
+    panel.innerHTML = `
+      <header>
+        <strong>Console</strong>
+        <span class="muted">${state._consoleEvents.length} events</span>
+        <div style="flex:1"></div>
+        <button data-action="clear-console">Clear</button>
+        <button data-action="send-console" title="Insert a summary into the composer">Send to chat</button>
+        <button data-action="close-console" aria-label="Close">×</button>
+      </header>
+      <div class="design-console-log"></div>
+    `;
+    host.querySelector(".design-right").appendChild(panel);
+    const log = panel.querySelector(".design-console-log");
+    for (const evt of state._consoleEvents) appendConsoleLine(log, evt);
+    panel.querySelector('[data-action="close-console"]').addEventListener("click", () => panel.remove());
+    panel.querySelector('[data-action="clear-console"]').addEventListener("click", () => {
+      state._consoleEvents = [];
+      log.innerHTML = "";
+      const badge = host.querySelector("#design-console-badge");
+      if (badge) { badge.hidden = true; badge.textContent = ""; }
+    });
+    panel.querySelector('[data-action="send-console"]').addEventListener("click", () => {
+      const input = host.querySelector("#design-input");
+      const summary = state._consoleEvents.slice(-20).map((e) => {
+        if (e.kind === "net") return `[${e.method} ${e.status || "ERR"}] ${e.url} ${e.ms}ms`;
+        return `[${e.level}] ${e.message}`;
+      }).join("\n");
+      input.value = `Here's the recent console activity from the preview — investigate + fix anything off:\n\n${summary}\n\n`;
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+      const v = state.versions[state.activeVersion];
+      if (v) state._forkSeed = v.html;
+    });
+    // Hide badge while open
+    const badge = host.querySelector("#design-console-badge");
+    if (badge) { badge.hidden = true; badge.textContent = ""; }
+  }
+
+  function appendConsoleLine(log, evt) {
+    const ln = document.createElement("div");
+    ln.className = "design-console-line " + (evt.kind || "");
+    if (evt.kind === "net") {
+      const status = evt.status || "ERR";
+      ln.classList.add("net-" + (status >= 400 || status === 0 ? "err" : "ok"));
+      ln.innerHTML = `
+        <span class="c-tag">${escapeHtml(evt.method || "")}</span>
+        <span class="c-status">${status}</span>
+        <span class="c-msg" title="${escapeAttr(evt.url || "")}">${escapeHtml(evt.url || "")}</span>
+        <span class="c-ms">${evt.ms ?? ""}ms</span>
+      `;
+    } else {
+      ln.classList.add("level-" + (evt.level || "log"));
+      ln.innerHTML = `
+        <span class="c-tag">${escapeHtml(evt.level || "log")}</span>
+        <span class="c-msg">${escapeHtml(evt.message || "")}</span>
+      `;
+    }
+    log.appendChild(ln);
+    log.scrollTop = log.scrollHeight;
+  }
+
   function renderVariantGrid(host, canvas, variants) {
     canvas.innerHTML = `
       <div class="design-compare">
@@ -786,6 +882,34 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
     if (!e.data || e.data.__mioDesignTokenSet !== true) return;
     try { document.documentElement.style.setProperty(e.data.name, e.data.value); } catch(_) {}
   });
+  // Mirror console.* and failed fetches back to the parent for the
+  // Design Mode console drawer.
+  function mioLog(level, args){
+    try {
+      var msg = args.map(function(a){ try { return typeof a === 'string' ? a : JSON.stringify(a); } catch(_) { return String(a); } }).join(' ');
+      parent.postMessage({__mioDesignConsole:true, level:level, message:msg.slice(0, 800), ts: Date.now()}, '*');
+    } catch(_){}
+  }
+  ['log','info','warn','error','debug'].forEach(function(level){
+    var orig = console[level].bind(console);
+    console[level] = function(){ mioLog(level, [].slice.call(arguments)); orig.apply(console, arguments); };
+  });
+  // Network capture (fetch only; XHR skipped for brevity)
+  var origFetch = window.fetch && window.fetch.bind(window);
+  if (origFetch) {
+    window.fetch = function(input, init){
+      var url = typeof input === 'string' ? input : (input && input.url) || '';
+      var method = (init && init.method) || (input && input.method) || 'GET';
+      var t0 = performance.now();
+      return origFetch(input, init).then(function(r){
+        try { parent.postMessage({__mioDesignNet:true, url:url, method:method, status:r.status, ms: Math.round(performance.now()-t0)}, '*'); } catch(_){}
+        return r;
+      }).catch(function(err){
+        try { parent.postMessage({__mioDesignNet:true, url:url, method:method, status:0, ms: Math.round(performance.now()-t0), error: String(err)}, '*'); } catch(_){}
+        throw err;
+      });
+    };
+  }
 })();
 </script>`;
     const inspectScript = !inspect ? "" : `
@@ -1434,6 +1558,10 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
     // Tokens panel toggle
     host.querySelector('[data-action="tokens"]').addEventListener("click", () => {
       toggleTokens(host);
+    });
+    // Console drawer toggle
+    host.querySelector('[data-action="console"]').addEventListener("click", () => {
+      toggleConsole(host);
     });
     // Floating "Bake edits" bar — shown whenever there are pending
     // local edits. Positioned above the scrubber.
