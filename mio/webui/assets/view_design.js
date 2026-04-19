@@ -115,6 +115,7 @@ No explanations after the artifact. The artifact IS the design.`;
             <div class="design-version-label" id="design-version-label">No design yet</div>
             <div style="flex:1"></div>
             <button class="btn-ghost" data-action="inspect" title="Click an element in the preview to edit it">Inspect</button>
+            <button class="btn-ghost" data-action="tokens" title="Tweak colors, radii, fonts live (no model call)">Tokens</button>
             <button class="btn-ghost" data-action="fork" title="Fork a variant from this version">Fork</button>
             <button class="btn-ghost" data-action="copy">Copy HTML</button>
             <button class="btn-ghost" data-action="download">Download</button>
@@ -258,7 +259,14 @@ No explanations after the artifact. The artifact IS the design.`;
         }
       };
       window.addEventListener("message", handler);
-      iframe.addEventListener("load", () => { errorBar.hidden = true; });
+      iframe.addEventListener("load", () => {
+        errorBar.hidden = true;
+        // Re-apply any sticky token overrides to the freshly loaded iframe
+        const overrides = state._tokenOverrides || {};
+        for (const [name, value] of Object.entries(overrides)) {
+          applyTokenOverride(host, name, value);
+        }
+      });
     }
   }
 
@@ -286,6 +294,12 @@ No explanations after the artifact. The artifact IS the design.`;
   function post(err){ try { parent.postMessage({__mioDesignError:true, message:String(err.message||err), stack:String(err.stack||''), source:String(err.filename||''), line:err.lineno||0, col:err.colno||0}, '*'); } catch(_){} }
   window.addEventListener('error', (e) => post({message: e.message, filename: e.filename, lineno: e.lineno, colno: e.colno, stack: e.error?.stack}));
   window.addEventListener('unhandledrejection', (e) => post({message: 'Unhandled rejection: ' + (e.reason?.message || e.reason), stack: e.reason?.stack}));
+  // Live token patcher — parent posts {__mioDesignTokenSet, name, value}
+  // and we rewrite that CSS custom property on :root.
+  window.addEventListener('message', (e) => {
+    if (!e.data || e.data.__mioDesignTokenSet !== true) return;
+    try { document.documentElement.style.setProperty(e.data.name, e.data.value); } catch(_) {}
+  });
 })();
 </script>`;
     const inspectScript = !inspect ? "" : `
@@ -512,6 +526,162 @@ No explanations after the artifact. The artifact IS the design.`;
     if (state._inspect) {
       host.querySelector('[data-action="inspect"]')?.classList.add("active");
     }
+    // Tokens panel toggle
+    host.querySelector('[data-action="tokens"]').addEventListener("click", () => {
+      toggleTokens(host);
+    });
+  }
+
+  // --- Design tokens panel ---------------------------------------------
+  // Pulls any --var: value declaration from the active version's HTML,
+  // lets the user tweak them with live swatches/sliders, and posts a
+  // setProperty patch to the iframe. Changes are zero-model-call; when
+  // the user hits "Bake into prompt", the overrides become a system
+  // nudge on the next generation so they persist.
+
+  const COLOR_RE = /(#[0-9a-fA-F]{3,8}\b|rgb[a]?\([^)]+\)|hsl[a]?\([^)]+\))/;
+  const NUMERIC_RE = /(-?[0-9]*\.?[0-9]+)(px|rem|em|%)?\s*$/;
+
+  function extractTokens(html) {
+    if (!html) return [];
+    // Match `--name: value;` declarations in style blocks or style attrs.
+    const re = /--([a-zA-Z0-9_-]+)\s*:\s*([^;}\n]+?)\s*[;}]/g;
+    const out = new Map();
+    let m;
+    while ((m = re.exec(html)) !== null) {
+      const name = "--" + m[1];
+      const value = m[2].trim();
+      // De-dup: keep first (order matters in cascades, first usually wins at :root)
+      if (!out.has(name)) out.set(name, value);
+    }
+    return Array.from(out, ([name, value]) => ({ name, value }));
+  }
+
+  function tokenKind(value) {
+    if (COLOR_RE.test(value)) return "color";
+    if (NUMERIC_RE.test(value)) return "numeric";
+    return "text";
+  }
+
+  function toggleTokens(host) {
+    const existing = host.querySelector(".design-tokens-panel");
+    if (existing) { existing.remove(); return; }
+    const v = state.versions[state.activeVersion];
+    if (!v) return;
+    const tokens = extractTokens(v.html);
+    const panel = document.createElement("aside");
+    panel.className = "design-tokens-panel";
+    if (!tokens.length) {
+      panel.innerHTML = `
+        <header><strong>Design tokens</strong><button data-action="close" aria-label="Close">×</button></header>
+        <div class="design-tokens-empty">
+          <p>No CSS custom properties (<code>--name: value</code>) found in this design.</p>
+          <p class="muted">Ask the model to "define your colors as CSS variables" to unlock live tweaking.</p>
+        </div>
+      `;
+    } else {
+      panel.innerHTML = `
+        <header>
+          <strong>Design tokens</strong>
+          <span class="muted" style="font-size:11px">${tokens.length} found</span>
+          <div style="flex:1"></div>
+          <button data-action="close" aria-label="Close">×</button>
+        </header>
+        <div class="design-tokens-list" id="design-tokens-list"></div>
+        <footer>
+          <button data-action="reset">Reset</button>
+          <button data-action="bake" title="Include these overrides in the next Generate so they persist">Bake into prompt</button>
+        </footer>
+      `;
+    }
+    host.querySelector(".design-right").appendChild(panel);
+    panel.querySelector('[data-action="close"]').addEventListener("click", () => panel.remove());
+    if (!tokens.length) return;
+
+    const list = panel.querySelector("#design-tokens-list");
+    state._tokenOverrides = state._tokenOverrides || {};
+    for (const t of tokens) {
+      list.appendChild(renderTokenRow(host, t));
+    }
+    panel.querySelector('[data-action="reset"]').addEventListener("click", () => {
+      state._tokenOverrides = {};
+      saveSession();
+      // Clear any applied style in the iframe by re-rendering
+      showVersion(host, state.versions[state.activeVersion]);
+      toggleTokens(host); toggleTokens(host); // re-open fresh
+    });
+    panel.querySelector('[data-action="bake"]').addEventListener("click", () => {
+      const overrides = state._tokenOverrides || {};
+      if (!Object.keys(overrides).length) return;
+      const input = host.querySelector("#design-input");
+      const list = Object.entries(overrides).map(([k, v]) => `  ${k}: ${v}`).join("\n");
+      input.value = `Keep the current design but use these token values at :root:\n${list}\n\n`;
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+      onPromptInput(host);
+    });
+  }
+
+  function renderTokenRow(host, token) {
+    const row = document.createElement("div");
+    row.className = "design-token-row";
+    const kind = tokenKind(token.value);
+    const current = (state._tokenOverrides?.[token.name]) ?? token.value;
+    let control = "";
+    if (kind === "color") {
+      const hex = toHex(current) || "#888888";
+      control = `<input type="color" value="${hex}" data-kind="color">`;
+    } else if (kind === "numeric") {
+      const m = current.match(NUMERIC_RE);
+      const num = m ? parseFloat(m[1]) : 0;
+      const unit = (m && m[2]) || "px";
+      control = `<input type="number" step="0.25" value="${num}" data-kind="numeric" data-unit="${unit}">`;
+    } else {
+      control = `<input type="text" value="${escapeAttr(current)}" data-kind="text">`;
+    }
+    row.innerHTML = `
+      <code class="design-token-name" title="${escapeAttr(token.name)}">${escapeHtml(token.name)}</code>
+      ${control}
+      <span class="design-token-value" aria-hidden="true">${escapeHtml(current)}</span>
+    `;
+    const input = row.querySelector("input");
+    input.addEventListener("input", () => {
+      const kind = input.dataset.kind;
+      let newVal;
+      if (kind === "numeric") newVal = input.value + (input.dataset.unit || "");
+      else newVal = input.value;
+      state._tokenOverrides[token.name] = newVal;
+      row.querySelector(".design-token-value").textContent = newVal;
+      applyTokenOverride(host, token.name, newVal);
+      saveSession();
+    });
+    return row;
+  }
+
+  function applyTokenOverride(host, name, value) {
+    // postMessage to the iframe, which runs a tiny setProperty script.
+    const iframe = host.querySelector(".design-iframe");
+    if (!iframe || !iframe.contentWindow) return;
+    iframe.contentWindow.postMessage(
+      { __mioDesignTokenSet: true, name, value },
+      "*",
+    );
+  }
+
+  function toHex(color) {
+    // Accepts #rgb / #rrggbb / rgb() / rgba(). Returns #rrggbb.
+    if (!color) return null;
+    const s = color.trim();
+    if (/^#([0-9a-f]{6})$/i.test(s)) return s;
+    if (/^#([0-9a-f]{3})$/i.test(s)) {
+      return "#" + s[1] + s[1] + s[2] + s[2] + s[3] + s[3];
+    }
+    const m = s.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+    if (m) {
+      const h = (n) => Number(n).toString(16).padStart(2, "0");
+      return "#" + h(m[1]) + h(m[2]) + h(m[3]);
+    }
+    return null;
   }
 
   async function generate(host) {
