@@ -1,8 +1,15 @@
-// view_design.js — placeholder for Design Mode.
+// view_design.js — Design Mode.
 //
-// Full Claude/Stitch-inspired canvas lands next: chat left, artifact
-// panel right, Preview/Code/Diff tabs, version scrubber, parallel-
-// variant generation with the tandem router, vibe chips.
+// Two-pane canvas inspired by Claude's artifact mode + Google Stitch:
+//   left:  prompt composer + vibe chips + history log (compact)
+//   right: artifact preview with version scrubber and Preview / Code tabs
+//
+// Each prompt fires the model via /v1/chat/completions with a design-
+// focused system prompt that strongly biases toward a single
+// <antArtifact> containing a React/Tailwind page. The response is
+// captured as a new numbered version and rendered in a sandboxed
+// iframe. Versions stack up — scrub back through any of them without
+// losing what came after.
 
 (function () {
   window.Mio = window.Mio || {};
@@ -10,23 +17,321 @@
     if (!window.Mio.views) return setTimeout(ready, 50);
     window.Mio.views.register("design", {
       title: "Design",
-      mount(host) {
-        host.innerHTML = `
-          <div class="view-empty">
-            <div class="view-empty-inner">
-              <h1>Design Mode</h1>
-              <p>
-                A focused canvas for chatting about UI designs. The model
-                emits React / HTML artifacts you can preview, diff, and
-                scrub through prior versions. Uses the tandem router to
-                generate multiple design variants in parallel.
-              </p>
-              <p class="muted">Landing in the next commit.</p>
-            </div>
-          </div>
-        `;
-      },
+      mount(host) { renderRoot(host); },
     });
   };
   ready();
+
+  // --- State -----------------------------------------------------------
+
+  const STORAGE_KEY = "mio.design.session";
+  const DEFAULT_VIBES = [
+    "minimal", "dark mode", "playful", "premium B2B",
+    "brutalist", "glassmorphism", "retro 80s", "dense dashboard",
+    "editorial", "warm earthy", "neon arcade", "monochrome",
+  ];
+
+  const SYSTEM_PROMPT = `You are a senior UI/UX engineer. The user is designing a web page or component.
+
+Always respond with a SHORT intro sentence, then a SINGLE <antArtifact> tag containing a fully self-contained HTML document the user can preview in an iframe. No external build step: use React + Tailwind via CDN with Babel standalone, or plain HTML/CSS if that's enough. Keep code tight and polished; animations OK when they help.
+
+Artifact template:
+<antArtifact identifier="design-v{N}" type="text/html" title="Short title of this design">
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+</head>
+<body class="bg-neutral-50">
+<div id="root"></div>
+<script type="text/babel">
+// your React component here
+const App = () => (<div className="…">…</div>);
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
+</antArtifact>
+
+No explanations after the artifact. The artifact IS the design.`;
+
+  const state = loadSession();
+
+  function loadSession() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) return JSON.parse(raw);
+    } catch {}
+    return { versions: [], history: [], activeVersion: -1 };
+  }
+  function saveSession() {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch {}
+  }
+
+  // --- Render ----------------------------------------------------------
+
+  function renderRoot(host) {
+    host.innerHTML = `
+      <div class="view-design">
+        <aside class="design-left">
+          <header class="design-left-head">
+            <h1>Design Mode</h1>
+            <button class="btn-ghost" data-action="reset">New session</button>
+          </header>
+          <div class="design-history" id="design-history"></div>
+          <div class="design-composer">
+            <div class="design-vibes" id="design-vibes"></div>
+            <textarea class="design-input" id="design-input" rows="3" placeholder="Describe what you want to design…  (e.g. 'a settings page for a music app')"></textarea>
+            <div class="design-composer-foot">
+              <label class="design-check" title="Fire 3 parallel generations with temperature jitter, pick the best">
+                <input type="checkbox" id="design-variants"> Generate 3 variants
+              </label>
+              <div style="flex:1"></div>
+              <button class="btn-ghost design-generate" data-action="generate">Generate</button>
+            </div>
+          </div>
+        </aside>
+        <main class="design-right">
+          <header class="design-right-head">
+            <div class="design-tabs" role="tablist">
+              <button class="design-tab active" data-tab="preview" role="tab">Preview</button>
+              <button class="design-tab"        data-tab="code"    role="tab">Code</button>
+            </div>
+            <div class="design-version-label" id="design-version-label">No design yet</div>
+            <div style="flex:1"></div>
+            <button class="btn-ghost" data-action="copy">Copy HTML</button>
+            <button class="btn-ghost" data-action="download">Download</button>
+          </header>
+          <div class="design-canvas" id="design-canvas"></div>
+          <footer class="design-scrubber" id="design-scrubber"></footer>
+        </main>
+      </div>
+    `;
+    renderVibes(host);
+    renderHistory(host);
+    renderVersions(host);
+    wireHandlers(host);
+  }
+
+  function renderVibes(host) {
+    const wrap = host.querySelector("#design-vibes");
+    wrap.innerHTML = "";
+    for (const v of DEFAULT_VIBES) {
+      const chip = document.createElement("button");
+      chip.className = "design-vibe";
+      chip.textContent = v;
+      chip.addEventListener("click", () => {
+        const input = host.querySelector("#design-input");
+        const sep = input.value && !input.value.endsWith(" ") ? " " : "";
+        input.value += `${sep}[${v}] `;
+        input.focus();
+      });
+      wrap.appendChild(chip);
+    }
+  }
+
+  function renderHistory(host) {
+    const wrap = host.querySelector("#design-history");
+    if (!state.history.length) {
+      wrap.innerHTML = `<div class="muted" style="padding:10px 14px;font-size:12px">No messages yet. Try a vibe chip.</div>`;
+      return;
+    }
+    wrap.innerHTML = state.history.map((m, i) => `
+      <div class="design-msg design-msg-${m.role}">
+        <div class="design-msg-role">${m.role}</div>
+        <div class="design-msg-text">${escapeHtml(m.text || "")}</div>
+      </div>
+    `).join("");
+    wrap.scrollTop = wrap.scrollHeight;
+  }
+
+  function renderVersions(host) {
+    const scrubber = host.querySelector("#design-scrubber");
+    const label = host.querySelector("#design-version-label");
+    scrubber.innerHTML = "";
+    if (!state.versions.length) {
+      label.textContent = "No design yet";
+      host.querySelector("#design-canvas").innerHTML = `
+        <div class="design-empty">
+          <p>Describe a page, click a vibe, hit Generate.</p>
+        </div>
+      `;
+      return;
+    }
+    for (let i = 0; i < state.versions.length; i++) {
+      const v = state.versions[i];
+      const dot = document.createElement("button");
+      dot.className = "design-version" + (i === state.activeVersion ? " active" : "");
+      dot.textContent = "v" + (i + 1);
+      dot.title = v.title || "";
+      dot.addEventListener("click", () => switchVersion(host, i));
+      scrubber.appendChild(dot);
+    }
+    const active = state.versions[state.activeVersion] || state.versions[state.versions.length - 1];
+    label.textContent = `v${state.activeVersion + 1} · ${active.title || "design"}`;
+    showVersion(host, active);
+  }
+
+  function showVersion(host, v) {
+    const canvas = host.querySelector("#design-canvas");
+    const tab = host.querySelector(".design-tab.active").dataset.tab;
+    if (tab === "code") {
+      canvas.innerHTML = `<pre class="design-code"><code>${escapeHtml(v.html || "")}</code></pre>`;
+    } else {
+      canvas.innerHTML = "";
+      const iframe = document.createElement("iframe");
+      iframe.className = "design-iframe";
+      iframe.sandbox = "allow-scripts";
+      iframe.srcdoc = v.html || "";
+      canvas.appendChild(iframe);
+    }
+  }
+
+  function switchVersion(host, i) {
+    state.activeVersion = i;
+    saveSession();
+    renderVersions(host);
+  }
+
+  // --- Wiring ----------------------------------------------------------
+
+  function wireHandlers(host) {
+    const input = host.querySelector("#design-input");
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        generate(host);
+      }
+    });
+    host.querySelector('[data-action="generate"]').addEventListener("click", () => generate(host));
+    host.querySelector('[data-action="reset"]').addEventListener("click", () => {
+      if (!confirm("Clear this design session? Versions will be lost.")) return;
+      state.versions = []; state.history = []; state.activeVersion = -1;
+      saveSession();
+      renderRoot(host);
+    });
+    host.querySelector('[data-action="copy"]').addEventListener("click", () => {
+      const v = state.versions[state.activeVersion];
+      if (!v) return;
+      navigator.clipboard?.writeText(v.html || "");
+    });
+    host.querySelector('[data-action="download"]').addEventListener("click", () => {
+      const v = state.versions[state.activeVersion];
+      if (!v) return;
+      const blob = new Blob([v.html || ""], { type: "text/html" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = (v.title || "design") + ".html";
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    });
+    host.querySelectorAll(".design-tab").forEach((tab) => {
+      tab.addEventListener("click", () => {
+        host.querySelectorAll(".design-tab").forEach((t) => t.classList.toggle("active", t === tab));
+        const v = state.versions[state.activeVersion];
+        if (v) showVersion(host, v);
+      });
+    });
+  }
+
+  async function generate(host) {
+    const input = host.querySelector("#design-input");
+    const prompt = input.value.trim();
+    if (!prompt) return;
+    const variants = host.querySelector("#design-variants").checked ? 3 : 1;
+
+    state.history.push({ role: "user", text: prompt });
+    saveSession();
+    renderHistory(host);
+    input.value = "";
+    const genBtn = host.querySelector('[data-action="generate"]');
+    genBtn.disabled = true; genBtn.textContent = variants > 1 ? "Generating 3…" : "Generating…";
+
+    try {
+      // Use the existing OpenAI-compatible endpoint. Model pick-up:
+      // whatever the server has loaded as default (mio-large-moe).
+      const messages = [
+        { role: "system", content: SYSTEM_PROMPT },
+        ...state.history
+          .filter((m) => m.role === "user" || m.role === "assistant")
+          .slice(-10)
+          .map((m) => ({ role: m.role, content: m.text || "" })),
+      ];
+      // Replace the latest user message (already pushed above) with the
+      // current prompt if it's not already the tail.
+      if (messages[messages.length - 1].role !== "user") {
+        messages.push({ role: "user", content: prompt });
+      }
+
+      const runs = [];
+      for (let i = 0; i < variants; i++) {
+        const temp = variants === 1 ? 0.7 : 0.5 + (i * 0.25);
+        runs.push(runOne(messages, temp));
+      }
+      const results = await Promise.all(runs);
+      for (const text of results) {
+        const html = extractArtifact(text);
+        const versionNum = state.versions.length + 1;
+        state.versions.push({
+          n:     versionNum,
+          title: `v${versionNum}` + (results.length > 1 ? ` (variant)` : ""),
+          html:  html || renderErrorHTML(text),
+          prompt,
+          ts:    Date.now(),
+        });
+      }
+      state.activeVersion = state.versions.length - 1;
+      state.history.push({
+        role: "assistant",
+        text: variants > 1 ? `Generated ${variants} variants. v${state.versions.length - 2 + 1}–v${state.versions.length} on the scrubber.`
+                           : `Generated v${state.versions.length}.`,
+      });
+      saveSession();
+      renderHistory(host);
+      renderVersions(host);
+    } catch (e) {
+      state.history.push({ role: "assistant", text: "Error: " + e.message });
+      saveSession();
+      renderHistory(host);
+    } finally {
+      genBtn.disabled = false; genBtn.textContent = "Generate";
+    }
+  }
+
+  async function runOne(messages, temperature) {
+    const res = await fetch("/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "mio-auto",
+        messages,
+        temperature,
+        max_tokens: 4096,
+        stream: false,
+      }),
+    });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    return data.choices?.[0]?.message?.content || "";
+  }
+
+  function extractArtifact(text) {
+    // Grab the contents of the first <antArtifact …>…</antArtifact>.
+    const m = text.match(/<antArtifact[^>]*>([\s\S]*?)<\/antArtifact>/);
+    if (!m) return null;
+    return m[1].trim();
+  }
+
+  function renderErrorHTML(rawReply) {
+    return `<!doctype html><html><body style="margin:0;padding:24px;font-family:-apple-system,system-ui,sans-serif;color:#333;background:#fff"><h2 style="margin:0 0 10px">No &lt;antArtifact&gt; in the reply</h2><p style="color:#666;font-size:13px;margin:0 0 12px">The model didn't wrap its output in the expected tag. Raw reply:</p><pre style="background:#f5f5f5;padding:12px;border-radius:6px;font-size:12px;white-space:pre-wrap;overflow:auto;max-height:60vh">${escapeHtml(rawReply)}</pre></body></html>`;
+  }
+
+  function escapeHtml(s) {
+    return String(s ?? "").replace(/[&<>"']/g, (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[c]));
+  }
 })();
