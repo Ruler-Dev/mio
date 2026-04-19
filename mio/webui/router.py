@@ -687,30 +687,101 @@ async def ingest_from_browser(body: dict):
 
 
 @router.get("/api/ingest")
-async def list_ingested(limit: int = 50):
-    """List everything the browser extension has stashed, newest first."""
+async def list_ingested(limit: int = 100, tag: str | None = None):
+    """List everything the browser extension has stashed, newest first.
+
+    Each item includes parsed YAML front-matter fields (title, source,
+    tags, fetched). Filter by `tag` query param to see only items with
+    that tag.
+    """
     from pathlib import Path as _P
     import re as _re
     root = _P.home() / ".mio" / "ingest"
     if not root.exists():
-        return {"items": []}
+        return {"items": [], "tags": []}
     items = []
-    for p in sorted(root.glob("*.md"), reverse=True)[:limit]:
+    all_tags: set[str] = set()
+    for p in sorted(root.glob("*.md"), reverse=True):
         head = p.read_text()[:2048]
         title = url = ""
+        tags: list[str] = []
         m = _re.search(r"^title:\s*['\"]?(.*?)['\"]?$", head, _re.MULTILINE)
         if m: title = m.group(1)
         m = _re.search(r"^source:\s*(.*?)$", head, _re.MULTILINE)
         if m: url = m.group(1)
+        m = _re.search(r"^tags:\s*(\[.*?\])$", head, _re.MULTILINE)
+        if m:
+            try:
+                raw = m.group(1).strip("[]")
+                tags = [t.strip().strip("'\"") for t in raw.split(",") if t.strip()]
+            except Exception:
+                tags = []
+        for t in tags:
+            all_tags.add(t)
+        if tag and tag not in tags:
+            continue
         items.append({
             "id":    p.stem,
             "path":  str(p),
             "title": title or p.stem,
             "url":   url,
+            "tags":  tags,
             "size":  p.stat().st_size,
             "mtime": p.stat().st_mtime,
         })
-    return {"items": items}
+        if len(items) >= limit:
+            break
+    return {"items": items, "tags": sorted(all_tags)}
+
+
+# --- RAG index management ---
+@router.get("/api/rag/indexes")
+async def rag_list_indexes():
+    """List all indexed folders with file counts + timestamps."""
+    try:
+        from mio.webui.skills_rag import list_indexes
+        r = list_indexes()
+        return {"indexes": r.get("indexes", [])}
+    except Exception as e:
+        return {"indexes": [], "error": str(e)}
+
+
+@router.post("/api/rag/index")
+async def rag_add_index(body: dict):
+    """Index a folder path for full-text search. Body: {path, label?}."""
+    path = (body or {}).get("path", "").strip()
+    label = (body or {}).get("label") or None
+    if not path:
+        return {"error": "path required"}
+    from pathlib import Path as _P
+    if not _P(path).expanduser().exists():
+        return {"error": f"path does not exist: {path}"}
+    try:
+        from mio.webui.skills_rag import index_folder
+        return index_folder(str(_P(path).expanduser()), label=label, replace=True)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@router.delete("/api/rag/index/{index_id}")
+async def rag_drop_index(index_id: int):
+    try:
+        from mio.webui.skills_rag import drop_index
+        return drop_index(int(index_id))
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@router.get("/api/rag/search")
+async def rag_search(q: str, limit: int = 10, label: str | None = None):
+    if not q:
+        return {"results": []}
+    try:
+        from mio.webui.skills_rag import search_local_folder
+        r = search_local_folder(q, limit=limit, index_label=label)
+        return {"results": r.get("results", []), "count": r.get("count", 0)}
+    except Exception as e:
+        return {"results": [], "error": str(e)}
 
 
 @router.delete("/api/ingest/{doc_id}")
