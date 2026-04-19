@@ -3486,3 +3486,16 @@ body.focus-mode .input-area { max-width: 720px; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ===== Prompt-history autosuggest ghost =============== */
+.mio-ghost {
+  background: transparent !important;
+  color: transparent;
+  z-index: 4;
+  overflow: hidden;
+}
+.mio-ghost-tail {
+  color: var(--text-muted);
+  opacity: 0.55;
+  pointer-events: none;
+}
