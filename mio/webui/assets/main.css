@@ -1882,3 +1882,63 @@ body.focus-mode .input-area { max-width: 720px; }
   cursor: pointer;
 }
 .design-compare-keep:hover { filter: brightness(1.05); }
+
+/* ===== Design Mode: reference-image chips =============== */
+.design-refs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.design-refs:empty { display: none; }
+.design-ref-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 4px 4px 4px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-sidebar);
+  border-radius: 8px;
+  max-width: 220px;
+}
+.design-ref-chip img {
+  width: 36px;
+  height: 36px;
+  object-fit: cover;
+  border-radius: 5px;
+  flex-shrink: 0;
+}
+.design-ref-chip-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+  font-size: 10px;
+  line-height: 1.2;
+}
+.design-ref-chip-name {
+  font-weight: 500;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.design-ref-chip-size {
+  color: var(--text-muted);
+}
+.design-ref-chip-close {
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.design-ref-chip-close:hover { color: #dc2626; }
+
+/* Drag-hover feedback on the whole composer */
+.design-composer.drop-hover {
+  outline: 2px dashed var(--accent);
+  outline-offset: -4px;
+  background: var(--accent-subtle);
+}

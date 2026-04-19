@@ -85,7 +85,8 @@ No explanations after the artifact. The artifact IS the design.`;
           <div class="design-history" id="design-history"></div>
           <div class="design-composer">
             <div class="design-vibes" id="design-vibes"></div>
-            <textarea class="design-input" id="design-input" rows="3" placeholder="Describe what you want to design…  (e.g. 'a settings page for a music app')"></textarea>
+            <div class="design-refs" id="design-refs"></div>
+            <textarea class="design-input" id="design-input" rows="3" placeholder="Describe what you want to design… Paste a screenshot to use as visual reference."></textarea>
             <div class="design-composer-foot">
               <div class="design-scope" id="design-scope" title="Patch: surgical edit, fast, keeps unrelated parts. Rewrite: full regenerate from scratch.">
                 <button class="design-scope-btn" data-scope="patch">Patch</button>
@@ -129,6 +130,80 @@ No explanations after the artifact. The artifact IS the design.`;
     renderHistory(host);
     renderVersions(host);
     wireHandlers(host);
+  }
+
+  // --- Reference images (paste / drop) ---------------------------------
+  // Held in memory only (not persisted) — kept on `state._refs` for the
+  // current render cycle; cleared after Generate so they don't bloat
+  // every subsequent turn.
+  state._refs = state._refs || [];
+
+  async function addReference(host, file) {
+    // Downscale to <= 1024 px longest edge + compress to JPEG so we
+    // don't blow through the model's pixel budget on a 5-MB screenshot.
+    try {
+      const dataUrl = await compressImage(file, 1024, 0.86);
+      state._refs.push({ name: file.name || "pasted.png", dataUrl, bytes: approxBytes(dataUrl) });
+      renderReferences(host);
+    } catch (e) {
+      console.warn("[design] image compress failed:", e);
+    }
+  }
+
+  function renderReferences(host) {
+    const wrap = host.querySelector("#design-refs");
+    if (!wrap) return;
+    if (!state._refs.length) { wrap.innerHTML = ""; wrap.hidden = true; return; }
+    wrap.hidden = false;
+    wrap.innerHTML = state._refs.map((r, i) => `
+      <div class="design-ref-chip" data-idx="${i}">
+        <img src="${r.dataUrl}" alt="">
+        <div class="design-ref-chip-meta">
+          <span class="design-ref-chip-name">${escapeHtml(r.name)}</span>
+          <span class="design-ref-chip-size">${kib(r.bytes)}</span>
+        </div>
+        <button class="design-ref-chip-close" aria-label="Remove">×</button>
+      </div>
+    `).join("");
+    wrap.querySelectorAll(".design-ref-chip-close").forEach((btn, i) => {
+      btn.addEventListener("click", () => {
+        state._refs.splice(i, 1);
+        renderReferences(host);
+      });
+    });
+  }
+
+  function compressImage(file, maxEdge, quality) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const img = new Image();
+        img.onload = () => {
+          const ratio = Math.min(1, maxEdge / Math.max(img.width, img.height));
+          const w = Math.round(img.width * ratio);
+          const h = Math.round(img.height * ratio);
+          const canvas = document.createElement("canvas");
+          canvas.width = w; canvas.height = h;
+          canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+          resolve(canvas.toDataURL("image/jpeg", quality));
+        };
+        img.onerror = reject;
+        img.src = reader.result;
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function approxBytes(dataUrl) {
+    const b64 = dataUrl.split(",")[1] || "";
+    return Math.round(b64.length * 0.75);
+  }
+
+  function kib(n) {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
+    return `${(n / 1024 / 1024).toFixed(1)} MiB`;
   }
 
   // --- Scope classifier (Patch vs Rewrite) -----------------------------
@@ -509,6 +584,30 @@ No explanations after the artifact. The artifact IS the design.`;
       }
     });
     input.addEventListener("input", () => onPromptInput(host));
+    // Paste image → add as reference chip
+    input.addEventListener("paste", async (e) => {
+      const files = Array.from(e.clipboardData?.items || [])
+        .filter((it) => it.kind === "file" && it.type.startsWith("image/"))
+        .map((it) => it.getAsFile())
+        .filter(Boolean);
+      if (!files.length) return;
+      e.preventDefault();
+      for (const f of files) await addReference(host, f);
+    });
+    // Drag-drop image onto composer
+    const composer = host.querySelector(".design-composer");
+    ["dragover", "dragenter"].forEach((ev) => {
+      composer.addEventListener(ev, (e) => { e.preventDefault(); composer.classList.add("drop-hover"); });
+    });
+    ["dragleave", "drop"].forEach((ev) => {
+      composer.addEventListener(ev, (e) => composer.classList.remove("drop-hover"));
+    });
+    composer.addEventListener("drop", async (e) => {
+      e.preventDefault();
+      const files = Array.from(e.dataTransfer?.files || []).filter((f) => f.type.startsWith("image/"));
+      for (const f of files) await addReference(host, f);
+    });
+    renderReferences(host);
     // Scope chip — click to override the auto-classification
     host.querySelectorAll(".design-scope-btn").forEach((b) => {
       b.addEventListener("click", () => {
@@ -765,9 +864,22 @@ No explanations after the artifact. The artifact IS the design.`;
           .map((m) => ({ role: m.role, content: m.text || "" })),
       ];
       // Replace the latest user message (already pushed above) with the
-      // current prompt if it's not already the tail.
+      // current prompt if it's not already the tail. When the user has
+      // pasted one or more reference images, use the multimodal
+      // content-list format so the VL model sees them alongside text.
       if (messages[messages.length - 1].role !== "user") {
         messages.push({ role: "user", content: prompt });
+      }
+      if (state._refs && state._refs.length) {
+        // Re-pack the last user message in multimodal form.
+        const textContent = typeof messages[messages.length - 1].content === "string"
+          ? messages[messages.length - 1].content
+          : prompt;
+        const parts = [{ type: "text", text: textContent + "\n\n(Use the reference images above as visual inspiration — do not try to pixel-match.)" }];
+        for (const r of state._refs) {
+          parts.push({ type: "image_url", image_url: { url: r.dataUrl } });
+        }
+        messages[messages.length - 1] = { role: "user", content: parts };
       }
       // If this generation is a fork from an existing version, hand the
       // model the full HTML of the source so it can iterate rather than
@@ -817,6 +929,9 @@ No explanations after the artifact. The artifact IS the design.`;
         text: variantGroup ? `Generated ${variants} variants — pick one to keep (the others stay in the scrubber).`
                            : `Generated v${state.versions.length}.`,
       });
+      // Drop references — they were one-shot seeds for this turn.
+      state._refs = [];
+      renderReferences(host);
       saveSession();
       renderHistory(host);
       renderVersions(host);
