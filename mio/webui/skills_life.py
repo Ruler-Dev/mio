@@ -846,3 +846,112 @@ def meeting_notes(transcript: str) -> dict:
             "Items (owner + due date), Follow-ups."
         ),
     }
+
+
+# --- Blender bridge ---------------------------------------------------
+# Talks to the community blender-mcp addon (ahujasid/blender-mcp).
+# The addon runs a TCP JSON socket inside Blender (default localhost:9876)
+# and accepts messages of shape:
+#   {"type": "execute_code", "params": {"code": "..."}}
+#   {"type": "get_scene_info", "params": {}}
+# Responses are newline-delimited JSON. We wrap each primitive in a
+# short-timeout socket roundtrip so the skill can't hang the agent.
+
+def _blender_send(payload: dict, host: str = "localhost", port: int = 9876, timeout: float = 15.0) -> dict:
+    import json as _json
+    import socket as _socket
+    try:
+        with _socket.create_connection((host, port), timeout=timeout) as s:
+            s.settimeout(timeout)
+            s.sendall(_json.dumps(payload).encode() + b"\n")
+            chunks: list[bytes] = []
+            while True:
+                try:
+                    data = s.recv(65536)
+                except _socket.timeout:
+                    break
+                if not data:
+                    break
+                chunks.append(data)
+                # Try to parse early — blender-mcp addon sends one JSON
+                # object then closes the socket, so the first complete
+                # parse is the response.
+                try:
+                    return _json.loads(b"".join(chunks).decode())
+                except Exception:
+                    continue
+        return _json.loads(b"".join(chunks).decode()) if chunks else {}
+    except (ConnectionRefusedError, OSError) as e:
+        return {"_error": str(e), "_hint": (
+            "Blender isn't reachable on localhost:9876. Install the Mio / "
+            "blender-mcp addon (https://github.com/ahujasid/blender-mcp) "
+            "inside Blender, enable it, and click 'Start MCP server' in "
+            "the sidebar."
+        )}
+
+
+def blender_status() -> dict:
+    """Check whether a Blender MCP addon is listening on localhost:9876."""
+    r = _blender_send({"type": "get_scene_info", "params": {}}, timeout=3.0)
+    if r.get("_error"):
+        return {"skill": "blender_status", "connected": False, "error": r["_error"], "hint": r.get("_hint")}
+    info = r.get("result") or r
+    return {
+        "skill": "blender_status",
+        "connected": True,
+        "scene": info.get("scene_name") or info.get("name") or "",
+        "objects": info.get("objects", [])[:40],
+        "blender_version": info.get("blender_version") or info.get("version") or "",
+    }
+
+
+def blender_exec(code: str) -> dict:
+    """Run Python code inside the user's running Blender instance.
+
+    Use for: creating / modifying objects via bpy, importing assets,
+    rendering frames, writing .blend files. The user sees the result
+    immediately inside Blender itself.
+
+    SAFETY: the code runs with the user's full filesystem access — treat
+    this like a shell skill. The UI should confirm before invoking the
+    first N commands.
+    """
+    if not code or not isinstance(code, str):
+        return {"skill": "blender_exec", "error": "code required"}
+    r = _blender_send({"type": "execute_code", "params": {"code": code}}, timeout=60.0)
+    if r.get("_error"):
+        return {"skill": "blender_exec", "ok": False, "error": r["_error"], "hint": r.get("_hint")}
+    result = r.get("result") or r
+    return {
+        "skill":  "blender_exec",
+        "ok":     not bool(result.get("error")),
+        "stdout": result.get("stdout") or result.get("output") or "",
+        "error":  result.get("error"),
+        "snippet": code[:200],
+    }
+
+
+def blender_snapshot() -> dict:
+    """Ask Blender to render the current viewport as a PNG and return
+    the file path. Requires the blender-mcp addon to support
+    `render_viewport` — if not, this falls back to `execute_code` with
+    an OpenGL render."""
+    code = (
+        "import bpy, tempfile, os\n"
+        "path = os.path.join(tempfile.gettempdir(), 'mio-blender.png')\n"
+        "bpy.context.scene.render.filepath = path\n"
+        "bpy.ops.render.opengl(write_still=True)\n"
+        "print(path)\n"
+    )
+    r = blender_exec(code)
+    if not r.get("ok"):
+        return {"skill": "blender_snapshot", **r}
+    stdout = (r.get("stdout") or "").strip()
+    path = stdout.splitlines()[-1] if stdout else ""
+    from urllib.parse import quote as _q
+    return {
+        "skill":    "blender_snapshot",
+        "ok":       True,
+        "path":     path,
+        "url":      f"/ui/files/{_q(path.rsplit('/', 1)[-1])}" if path else "",
+    }

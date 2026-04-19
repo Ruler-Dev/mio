@@ -1006,6 +1006,9 @@ from mio.webui.skills_life import (
     quote as _g_quote,
     http_request as _g_http_request,
     reading_briefing as _g_reading_briefing,
+    blender_status as _g_blender_status,
+    blender_exec as _g_blender_exec,
+    blender_snapshot as _g_blender_snapshot,
 )
 
 SKILLS["http_request"] = {
@@ -1395,6 +1398,46 @@ SKILLS["meeting_notes"] = {
         "properties": {"transcript": {"type": "string"}},
         "required": ["transcript"],
     },
+}
+
+
+SKILLS["blender_status"] = {
+    "function": _g_blender_status,
+    "description": (
+        "Check whether a Blender MCP addon is listening on localhost:9876. "
+        "Returns { connected, scene, objects, blender_version } or a hint "
+        "on how to install the addon if it's not reachable."
+    ),
+    "parameters": {"type": "object", "properties": {}, "required": []},
+}
+
+SKILLS["blender_exec"] = {
+    "function": _g_blender_exec,
+    "description": (
+        "Run arbitrary Python code inside the user's RUNNING Blender via "
+        "the blender-mcp addon. Use for modelling (create / modify / "
+        "delete objects), materials, lighting, camera, import/export, "
+        "render. SAFETY: this runs with the user's full filesystem "
+        "access — only invoke on explicit user request. Use `import bpy` "
+        "at the top; Blender version is 4.2+ (no context-override dicts)."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "code": {"type": "string", "description": "Python code to exec inside Blender"},
+        },
+        "required": ["code"],
+    },
+}
+
+SKILLS["blender_snapshot"] = {
+    "function": _g_blender_snapshot,
+    "description": (
+        "Render the current Blender viewport as a PNG and return the "
+        "image URL. Use this after `blender_exec` to show the user "
+        "what was built."
+    ),
+    "parameters": {"type": "object", "properties": {}, "required": []},
 }
 
 

@@ -43,6 +43,7 @@
     shader: { label: "Shader",    icon: "🌈",  addendum: SHADER_ADDENDUM() },
     game:   { label: "Game",      icon: "🎮",  addendum: GAME_ADDENDUM() },
     cad:    { label: "CAD",       icon: "📐",  addendum: CAD_ADDENDUM() },
+    blender:{ label: "Blender",   icon: "🟠",  addendum: BLENDER_ADDENDUM() },
   };
 
   function SCENE_ADDENDUM() {
@@ -81,6 +82,26 @@ Ship a single <canvas> filling the viewport + a fullscreen triangle vertex shade
   iResolution (vec3)
   iMouse (vec4)
 Write the fragment shader in GLSL ES 3.00 with \`out vec4 fragColor;\`. Use WebGL2. Include time-animated distance fields, fbm noise, domain warping, polar mappings — produce art, not a solid color. No external libraries. If the user mentions a ShaderToy ID (e.g. "ShaderToy XsXXDn") or pastes a \`mainImage(fragColor, fragCoord)\` function, wrap it in the WebGL2 boilerplate as-is — preserving their logic.`;
+  }
+
+  function BLENDER_ADDENDUM() {
+    return `\n\nOUTPUT KIND: BLENDER (bpy).
+Produce a short intro, then a SINGLE <antArtifact identifier="blender-v{N}" type="application/vnd.pimio.blender" title="Short title">python code</antArtifact>
+containing ready-to-run bpy code for Blender 4.2+. The artifact panel will render a "▶ Send to Blender" button that POSTs the code to the user's running Blender via the blender-mcp addon (localhost:9876).
+
+Conventions:
+- Start with \`import bpy\` and, if needed, \`import bmesh, math, random\`.
+- Clear the default cube only when the user asked to "start clean":
+    for o in list(bpy.data.objects):
+        if o.type == 'MESH' and o.name.startswith('Cube'):
+            bpy.data.objects.remove(o, do_unlink=True)
+- Use \`bpy.data.objects.remove()\` NOT the 4.x-removed context-override \`bpy.ops.object.delete(...)\`.
+- Prefer additive construction: primitive_add → modifiers (Subdivision / Bevel / Array / Mirror) → materials (Principled BSDF with named nodes) → light / camera setup.
+- For materials, use \`node_tree.nodes\` / \`node_tree.links\`, not the legacy \`mat.diffuse_color\` shortcut.
+- At the end, print a one-line summary via \`print(...)\` so the user sees progress in stdout.
+- NEVER call \`bpy.ops.wm.save_as_mainfile\` or anything that overwrites files unless the user explicitly asked.
+
+If the user asks to SEE the result, recommend calling the \`blender_snapshot\` skill afterwards.`;
   }
 
   function CAD_ADDENDUM() {
@@ -239,6 +260,7 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
             <button class="design-kind" data-kind="shader" title="Full-screen ShaderToy-style fragment shader">🌈 Shader</button>
             <button class="design-kind" data-kind="game"   title="Playable kaboom.js game prototype">🎮 Game</button>
             <button class="design-kind" data-kind="cad"    title="Parametric CAD (JSCAD) with sliders + STL export">📐 CAD</button>
+            <button class="design-kind" data-kind="blender" title="Blender bpy code — runs in your open Blender via the blender-mcp addon">🟠 Blender</button>
           </div>
           <div class="design-history" id="design-history"></div>
           <div class="design-composer">
@@ -1958,9 +1980,82 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
 
   function extractArtifact(text) {
     // Grab the contents of the first <antArtifact …>…</antArtifact>.
-    const m = text.match(/<antArtifact[^>]*>([\s\S]*?)<\/antArtifact>/);
+    // For the Blender kind we repackage the Python code as a tiny HTML
+    // viewer that shows the code + a "Send to Blender" button (which
+    // calls the blender_exec skill).
+    const m = text.match(/<antArtifact([^>]*)>([\s\S]*?)<\/antArtifact>/);
     if (!m) return null;
-    return m[1].trim();
+    const attrs = m[1] || "";
+    const body = m[2].trim();
+    if (/type\s*=\s*"application\/vnd\.pimio\.blender"/i.test(attrs) ||
+        (state._kind === "blender")) {
+      return buildBlenderViewer(body);
+    }
+    return body;
+  }
+
+  function buildBlenderViewer(code) {
+    // Self-contained HTML that shows the bpy code and POSTs it to the
+    // blender_exec skill when the user hits the button.
+    const escaped = code.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const json = JSON.stringify(code);
+    return `<!doctype html>
+<html><head><meta charset="utf-8"><style>
+  :root { color-scheme: dark; }
+  body { margin:0; font-family: -apple-system, system-ui, sans-serif; background: #0f1115; color: #e8e9ec; }
+  header { display:flex; align-items:center; gap:10px; padding: 10px 14px; border-bottom: 1px solid #2a2e38; background: #171a21; }
+  header strong { font-size: 13px; }
+  header .muted { color: #8a8f98; font-size: 11px; flex: 1; }
+  #send { background: #E87D0D; color: #fff; border: 0; padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer; }
+  #send:hover { filter: brightness(1.08); }
+  #send:disabled { opacity: 0.6; cursor: wait; }
+  #status { font-size: 11px; padding: 6px 14px; min-height: 16px; }
+  #status.ok { color: #7fd07f; } #status.err { color: #f47b7b; }
+  pre { margin: 0; padding: 14px 18px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; line-height: 1.55; overflow: auto; background: #0d1117; height: calc(100vh - 96px); }
+</style></head>
+<body>
+  <header>
+    <strong>🟠 Blender</strong>
+    <span class="muted">bpy code — runs in your open Blender via the blender-mcp addon (localhost:9876)</span>
+    <button id="send">▶ Send to Blender</button>
+    <button id="snap">📸 Snapshot</button>
+  </header>
+  <div id="status"></div>
+  <pre><code>${escaped}</code></pre>
+<script>
+const code = ${json};
+async function run(skill, args){
+  const r = await fetch("/ui/api/skills/run", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({name: skill, arguments: args || {}})
+  });
+  return r.json();
+}
+function status(msg, cls){ const el = document.getElementById('status'); el.textContent = msg; el.className = cls||""; }
+document.getElementById('send').addEventListener('click', async () => {
+  const btn = document.getElementById('send');
+  btn.disabled = true; btn.textContent = 'Sending…';
+  status("Running in Blender…");
+  try {
+    const data = await run("blender_exec", {code});
+    if (data.error) { status("Error: " + data.error + (data.hint ? " — " + data.hint : ""), "err"); }
+    else if (!data.ok) { status("Blender reported: " + (data.stdout || "failed"), "err"); }
+    else { status("✓ Done. " + (data.stdout || "").slice(0, 200), "ok"); }
+  } catch (e) { status("Failed: " + e.message, "err"); }
+  finally { btn.disabled = false; btn.textContent = '▶ Send to Blender'; }
+});
+document.getElementById('snap').addEventListener('click', async () => {
+  status("Rendering viewport…");
+  const data = await run("blender_snapshot", {});
+  if (data.url) {
+    const img = new Image(); img.src = data.url; img.style.maxWidth = '100%'; img.style.marginTop = '8px';
+    const s = document.getElementById('status'); s.textContent = ""; s.className=""; s.appendChild(img);
+  } else {
+    status("Snapshot failed: " + (data.error || "unknown"), "err");
+  }
+});
+</script>
+</body></html>`;
   }
 
   function renderErrorHTML(rawReply) {
