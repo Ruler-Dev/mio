@@ -3904,3 +3904,83 @@ html.mio-focus body { background: var(--bg-page); }
   padding-left: 6px;
   border-left: 1px solid var(--border-subtle);
 }
+
+/* ===== Engine HUD ======================================= */
+.mio-engine-hud {
+  position: fixed;
+  bottom: 44px;   /* above sovereignty bar */
+  left: 60px;     /* right of nav rail */
+  background: var(--bg-page);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+  padding: 6px 10px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  z-index: 60;
+  max-width: 320px;
+  cursor: pointer;
+  user-select: none;
+}
+.mio-engine-hud:hover { border-color: var(--border); }
+.mio-engine-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.mio-engine-tier {
+  color: var(--accent);
+  font-weight: 600;
+  font-size: 11px;
+}
+.mio-engine-tps { color: var(--text-secondary); }
+.mio-engine-ctx {
+  flex: 1;
+  height: 4px;
+  background: var(--bg-sidebar);
+  border-radius: 2px;
+  overflow: hidden;
+  min-width: 60px;
+}
+.mio-engine-ctx-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  transition: width 250ms ease, background 250ms ease;
+}
+.mio-engine-detail {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-subtle);
+}
+.mio-engine-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 10px;
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+.mio-engine-grid code { color: var(--text-primary); }
+.mio-engine-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.mio-engine-actions button {
+  padding: 3px 8px;
+  font-size: 10px;
+  font-family: var(--font-sans);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-sidebar);
+  color: var(--text-primary);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.mio-engine-actions button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.mio-engine-actions button:disabled {
+  background: var(--accent-subtle);
+  color: var(--accent);
+  border-color: var(--accent);
+  cursor: default;
+}
