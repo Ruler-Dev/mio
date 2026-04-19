@@ -3836,3 +3836,71 @@ html.mio-focus body { background: var(--bg-page); }
   z-index: 10000;
   animation: pop-in 180ms ease;
 }
+
+/* ===== Pomodoro HUD ====================================== */
+.mio-pomo {
+  position: fixed;
+  top: 14px;
+  right: 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px 6px 8px;
+  background: var(--bg-page);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 10px 24px rgba(0,0,0,0.18);
+  font-size: 11px;
+  z-index: 400;
+  animation: pop-in 180ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.mio-pomo.break .mio-pomo-ring .fg { stroke: #34C759; }
+.mio-pomo-ring { position: relative; width: 44px; height: 44px; }
+.mio-pomo-ring svg {
+  width: 100%; height: 100%;
+  transform: rotate(-90deg);
+}
+.mio-pomo-ring svg circle {
+  fill: none;
+  stroke-width: 3;
+}
+.mio-pomo-ring svg .bg { stroke: var(--border-subtle); }
+.mio-pomo-ring svg .fg { stroke: var(--accent); transition: stroke-dashoffset 1s linear; stroke-linecap: round; }
+.mio-pomo-time {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.mio-pomo-ctrls { display: flex; align-items: center; gap: 4px; }
+.mio-pomo-phase {
+  padding: 2px 8px;
+  background: var(--accent-subtle);
+  color: var(--accent);
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 500;
+}
+.mio-pomo.break .mio-pomo-phase { background: rgba(52, 199, 89, 0.15); color: #34C759; }
+.mio-pomo-ctrls button {
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 3px 5px;
+  border-radius: 4px;
+}
+.mio-pomo-ctrls button:hover { background: var(--bg-hover); color: var(--text-primary); }
+.mio-pomo-cycles {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  padding-left: 6px;
+  border-left: 1px solid var(--border-subtle);
+}
