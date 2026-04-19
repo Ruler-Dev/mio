@@ -1422,7 +1422,8 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
         <div class="design-token-presets-bar" id="design-token-presets-bar"></div>
         <div class="design-tokens-list" id="design-tokens-list"></div>
         <footer>
-          <button data-action="reset">Reset</button>
+          <button data-action="reset" title="Drop all overrides">Reset</button>
+          <button data-action="bake-local" title="Regex-rewrite the CSS variables in the source HTML and create a new version — no model call">Apply locally</button>
           <button data-action="bake" title="Include these overrides in the next Generate so they persist">Bake into prompt</button>
         </footer>
       `;
@@ -1454,6 +1455,55 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
       input.setSelectionRange(input.value.length, input.value.length);
       onPromptInput(host);
     });
+    panel.querySelector('[data-action="bake-local"]').addEventListener("click", () => bakeTokensLocally(host));
+  }
+
+  // Checklist I — regex-rewrite tokens in the source HTML, create a
+  // new version. No model call. Handles three cases per variable:
+  //   1. `--name: value;` inside any CSS rule → rewrite value
+  //   2. If the token doesn't appear anywhere → inject `:root {...}`
+  //      rule in an override style block at end of <head>.
+  function bakeTokensLocally(host) {
+    const overrides = state._tokenOverrides || {};
+    if (!Object.keys(overrides).length) return;
+    const v = state.versions[state.activeVersion];
+    if (!v) return;
+    let html = v.html || "";
+
+    const missing = [];
+    for (const [name, value] of Object.entries(overrides)) {
+      const bare = name.startsWith("--") ? name.slice(2) : name;
+      // Escape regex specials in the variable name
+      const escN = bare.replace(/[-\\^$*+?.()|[\]{}]/g, "\\$&");
+      const re = new RegExp(`(--${escN}\\s*:\\s*)[^;}\\n]+`, "g");
+      const next = html.replace(re, `$1${value}`);
+      if (next === html) missing.push([name, value]);
+      html = next;
+    }
+
+    // Any vars that didn't exist in source — inject :root overrides.
+    if (missing.length) {
+      const rule = `:root { ${missing.map(([k, v]) => `${k}: ${v};`).join(" ")} }`;
+      const block = `\n<style id="__mio-baked-tokens">\n${rule}\n</style>`;
+      if (/<\/head>/i.test(html)) html = html.replace(/<\/head>/i, block + "\n</head>");
+      else html = block + html;
+    }
+
+    const n = state.versions.length + 1;
+    const count = Object.keys(overrides).length;
+    state.versions.push({
+      n,
+      title: `v${n} (tokens)`,
+      html,
+      prompt: `(local token bake: ${count} variable${count === 1 ? "" : "s"})`,
+      ts: Date.now(),
+    });
+    state.activeVersion = state.versions.length - 1;
+    state._tokenOverrides = {};
+    saveSession();
+    // Close panel + re-render
+    host.querySelector(".design-tokens-panel")?.remove();
+    renderVersions(host);
   }
 
   function renderTokenRow(host, token) {
