@@ -3984,3 +3984,48 @@ html.mio-focus body { background: var(--bg-page); }
   border-color: var(--accent);
   cursor: default;
 }
+
+/* ===== Chat minimap ====================================== */
+.mio-minimap {
+  position: absolute;
+  right: 4px;
+  top: 50px;
+  bottom: 50px;
+  width: 8px;
+  background: transparent;
+  pointer-events: auto;
+  z-index: 5;
+}
+.mio-minimap-indicator {
+  position: absolute;
+  left: 2px;
+  width: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  opacity: 0.25;
+  transition: top 100ms linear;
+  pointer-events: none;
+}
+.mio-minimap-dot {
+  position: absolute;
+  left: 1px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  cursor: pointer;
+  transform: translateY(-3px);
+  transition: transform 100ms ease, background 100ms ease;
+}
+.mio-minimap-user      { background: var(--text-muted); }
+.mio-minimap-assistant { background: var(--accent); opacity: 0.6; }
+.mio-minimap-other     { background: var(--border-strong); opacity: 0.4; }
+.mio-minimap-dot.artifact {
+  background: #10b981;
+  width: 8px;
+  height: 8px;
+  left: 0;
+  opacity: 1;
+  transform: translateY(-4px);
+  box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.3);
+}
+.mio-minimap-dot:hover { transform: translateY(-4px) scale(1.6); }
