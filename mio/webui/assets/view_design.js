@@ -100,9 +100,11 @@ No explanations after the artifact. The artifact IS the design.`;
             <div class="design-tabs" role="tablist">
               <button class="design-tab active" data-tab="preview" role="tab">Preview</button>
               <button class="design-tab"        data-tab="code"    role="tab">Code</button>
+              <button class="design-tab"        data-tab="diff"    role="tab">Diff</button>
             </div>
             <div class="design-version-label" id="design-version-label">No design yet</div>
             <div style="flex:1"></div>
+            <button class="btn-ghost" data-action="fork" title="Fork a variant from this version">Fork</button>
             <button class="btn-ghost" data-action="copy">Copy HTML</button>
             <button class="btn-ghost" data-action="download">Download</button>
           </header>
@@ -181,6 +183,14 @@ No explanations after the artifact. The artifact IS the design.`;
     const tab = host.querySelector(".design-tab.active").dataset.tab;
     if (tab === "code") {
       canvas.innerHTML = `<pre class="design-code"><code>${escapeHtml(v.html || "")}</code></pre>`;
+    } else if (tab === "diff") {
+      const idx = state.versions.indexOf(v);
+      const prev = idx > 0 ? state.versions[idx - 1] : null;
+      if (!prev) {
+        canvas.innerHTML = `<div class="design-empty"><p>No earlier version to diff against.</p></div>`;
+      } else {
+        canvas.innerHTML = `<div class="design-diff">${renderLineDiff(prev.html || "", v.html || "")}</div>`;
+      }
     } else {
       canvas.innerHTML = "";
       const iframe = document.createElement("iframe");
@@ -189,6 +199,46 @@ No explanations after the artifact. The artifact IS the design.`;
       iframe.srcdoc = v.html || "";
       canvas.appendChild(iframe);
     }
+  }
+
+  // Minimal line-level diff — no external deps. Good enough for
+  // spotting "changed this section" at a glance. Not an LCS-optimal
+  // diff; we just mark lines that don't appear in the other version.
+  function renderLineDiff(a, b) {
+    const aLines = a.split("\n");
+    const bLines = b.split("\n");
+    const aSet = new Set(aLines);
+    const bSet = new Set(bLines);
+    const out = [];
+    let i = 0, j = 0;
+    while (i < aLines.length || j < bLines.length) {
+      const la = aLines[i];
+      const lb = bLines[j];
+      if (i < aLines.length && j < bLines.length && la === lb) {
+        out.push({ k: " ", l: la });
+        i++; j++;
+      } else if (i < aLines.length && !bSet.has(la)) {
+        out.push({ k: "-", l: la });
+        i++;
+      } else if (j < bLines.length && !aSet.has(lb)) {
+        out.push({ k: "+", l: lb });
+        j++;
+      } else if (i < aLines.length && j < bLines.length) {
+        // Both present but misaligned; advance both
+        out.push({ k: "-", l: la });
+        out.push({ k: "+", l: lb });
+        i++; j++;
+      } else if (i < aLines.length) {
+        out.push({ k: "-", l: la });
+        i++;
+      } else {
+        out.push({ k: "+", l: lb });
+        j++;
+      }
+    }
+    return out.map((r) =>
+      `<div class="design-diff-line design-diff-${r.k === '+' ? 'add' : r.k === '-' ? 'del' : 'eq'}"><span class="design-diff-mark">${r.k}</span>${escapeHtml(r.l)}</div>`
+    ).join("");
   }
 
   function switchVersion(host, i) {
@@ -229,6 +279,19 @@ No explanations after the artifact. The artifact IS the design.`;
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 2000);
     });
+    host.querySelector('[data-action="fork"]').addEventListener("click", () => {
+      const v = state.versions[state.activeVersion];
+      if (!v) return;
+      const input = host.querySelector("#design-input");
+      const prior = v.prompt ? `\n(forked from v${state.activeVersion + 1}: "${v.prompt}")` : "";
+      input.value = `Start from this design and ` + prior;
+      input.focus();
+      // Cursor between "and " and the prior-note so the user can type
+      const pos = "Start from this design and ".length;
+      input.setSelectionRange(pos, pos);
+      // Seed the next generation with the active version's HTML as context
+      state._forkSeed = v.html;
+    });
     host.querySelectorAll(".design-tab").forEach((tab) => {
       tab.addEventListener("click", () => {
         host.querySelectorAll(".design-tab").forEach((t) => t.classList.toggle("active", t === tab));
@@ -265,6 +328,16 @@ No explanations after the artifact. The artifact IS the design.`;
       // current prompt if it's not already the tail.
       if (messages[messages.length - 1].role !== "user") {
         messages.push({ role: "user", content: prompt });
+      }
+      // If this generation is a fork from an existing version, hand the
+      // model the full HTML of the source so it can iterate rather than
+      // start from scratch.
+      if (state._forkSeed) {
+        messages.unshift({
+          role: "system",
+          content: `The user is forking an existing design. Here is the full HTML of that design — build on it rather than starting from scratch:\n\n\`\`\`html\n${state._forkSeed.slice(0, 40000)}\n\`\`\``,
+        });
+        state._forkSeed = null;
       }
 
       const runs = [];

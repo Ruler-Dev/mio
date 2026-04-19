@@ -1400,3 +1400,40 @@ body.focus-mode .input-area { max-width: 720px; }
   border-radius: 3px;
   opacity: 0.8;
 }
+
+/* ===== Design Mode: diff view ============================ */
+.design-diff {
+  flex: 1;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.55;
+  background: #0d1117;
+  color: #c9d1d9;
+  padding: 12px 0;
+  width: 100%;
+}
+.design-diff-line {
+  padding: 1px 16px;
+  white-space: pre;
+  display: block;
+}
+.design-diff-add {
+  background: rgba(46, 160, 67, 0.15);
+  color: #7ee787;
+}
+.design-diff-del {
+  background: rgba(248, 81, 73, 0.15);
+  color: #ffa198;
+}
+.design-diff-eq {
+  color: #768390;
+  opacity: 0.7;
+}
+.design-diff-mark {
+  display: inline-block;
+  width: 14px;
+  color: inherit;
+  opacity: 0.75;
+  margin-right: 4px;
+}
