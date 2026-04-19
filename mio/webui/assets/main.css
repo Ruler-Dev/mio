@@ -4029,3 +4029,22 @@ html.mio-focus body { background: var(--bg-page); }
   box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.3);
 }
 .mio-minimap-dot:hover { transform: translateY(-4px) scale(1.6); }
+
+/* ===== Refine prompt button ============================== */
+.mio-refine {
+  position: fixed;
+  width: 32px; height: 32px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--bg-page);
+  color: var(--accent);
+  font-size: 14px;
+  cursor: pointer;
+  box-shadow: 0 3px 10px rgba(0,0,0,0.12);
+  transition: transform 120ms ease, border-color 120ms ease, color 120ms ease;
+  z-index: 30;
+}
+.mio-refine:hover {
+  border-color: var(--accent);
+  transform: scale(1.08);
+}
