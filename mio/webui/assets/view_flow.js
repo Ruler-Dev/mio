@@ -214,9 +214,85 @@
       STATE.currentName = data.name || f.name;
       refreshName(host);
     });
-    host.querySelector('[data-action="run"]').addEventListener("click", () => {
-      alert("Flow execution lands in the next commit. For now Save + Open work end-to-end.");
-    });
+    host.querySelector('[data-action="run"]').addEventListener("click", () => runFlow(host));
+  }
+
+  async function runFlow(host) {
+    if (!STATE.currentId) {
+      alert("Save the flow first.");
+      return;
+    }
+    // Clear any prior status overlays
+    host.querySelectorAll(".flow-node-status").forEach((n) => n.remove());
+    const drawer = ensureDrawer(host);
+    drawer.log.innerHTML = "";
+    drawer.appendEvent({ type: "starting" });
+    const r = await fetch(`/ui/api/flows/${STATE.currentId}/run`, { method: "POST" });
+    const { run_id, error } = await r.json();
+    if (error) { drawer.appendEvent({ type: "error", error }); return; }
+    const es = new EventSource(`/ui/api/flows/runs/${run_id}/events`);
+    es.onmessage = (ev) => {
+      try {
+        const data = JSON.parse(ev.data);
+        drawer.appendEvent(data);
+        markNodeStatus(host, data);
+        if (data.type === "run_finished") es.close();
+      } catch {}
+    };
+    es.onerror = () => es.close();
+  }
+
+  function markNodeStatus(host, evt) {
+    if (!evt.node_id) return;
+    const nodeEl = host.querySelector(`[id="node-${evt.node_id}"]`);
+    if (!nodeEl) return;
+    let dot = nodeEl.querySelector(".flow-node-status");
+    if (!dot) {
+      dot = document.createElement("div");
+      dot.className = "flow-node-status";
+      nodeEl.appendChild(dot);
+    }
+    dot.className = "flow-node-status " + (evt.type || "");
+  }
+
+  function ensureDrawer(host) {
+    let drawer = host.querySelector(".flow-drawer");
+    if (drawer) return drawer._api;
+    drawer = document.createElement("div");
+    drawer.className = "flow-drawer";
+    drawer.innerHTML = `
+      <header>
+        <strong>Run log</strong>
+        <button class="flow-drawer-close" aria-label="Close">×</button>
+      </header>
+      <div class="flow-drawer-log"></div>
+    `;
+    host.querySelector(".view-flow").appendChild(drawer);
+    drawer.querySelector(".flow-drawer-close").addEventListener("click", () => drawer.remove());
+    const log = drawer.querySelector(".flow-drawer-log");
+    drawer._api = {
+      log,
+      appendEvent(evt) {
+        const ln = document.createElement("div");
+        ln.className = "flow-drawer-line " + (evt.type || "");
+        const icon = {
+          starting:        "⏳",
+          run_started:     "🟢",
+          node_started:    "▶",
+          node_finished:   "✓",
+          node_error:      "✗",
+          run_finished:    "✅",
+          error:           "✗",
+        }[evt.type] || "·";
+        const body = evt.output !== undefined
+          ? (typeof evt.output === "string" ? evt.output : JSON.stringify(evt.output))
+          : (evt.error || evt.class || evt.node_order?.join(" → ") || "");
+        ln.textContent = `${icon} ${(evt.node_id ? (evt.node_id + " · ") : "")}${evt.class || ""} ${body || ""}`.trim();
+        log.appendChild(ln);
+        log.scrollTop = log.scrollHeight;
+      },
+    };
+    return drawer._api;
   }
 
   function flash(host, msg) {

@@ -13,6 +13,7 @@ Serves the single-page UI and provides:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import threading
@@ -1091,6 +1092,44 @@ async def delete_flow(flow_id: str):
     if p.exists() and p.is_file():
         p.unlink()
     return {"ok": True}
+
+
+@router.post("/api/flows/{flow_id}/run")
+async def start_flow_run(flow_id: str, body: dict | None = None):
+    """Kick off a flow execution. Returns { run_id } which the client
+    uses to subscribe to /api/flows/runs/{run_id}/events for SSE."""
+    safe = flow_id.replace("/", "_").replace("..", "_")
+    p = _flows_dir() / f"{safe}.json"
+    if not p.exists():
+        return {"error": "flow not found"}
+    flow = json.loads(p.read_text())
+    from mio.webui.flow_runner import start_run
+    env = (body or {}).get("env") or {}
+    run_id = start_run(flow, env)
+    return {"run_id": run_id}
+
+
+@router.get("/api/flows/runs/{run_id}/events")
+async def flow_run_events(run_id: str):
+    """SSE stream of per-node events for a running flow."""
+    from fastapi.responses import StreamingResponse
+    from mio.webui.flow_runner import get_run
+    run = get_run(run_id)
+    if not run:
+        return {"error": "run not found"}
+
+    async def gen():
+        while True:
+            try:
+                evt = await asyncio.wait_for(run.queue.get(), timeout=60)
+                yield "data: " + json.dumps(evt) + "\n\n"
+                if evt.get("type") == "run_finished":
+                    break
+            except asyncio.TimeoutError:
+                yield ": ping\n\n"
+                if run.done:
+                    break
+    return StreamingResponse(gen(), media_type="text/event-stream")
 
 
 @router.post("/api/reveal")
