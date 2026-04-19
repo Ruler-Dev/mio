@@ -12,11 +12,11 @@
   if (window.Mio.navRail) return;
 
   const ITEMS = [
-    { view: "chat",        title: "Chat",       icon: iconChat() },
-    { view: "workspaces",  title: "Workspaces", icon: iconWorkspaces() },
-    { view: "docs",        title: "Docs & RAG", icon: iconDocs() },
-    { view: "design",      title: "Design",     icon: iconDesign() },
-    { view: "obsidian",    title: "Obsidian",   icon: iconObsidian() },
+    { view: "chat",        title: "Chat",       icon: iconChat(),       shortcut: "⌘1" },
+    { view: "workspaces",  title: "Workspaces", icon: iconWorkspaces(), shortcut: "⌘2" },
+    { view: "docs",        title: "Docs & RAG", icon: iconDocs(),       shortcut: "⌘3" },
+    { view: "design",      title: "Design",     icon: iconDesign(),     shortcut: "⌘4" },
+    { view: "obsidian",    title: "Obsidian",   icon: iconObsidian(),   shortcut: "⌘5" },
   ];
   // Bottom section (below a spacer) — settings + dashboard link
   const BOTTOM = [
@@ -76,8 +76,46 @@
     } else if (it.onclick) {
       b.addEventListener("click", it.onclick);
     }
-    b.innerHTML = `<span class="nav-rail-icon">${it.icon}</span><span class="nav-rail-tip">${escapeHtml(it.title)}</span>`;
+    const tip = escapeHtml(it.title) + (it.shortcut ? `<span class="nav-rail-tip-kbd">${escapeHtml(it.shortcut)}</span>` : "");
+    b.innerHTML = `
+      <span class="nav-rail-icon">${it.icon}</span>
+      <span class="nav-rail-badge" data-badge-for="${it.view || ""}" hidden></span>
+      <span class="nav-rail-tip">${tip}</span>
+    `;
     return b;
+  }
+
+  // --- Keyboard shortcuts ------------------------------------------------
+
+  function bindShortcuts() {
+    window.addEventListener("keydown", (e) => {
+      // Only plain ⌘/Ctrl + 1..5 — respect input focus so we don't eat
+      // the user's own "type 1 in my prompt" situation.
+      if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
+      const match = {
+        Digit1: "chat", Digit2: "workspaces", Digit3: "docs",
+        Digit4: "design", Digit5: "obsidian",
+      }[e.code];
+      if (!match) return;
+      e.preventDefault();
+      window.Mio?.views?.switch?.(match);
+    });
+  }
+
+  // --- Badges -----------------------------------------------------------
+
+  async function refreshBadges() {
+    const docsBadge = document.querySelector('[data-badge-for="docs"]');
+    if (docsBadge) {
+      try {
+        const r = await fetch("/ui/api/ingest?limit=500");
+        const { items = [] } = await r.json();
+        if (items.length > 0) {
+          docsBadge.textContent = items.length > 99 ? "99+" : String(items.length);
+          docsBadge.hidden = false;
+        }
+      } catch { /* quietly skip */ }
+    }
   }
 
   function escapeHtml(s) {
@@ -102,11 +140,21 @@
   function iconSettings()   { return svg(`<circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/>`); }
 
   // Initial mount — as early as possible so it doesn't flash.
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", mount, { once: true });
-  } else {
+  function boot() {
     mount();
+    bindShortcuts();
+    refreshBadges();
+    // Refresh badges when user returns to the tab (likely did something)
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) refreshBadges();
+    });
   }
 
-  window.Mio.navRail = { mount };
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", boot, { once: true });
+  } else {
+    boot();
+  }
+
+  window.Mio.navRail = { mount, refreshBadges };
 })();
