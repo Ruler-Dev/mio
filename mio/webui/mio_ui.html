@@ -2341,6 +2341,41 @@ const COMMANDS = [
   { id:'export',      title:'Export chat',         desc:'Download the current chat as Markdown', kbd:'',   run: () => exportChat() },
   { id:'share',       title:'Share current artifact', desc:'Copy a public link to the open artifact', kbd:'', run: () => shareActiveArtifact() },
   { id:'close-art',   title:'Close artifact panel', desc:'',                          kbd:'esc',run: () => closeArtifactPanel() },
+  // View navigation — wires into the modular views module
+  { id:'go-design',   title:'Go: Design',            desc:'Switch to Design Mode',     kbd:'⌘4',  run: () => window.Mio?.views?.switch?.('design') },
+  { id:'go-docs',     title:'Go: Docs & RAG',        desc:'Clipped pages + indexed folders', kbd:'⌘3', run: () => window.Mio?.views?.switch?.('docs') },
+  { id:'go-ws',       title:'Go: Workspaces',        desc:'Reusable tier + prompt bundles', kbd:'⌘2', run: () => window.Mio?.views?.switch?.('workspaces') },
+  { id:'go-obs',      title:'Go: Obsidian',          desc:'Browse / edit your vault',  kbd:'⌘5',  run: () => window.Mio?.views?.switch?.('obsidian') },
+  { id:'go-dash',     title:'Go: Dashboards',        desc:'CSV → charts',              kbd:'⌘6',  run: () => window.Mio?.views?.switch?.('dashboards') },
+  { id:'go-flow',     title:'Go: Flow',              desc:'Visual agent graph',        kbd:'⌘7',  run: () => window.Mio?.views?.switch?.('flow') },
+  { id:'go-journal',  title:'Go: Journal',           desc:'Daily notes',                kbd:'⌘8',  run: () => window.Mio?.views?.switch?.('journal') },
+  { id:'go-notebook', title:'Go: Notebook',          desc:'Pyodide cells',              kbd:'⌘9',  run: () => window.Mio?.views?.switch?.('notebook') },
+  { id:'go-graph',    title:'Go: Graph',             desc:'Chat × artifact × docs graph', kbd:'⌘0', run: () => window.Mio?.views?.switch?.('graph') },
+  // Utility toggles
+  { id:'focus-mode',  title:'Toggle Focus mode',      desc:'Hide chrome, maximise conversation', kbd:'⌘⇧F', run: () => window.Mio?.focusMode?.toggle?.() },
+  { id:'scratchpad',  title:'Open scratchpad',        desc:'Floating local notepad',    kbd:'⌘⇧S', run: () => window.Mio?.scratchpad?.open?.() },
+  { id:'pomo',        title:'Start Pomodoro',         desc:'25-min focus + 5-min break', kbd:'⌘⇧P', run: () => window.Mio?.pomoHud?.open?.() },
+  { id:'voice',       title:'Open Voice mode',        desc:'Orb UI with STT + TTS',     kbd:'',     run: () => window.Mio?.voice?.open?.() },
+  // Skills
+  { id:'shadertoy',   title:'Import from ShaderToy',  desc:'Paste a ShaderToy ID / URL → artifact', kbd:'', run: async () => {
+      const v = prompt('ShaderToy ID or URL:');
+      if (!v) return;
+      try {
+        const r = await fetch('/ui/api/skills/run', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ name: 'import_shadertoy', arguments: { id_or_url: v } }),
+        });
+        const data = await r.json();
+        if (data.error) alert(data.error);
+        else if (data.artifact_html) {
+          const input = document.getElementById('inputArea');
+          if (input) {
+            input.value = `Imported ShaderToy ${data.id} by ${data.author} — show as artifact.\n\n<antArtifact identifier="shader-${data.id}" type="text/html" title="${data.title}">${data.artifact_html}</antArtifact>`;
+            if (typeof sendMessage === 'function') sendMessage();
+          }
+        }
+      } catch (e) { alert('Failed: ' + e.message); }
+    }},
 ];
 
 // Slash commands typed in the input autofill a prepared message.
