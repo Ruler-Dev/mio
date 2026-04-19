@@ -151,6 +151,7 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
                 <input type="checkbox" id="design-variants"> 3 variants
               </label>
               <div style="flex:1"></div>
+              <button class="btn-ghost" data-action="research" title="Do a web search for inspiration, then generate">🔎 Research + Generate</button>
               <button class="btn-ghost design-generate" data-action="generate">Generate</button>
             </div>
           </div>
@@ -776,6 +777,7 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
     // Initial scope (auto-classify empty prompt → defaults)
     onPromptInput(host);
     host.querySelector('[data-action="generate"]').addEventListener("click", () => generate(host));
+    host.querySelector('[data-action="research"]').addEventListener("click", () => generate(host, { research: true }));
     host.querySelector('[data-action="reset"]').addEventListener("click", () => {
       if (!confirm("Clear this design session? Versions will be lost.")) return;
       state.versions = []; state.history = []; state.activeVersion = -1;
@@ -1060,7 +1062,7 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
     return null;
   }
 
-  async function generate(host) {
+  async function generate(host, { research = false } = {}) {
     const input = host.querySelector("#design-input");
     const prompt = input.value.trim();
     if (!prompt) return;
@@ -1071,7 +1073,25 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
     renderHistory(host);
     input.value = "";
     const genBtn = host.querySelector('[data-action="generate"]');
-    genBtn.disabled = true; genBtn.textContent = variants > 1 ? "Generating 3…" : "Generating…";
+    const researchBtn = host.querySelector('[data-action="research"]');
+    [genBtn, researchBtn].forEach((b) => { if (b) b.disabled = true; });
+    genBtn.textContent = variants > 1 ? "Generating 3…" : "Generating…";
+
+    // Optional research pass — fires web_search + search_images via
+    // the existing skill dispatch and injects the results as a system
+    // message. Total budget: ~5 seconds, both in parallel.
+    let researchContext = null;
+    if (research) {
+      genBtn.textContent = "Researching…";
+      try {
+        researchContext = await doResearch(prompt, state._platform || "web");
+        state.history.push({ role: "assistant", text: `Research: ${researchContext.summary}` });
+        renderHistory(host);
+      } catch (e) {
+        console.warn("[design] research failed:", e);
+      }
+      genBtn.textContent = variants > 1 ? "Generating 3…" : "Generating…";
+    }
 
     try {
       // Use the existing OpenAI-compatible endpoint. Model pick-up:
@@ -1102,6 +1122,13 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
           parts.push({ type: "image_url", image_url: { url: r.dataUrl } });
         }
         messages[messages.length - 1] = { role: "user", content: parts };
+      }
+      // Inject research findings as a system-message prelude.
+      if (researchContext) {
+        messages.unshift({
+          role: "system",
+          content: `Research findings for inspiration (do NOT copy — use as directional signal):\n\n${researchContext.text}`,
+        });
       }
       // If this generation is a fork from an existing version, hand the
       // model the full HTML of the source so it can iterate rather than
@@ -1163,7 +1190,50 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
       renderHistory(host);
     } finally {
       genBtn.disabled = false; genBtn.textContent = "Generate";
+      if (researchBtn) researchBtn.disabled = false;
     }
+  }
+
+  // --- Web research --------------------------------------------------
+  // Uses existing skill dispatch — no new backend needed.
+  async function doResearch(prompt, platform) {
+    const q = `${platform === "ios" ? "iOS app " : platform === "android" ? "Android app " : "web "}UI design ${prompt}`;
+    const [searchRes, imageRes] = await Promise.allSettled([
+      fetch("/ui/api/skills/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "web_search", arguments: { query: q, limit: 5 } }),
+      }).then((r) => r.json()),
+      fetch("/ui/api/skills/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "search_images", arguments: { query: q, limit: 6 } }),
+      }).then((r) => r.json()),
+    ]);
+
+    const lines = [];
+    const summaryBits = [];
+    if (searchRes.status === "fulfilled" && searchRes.value?.results?.length) {
+      lines.push("### Reference articles");
+      for (const r of searchRes.value.results.slice(0, 5)) {
+        const t = r.title || r.url || "";
+        const u = r.url || "";
+        const snip = (r.snippet || r.summary || "").slice(0, 140).replace(/\s+/g, " ");
+        lines.push(`- **${t}** — ${u}${snip ? `\n  ${snip}` : ""}`);
+      }
+      summaryBits.push(`${searchRes.value.results.length} articles`);
+    }
+    if (imageRes.status === "fulfilled" && imageRes.value?.results?.length) {
+      lines.push("\n### Reference imagery");
+      for (const r of imageRes.value.results.slice(0, 6)) {
+        lines.push(`- ${r.title || r.source || "image"} — ${r.url || r.image || ""}`);
+      }
+      summaryBits.push(`${imageRes.value.results.length} images`);
+    }
+    return {
+      text: lines.join("\n") || "(no research results)",
+      summary: summaryBits.join(" + ") || "nothing found",
+    };
   }
 
   async function runOne(messages, temperature) {
