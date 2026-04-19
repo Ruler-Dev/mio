@@ -31,33 +31,82 @@
     "editorial", "warm earthy", "neon arcade", "monochrome",
   ];
 
-  const SYSTEM_PROMPT = `You are a senior UI/UX engineer. The user is designing a web page or component.
+  // --- Platform system prompts ----------------------------------------
+  // Each platform has its own spec for what "good" looks like.
+  // Prompts are deliberately specific (components, token names, font
+  // stacks) so a generic LLM reliably produces platform-authentic output.
 
-Always respond with a SHORT intro sentence, then a SINGLE <antArtifact> tag containing a fully self-contained HTML document the user can preview in an iframe. No external build step: use React + Tailwind via CDN with Babel standalone, or plain HTML/CSS if that's enough. Keep code tight and polished; animations OK when they help.
+  const PLATFORMS = {
+    web: {
+      label: "Web",
+      viewport: { w: null, h: null, scale: 1 }, // fills canvas
+      frame: null,
+      systemPrompt: `You are a senior web UI engineer. Output ONE <antArtifact type="text/html"> with a fully self-contained responsive HTML document using:
+- Tailwind via <script src="https://cdn.tailwindcss.com"></script>
+- React 18 + ReactDOM via unpkg
+- Babel Standalone for JSX in <script type="text/babel">
+Rules: modern restrained aesthetic, 2 type sizes, generous whitespace, one accent. Animations only where they aid meaning. No external build step. No explanations after the artifact.`,
+    },
+    ios: {
+      label: "iOS",
+      viewport: { w: 402, h: 874, scale: 1 }, // iPhone 16 Pro logical points
+      frame: "iphone",
+      systemPrompt: `You are a senior iOS engineer producing an iPhone-shaped web mock that LOOKS and FEELS like an iOS 18+ app built with SwiftUI (rendered in HTML for preview).
 
-Artifact template:
-<antArtifact identifier="design-v{N}" type="text/html" title="Short title of this design">
-<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<script src="https://cdn.tailwindcss.com"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-</head>
-<body class="bg-neutral-50">
-<div id="root"></div>
-<script type="text/babel">
-// your React component here
-const App = () => (<div className="…">…</div>);
-ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
-</script>
-</body>
-</html>
-</antArtifact>
+Required conventions:
+- Viewport: 393×852 (iPhone 16 Pro). Use a full-bleed layout inside a <body> styled background: #000 outside safe areas.
+- Safe areas: respect Dynamic Island top inset (~54px) and home-indicator bottom (~34px) via padding-top: env(safe-area-inset-top, 54px); padding-bottom: env(safe-area-inset-bottom, 34px).
+- Typography: system UI stack — font-family: -apple-system, "SF Pro Text", "SF Pro Display", system-ui; text styles mirror iOS (Large Title 34/41, Title1 28, Headline 17/22 semibold, Body 17/22, Subheadline 15, Footnote 13, Caption 12).
+- Controls: use iOS idioms — UINavigationBar-style large title that collapses on scroll; UITabBar at the bottom with 4-5 items + SF-Symbol-style icons; UISwitch / UISegmentedControl / UIStepper look; rounded sheets / modals with a top grabber.
+- Colors: iOS system palette — blue #007AFF, green #34C759, red #FF3B30, orange #FF9500, gray fill #F2F2F7 (light) / #1C1C1E (dark).
+- Gestures: swipe-to-go-back on nav stacks; pull-to-refresh.
+- Use SF Symbol equivalents via inline SVG or unicode glyphs (⌂ ◎ ⚙ ⋯) — don't invent icon fonts.
+- No Tailwind — use semantic CSS with custom properties so the Tokens panel surfaces them: --system-blue, --system-gray-6, --label, --secondary-label, --system-background, --secondary-system-background, --radius-card (12px), --radius-sheet (14px).
 
-No explanations after the artifact. The artifact IS the design.`;
+Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta "width=device-width, initial-scale=1, viewport-fit=cover". No explanations after.`,
+    },
+    android: {
+      label: "Android",
+      viewport: { w: 448, h: 992, scale: 1 }, // Pixel 9 Pro logical dp
+      frame: "pixel",
+      systemPrompt: `You are a senior Android engineer producing a Pixel-shaped web mock that LOOKS and FEELS like a Material 3 Expressive app (rendered in HTML for preview).
+
+Required conventions:
+- Viewport: 412×915 (Pixel 9 Pro dp). Edge-to-edge; respect a 28px top status-bar area and a 48px bottom system-bar / NavigationBar area.
+- Typography: Roboto Flex via <link href="https://fonts.googleapis.com/css2?family=Roboto+Flex:opsz,wght@8..144,400;8..144,500;8..144,700&display=swap" rel="stylesheet">. Text roles: Display Large 57/64, Headline Large 32/40, Title Large 22/28, Body Large 16/24, Body Medium 14/20, Label Large 14/20.
+- Material You tokens as CSS vars (so Tokens panel surfaces them):
+  --md-primary, --md-on-primary, --md-primary-container, --md-on-primary-container,
+  --md-secondary, --md-tertiary,
+  --md-surface, --md-surface-variant, --md-on-surface, --md-on-surface-variant,
+  --md-outline, --md-outline-variant,
+  --md-background, --md-error,
+  --md-shape-sm (4px), --md-shape-md (12px), --md-shape-lg (16px), --md-shape-xl (28px).
+- Light default palette: primary #6750A4, on-primary #FFFFFF, surface #FFFBFE, on-surface #1C1B1F, surface-variant #E7E0EC.
+- Components: TopAppBar with centered or left-aligned title; BottomNavigationBar with 3-5 destinations (outlined icon idle, filled icon + label pill when active); extended FAB for primary action; Cards with elevated/outlined variants; rounded Chips; ripple-able Buttons (filled, tonal, outlined, text); BottomSheet with drag handle.
+- Dynamic color: if a wallpaper color is mentioned, derive primary from it (60% lightness target).
+- Use Material Symbols via <span class="material-symbols-outlined"> via the stylesheet <link href="https://fonts.googleapis.com/icon?family=Material+Symbols+Outlined" rel="stylesheet">.
+- No Tailwind.
+
+Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta "width=device-width, initial-scale=1, viewport-fit=cover". No explanations after.`,
+    },
+    ipad: {
+      label: "iPad",
+      viewport: { w: 1024, h: 768, scale: 0.9 }, // iPad Pro 11" landscape
+      frame: "ipad",
+      systemPrompt: `You are a senior iOS engineer producing an iPad-shaped web mock that LOOKS and FEELS like an iPadOS 18+ app.
+
+Required conventions:
+- Viewport: 1024×768 (iPad Pro 11" landscape).
+- Use a split-view layout (sidebar + detail) typical of iPadOS master-detail apps. Sidebar 320 px with groupings; detail scrolls.
+- Respect the same iOS type scale, colors, and control idioms as the iOS prompt (shared CSS custom properties).
+- Font stack: -apple-system, "SF Pro Text", "SF Pro Display", system-ui.
+- Toolbar above the detail with large title + trailing toolbar buttons (gear, share, compose).
+
+Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta. No explanations after.`,
+    },
+  };
+
+  const SYSTEM_PROMPT = PLATFORMS.web.systemPrompt; // legacy alias
 
   const state = loadSession();
 
@@ -82,6 +131,12 @@ No explanations after the artifact. The artifact IS the design.`;
             <h1>Design Mode</h1>
             <button class="btn-ghost" data-action="reset">New session</button>
           </header>
+          <div class="design-platforms" role="tablist" aria-label="Target platform">
+            <button class="design-platform" data-platform="web"     title="Web">Web</button>
+            <button class="design-platform" data-platform="ios"     title="iOS · HIG · iPhone 16 Pro">iOS</button>
+            <button class="design-platform" data-platform="android" title="Android · Material 3 · Pixel 9 Pro">Android</button>
+            <button class="design-platform" data-platform="ipad"    title="iPad Pro · HIG · landscape">iPad</button>
+          </div>
           <div class="design-history" id="design-history"></div>
           <div class="design-composer">
             <div class="design-vibes" id="design-vibes"></div>
@@ -320,10 +375,19 @@ No explanations after the artifact. The artifact IS the design.`;
       }
     } else {
       canvas.innerHTML = "";
-      // Preview frame — wrapped in a sizer so we can constrain the iframe
-      // to real device widths (375 / 768 / 1280) or let it fill ("fit").
+      // Preview frame — wrapped in a sizer (and optionally a device
+      // frame) so we can constrain the iframe to real device widths or
+      // chrome when a platform is chosen.
+      const platform = state._platform || "web";
+      const pInfo = PLATFORMS[platform] || PLATFORMS.web;
+
       const sizer = document.createElement("div");
       sizer.className = "design-sizer";
+      if (pInfo.viewport.w) {
+        sizer.style.width  = pInfo.viewport.w + "px";
+        sizer.style.height = pInfo.viewport.h + "px";
+        sizer.style.flex   = "0 0 auto";
+      }
       canvas.appendChild(sizer);
 
       const errorBar = document.createElement("div");
@@ -335,8 +399,16 @@ No explanations after the artifact. The artifact IS the design.`;
       iframe.className = "design-iframe";
       iframe.sandbox = "allow-scripts";
       iframe.srcdoc = injectRuntimeHelpers(v.html || "", { inspect: !!state._inspect });
-      sizer.appendChild(iframe);
-      applyWidth(sizer, state._width || "fit");
+
+      // Wrap with a device frame when platform != web
+      if (pInfo.frame) {
+        const frame = buildDeviceFrame(pInfo.frame, iframe);
+        sizer.appendChild(frame);
+      } else {
+        sizer.appendChild(iframe);
+      }
+
+      if (!pInfo.viewport.w) applyWidth(sizer, state._width || "fit");
 
       // Messages from the iframe — errors + element clicks in inspect mode.
       const handler = (e) => {
@@ -356,6 +428,91 @@ No explanations after the artifact. The artifact IS the design.`;
           applyTokenOverride(host, name, value);
         }
       });
+    }
+  }
+
+  // --- Device frames (iPhone / Pixel / iPad) ----------------------------
+  // SVG + CSS chrome around the iframe. Content bleeds through the
+  // cutout (notch / Dynamic Island / punch-hole) — the chrome sits
+  // above. A live status bar shows time and a battery glyph.
+
+  function buildDeviceFrame(kind, iframe) {
+    const wrap = document.createElement("div");
+    wrap.className = "device-frame device-frame-" + kind;
+    let body = "";
+    if (kind === "iphone") {
+      body = `
+        <div class="device-shell">
+          <div class="device-screen"></div>
+          <div class="device-island"></div>
+          <div class="device-statusbar">
+            <span class="device-time"></span>
+            <span class="device-status-right">
+              <span class="device-signal">●●●</span>
+              <span class="device-wifi">⌇</span>
+              <span class="device-batt"><span class="device-batt-fill"></span></span>
+            </span>
+          </div>
+          <div class="device-home-indicator"></div>
+        </div>
+      `;
+    } else if (kind === "pixel") {
+      body = `
+        <div class="device-shell">
+          <div class="device-screen"></div>
+          <div class="device-punch"></div>
+          <div class="device-statusbar">
+            <span class="device-time"></span>
+            <span class="device-status-right">
+              <span class="device-wifi">◢</span>
+              <span class="device-signal">▤</span>
+              <span class="device-batt"><span class="device-batt-fill"></span></span>
+            </span>
+          </div>
+          <div class="device-gesture-bar"></div>
+        </div>
+      `;
+    } else if (kind === "ipad") {
+      body = `
+        <div class="device-shell device-shell-ipad">
+          <div class="device-screen"></div>
+          <div class="device-home-indicator"></div>
+        </div>
+      `;
+    }
+    wrap.innerHTML = body;
+    const screen = wrap.querySelector(".device-screen");
+    if (screen) screen.appendChild(iframe);
+    // Live time + battery
+    refreshDeviceStatus(wrap);
+    const intervalId = setInterval(() => refreshDeviceStatus(wrap), 30_000);
+    // Clean up when frame is removed
+    const observer = new MutationObserver(() => {
+      if (!wrap.isConnected) {
+        clearInterval(intervalId);
+        observer.disconnect();
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    return wrap;
+  }
+
+  function refreshDeviceStatus(wrap) {
+    const t = wrap.querySelector(".device-time");
+    if (t) {
+      const d = new Date();
+      t.textContent = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    }
+    const fill = wrap.querySelector(".device-batt-fill");
+    if (fill && navigator.getBattery) {
+      navigator.getBattery().then((b) => {
+        fill.style.width = Math.max(8, Math.round(b.level * 100)) + "%";
+        fill.style.background = b.level < 0.2 ? "#FF3B30" : "#fff";
+      }).catch(() => {
+        fill.style.width = "72%";
+      });
+    } else if (fill) {
+      fill.style.width = "72%";
     }
   }
 
@@ -686,6 +843,34 @@ No explanations after the artifact. The artifact IS the design.`;
     host.querySelector('[data-action="tokens"]').addEventListener("click", () => {
       toggleTokens(host);
     });
+    // Platform picker
+    const currentPlatform = state._platform || "web";
+    host.querySelectorAll(".design-platform").forEach((b) => {
+      b.classList.toggle("active", b.dataset.platform === currentPlatform);
+      b.addEventListener("click", () => {
+        state._platform = b.dataset.platform;
+        saveSession();
+        host.querySelectorAll(".design-platform").forEach((x) =>
+          x.classList.toggle("active", x.dataset.platform === state._platform));
+        // Apply viewport that matches this platform
+        const p = PLATFORMS[state._platform] || PLATFORMS.web;
+        const sizer = host.querySelector(".design-sizer");
+        if (sizer) {
+          if (p.viewport.w) {
+            sizer.style.width  = p.viewport.w + "px";
+            sizer.style.height = p.viewport.h + "px";
+            sizer.style.flex   = "0 0 auto";
+          } else {
+            sizer.style.width  = "100%";
+            sizer.style.height = "";
+            sizer.style.flex   = "";
+          }
+        }
+        // Re-render the active version so the device frame wraps
+        const v = state.versions[state.activeVersion];
+        if (v) showVersion(host, v);
+      });
+    });
   }
 
   // --- Design tokens panel ---------------------------------------------
@@ -856,8 +1041,10 @@ No explanations after the artifact. The artifact IS the design.`;
     try {
       // Use the existing OpenAI-compatible endpoint. Model pick-up:
       // whatever the server has loaded as default (mio-large-moe).
+      const platform = state._platform || "web";
+      const sysPrompt = (PLATFORMS[platform] || PLATFORMS.web).systemPrompt;
       const messages = [
-        { role: "system", content: SYSTEM_PROMPT },
+        { role: "system", content: sysPrompt },
         ...state.history
           .filter((m) => m.role === "user" || m.role === "assistant")
           .slice(-10)

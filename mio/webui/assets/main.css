@@ -1942,3 +1942,267 @@ body.focus-mode .input-area { max-width: 720px; }
   outline-offset: -4px;
   background: var(--accent-subtle);
 }
+
+/* ===== Design Mode: platform picker ========================== */
+.design-platforms {
+  display: flex;
+  gap: 2px;
+  padding: 8px 14px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.design-platform {
+  flex: 1;
+  padding: 8px 4px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+.design-platform:hover { color: var(--text-primary); }
+.design-platform.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* ===== Design Mode: device frames ============================ */
+.device-frame {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+}
+
+/* iPhone 16 Pro — 402×874 content, chrome adds ~16px bezel + 10px inset */
+.device-frame-iphone .device-shell {
+  position: relative;
+  width: 434px;
+  height: 896px;
+  background: #1d1d1f;
+  border-radius: 54px;
+  padding: 11px;
+  box-sizing: border-box;
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.35), inset 0 0 0 2px #3a3a3c;
+}
+.device-frame-iphone .device-screen {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: 44px;
+  overflow: hidden;
+  background: #000;
+}
+.device-frame-iphone .device-screen iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+}
+.device-frame-iphone .device-island {
+  position: absolute;
+  top: 23px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 126px;
+  height: 37px;
+  background: #000;
+  border-radius: 20px;
+  z-index: 3;
+  pointer-events: none;
+}
+.device-frame-iphone .device-statusbar {
+  position: absolute;
+  top: 22px;
+  left: 30px;
+  right: 30px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-family: -apple-system, "SF Pro Text", system-ui, sans-serif;
+  font-size: 15px;
+  font-weight: 600;
+  color: #fff;
+  z-index: 4;
+  pointer-events: none;
+}
+.device-frame-iphone .device-time { padding-left: 12px; letter-spacing: 0.5px; }
+.device-frame-iphone .device-status-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-right: 12px;
+  font-size: 13px;
+}
+.device-frame-iphone .device-batt {
+  display: inline-block;
+  width: 24px;
+  height: 11px;
+  border: 1px solid rgba(255,255,255,0.85);
+  border-radius: 3px;
+  padding: 1px;
+  position: relative;
+}
+.device-frame-iphone .device-batt::after {
+  content: '';
+  position: absolute;
+  right: -3px;
+  top: 3px;
+  width: 1.5px;
+  height: 3px;
+  background: rgba(255,255,255,0.85);
+  border-radius: 0 1px 1px 0;
+}
+.device-frame-iphone .device-batt-fill {
+  display: block;
+  height: 100%;
+  background: #fff;
+  border-radius: 1px;
+}
+.device-frame-iphone .device-home-indicator {
+  position: absolute;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 134px;
+  height: 5px;
+  background: #fff;
+  border-radius: 3px;
+  z-index: 3;
+  opacity: 0.92;
+  mix-blend-mode: difference;
+}
+
+/* Pixel 9 Pro — 448×992 content */
+.device-frame-pixel .device-shell {
+  position: relative;
+  width: 476px;
+  height: 1016px;
+  background: #0c0c0c;
+  border-radius: 44px;
+  padding: 12px;
+  box-sizing: border-box;
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.35), inset 0 0 0 2px #262626;
+}
+.device-frame-pixel .device-screen {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: 34px;
+  overflow: hidden;
+  background: #000;
+}
+.device-frame-pixel .device-screen iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+}
+.device-frame-pixel .device-punch {
+  position: absolute;
+  top: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #000;
+  box-shadow: 0 0 0 2px rgba(255,255,255,0.04);
+  z-index: 3;
+}
+.device-frame-pixel .device-statusbar {
+  position: absolute;
+  top: 20px;
+  left: 24px;
+  right: 24px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-family: "Roboto Flex", Roboto, system-ui, sans-serif;
+  font-size: 13px;
+  font-weight: 500;
+  color: #fff;
+  z-index: 4;
+  pointer-events: none;
+}
+.device-frame-pixel .device-status-right {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+}
+.device-frame-pixel .device-batt {
+  display: inline-block;
+  width: 20px;
+  height: 10px;
+  border: 1.2px solid rgba(255,255,255,0.85);
+  border-radius: 2px;
+  padding: 1px;
+}
+.device-frame-pixel .device-batt-fill {
+  display: block;
+  height: 100%;
+  background: #fff;
+  border-radius: 1px;
+}
+.device-frame-pixel .device-gesture-bar {
+  position: absolute;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 108px;
+  height: 3px;
+  background: #fff;
+  border-radius: 2px;
+  z-index: 3;
+  opacity: 0.85;
+  mix-blend-mode: difference;
+}
+
+/* iPad Pro 11" landscape — 1024×768 */
+.device-frame-ipad .device-shell {
+  position: relative;
+  width: 1060px;
+  height: 792px;
+  background: #1d1d1f;
+  border-radius: 26px;
+  padding: 18px;
+  box-sizing: border-box;
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.35), inset 0 0 0 2px #3a3a3c;
+}
+.device-frame-ipad .device-screen {
+  width: 100%;
+  height: 100%;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #000;
+}
+.device-frame-ipad .device-screen iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+}
+.device-frame-ipad .device-home-indicator {
+  position: absolute;
+  bottom: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 240px;
+  height: 5px;
+  background: #fff;
+  border-radius: 3px;
+  z-index: 3;
+  opacity: 0.9;
+  mix-blend-mode: difference;
+}
+
+/* Center the whole device inside the canvas, allow scroll when larger */
+.design-canvas { padding: 24px; }
+.design-sizer { transition: width 180ms ease, height 180ms ease; }
