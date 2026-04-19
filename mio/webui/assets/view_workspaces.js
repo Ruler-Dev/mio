@@ -44,6 +44,51 @@
   };
   ready();
 
+  const TEMPLATES = [
+    {
+      icon: "🔬", color: "#0ea5e9",
+      name: "Research Assistant",
+      description: "Summarise papers, synthesise findings, cite sources.",
+      system_prompt: "You are a research assistant. For every question: (1) think step-by-step, (2) cite sources when answering from retrieved context, (3) flag uncertainty explicitly, (4) offer one follow-up question. Prefer concise prose over bullet dumps.",
+      tier: "large-moe", context_window: 131072, caveman_level: "lite",
+    },
+    {
+      icon: "🛠", color: "#10b981",
+      name: "Coding Agent",
+      description: "Plan, write, test. Respects your project's conventions.",
+      system_prompt: "You are a coding agent. Before writing code, restate the task in one line. Make minimal changes, match surrounding style, add tests where they exist. When uncertain, ask ONE clarifying question before editing.",
+      tier: "large-moe", context_window: 131072, caveman_level: "full",
+    },
+    {
+      icon: "🎨", color: "#ec4899",
+      name: "UI Designer",
+      description: "Iterate on interfaces. Tailwind-first, components clean.",
+      system_prompt: "You are a UI/UX designer. Default to Tailwind CSS + React. Produce self-contained HTML artifacts. Favour restraint: 2 type sizes, 1 accent, generous whitespace. When asked to change something, change only that — don't redo the whole page.",
+      tier: "large-moe", context_window: 32768, caveman_level: "full",
+    },
+    {
+      icon: "✍️", color: "#a855f7",
+      name: "Writing Editor",
+      description: "Tighten prose. Preserve voice. Flag weak sentences.",
+      system_prompt: "You are a copy editor. Preserve the author's voice. Your priorities: clarity, rhythm, economy — in that order. When editing, show the revised passage and list the specific changes you made and why. Don't rewrite — edit.",
+      tier: "medium", context_window: 32768, caveman_level: "off",
+    },
+    {
+      icon: "📓", color: "#f59e0b",
+      name: "Daily Journal",
+      description: "Rubber-duck + gentle self-reflection partner.",
+      system_prompt: "You are a journaling partner. Match the user's register — if they're casual, be casual. Ask open-ended questions, never give unsolicited advice. Reflect feelings back. Close each exchange with a single sentence that summarises what the user said.",
+      tier: "medium", context_window: 32768, caveman_level: "off",
+    },
+    {
+      icon: "🎓", color: "#6366f1",
+      name: "Study Buddy",
+      description: "Explain concepts, quiz back, adjust to confusion.",
+      system_prompt: "You are a patient tutor. When asked to explain: (1) give an intuition in one sentence, (2) a concrete example, (3) a common misconception to avoid. After each concept, ask ONE question to check understanding. Adjust depth based on the answer.",
+      tier: "medium", context_window: 32768, caveman_level: "lite",
+    },
+  ];
+
   async function load(grid) {
     grid.innerHTML = `<div class="muted">Loading…</div>`;
     try {
@@ -58,8 +103,12 @@
         if (s.project_id) countByPid[s.project_id] = (countByPid[s.project_id] || 0) + 1;
       }
       grid.innerHTML = "";
+      // Empty state: show starter templates the user can one-click create.
       if (!projects.length) {
-        grid.appendChild(emptyStateCard(grid));
+        grid.appendChild(emptyStateHeader());
+        for (const t of TEMPLATES) grid.appendChild(templateCard(t, grid));
+        grid.appendChild(newCard(grid));
+        return;
       }
       for (const p of projects) grid.appendChild(card(p, countByPid[p.id] || 0, grid));
       grid.appendChild(newCard(grid));
@@ -68,13 +117,51 @@
     }
   }
 
-  function emptyStateCard(grid) {
+  function emptyStateHeader() {
     const el = document.createElement("div");
     el.className = "ws-empty";
     el.innerHTML = `
-      <h2>No workspaces yet</h2>
-      <p>Create one to bundle a system prompt, a model tier, a context window, and your pinned prompts.</p>
+      <h2>Start with a template</h2>
+      <p>Pick one to scaffold a workspace. You can edit everything after.</p>
     `;
+    return el;
+  }
+
+  function templateCard(tmpl, grid) {
+    const el = document.createElement("div");
+    el.className = "ws-card ws-card-template";
+    el.style.setProperty("--ws-accent", tmpl.color);
+    el.innerHTML = `
+      <div class="ws-card-stripe"></div>
+      <div class="ws-card-body">
+        <div class="ws-card-icon">${escapeHtml(tmpl.icon)}</div>
+        <div class="ws-card-title">${escapeHtml(tmpl.name)}</div>
+        <div class="ws-card-desc">${escapeHtml(tmpl.description)}</div>
+        <div class="ws-card-meta">
+          <span>${escapeHtml(tmpl.tier)}</span>
+          <span>•</span>
+          <span>${humanCtx(tmpl.context_window)}</span>
+          <span>•</span>
+          <span>caveman ${escapeHtml(tmpl.caveman_level)}</span>
+        </div>
+      </div>
+      <div class="ws-card-actions">
+        <button data-act="use" style="flex:1;background:var(--ws-accent);color:#fff;border-color:var(--ws-accent)">Use this template</button>
+      </div>
+    `;
+    el.querySelector('[data-act="use"]').addEventListener("click", async () => {
+      const res = await fetch("/ui/api/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: tmpl.name, description: tmpl.description,
+          system_prompt: tmpl.system_prompt, icon: tmpl.icon, color: tmpl.color,
+          tier: tmpl.tier, context_window: tmpl.context_window,
+          caveman_level: tmpl.caveman_level, files: [], pinned_prompts: [],
+        }),
+      });
+      if (res.ok) load(grid);
+    });
     return el;
   }
 
