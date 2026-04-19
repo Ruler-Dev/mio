@@ -87,8 +87,12 @@ No explanations after the artifact. The artifact IS the design.`;
             <div class="design-vibes" id="design-vibes"></div>
             <textarea class="design-input" id="design-input" rows="3" placeholder="Describe what you want to design…  (e.g. 'a settings page for a music app')"></textarea>
             <div class="design-composer-foot">
+              <div class="design-scope" id="design-scope" title="Patch: surgical edit, fast, keeps unrelated parts. Rewrite: full regenerate from scratch.">
+                <button class="design-scope-btn" data-scope="patch">Patch</button>
+                <button class="design-scope-btn" data-scope="rewrite">Rewrite</button>
+              </div>
               <label class="design-check" title="Fire 3 parallel generations with temperature jitter, pick the best">
-                <input type="checkbox" id="design-variants"> Generate 3 variants
+                <input type="checkbox" id="design-variants"> 3 variants
               </label>
               <div style="flex:1"></div>
               <button class="btn-ghost design-generate" data-action="generate">Generate</button>
@@ -124,6 +128,32 @@ No explanations after the artifact. The artifact IS the design.`;
     renderHistory(host);
     renderVersions(host);
     wireHandlers(host);
+  }
+
+  // --- Scope classifier (Patch vs Rewrite) -----------------------------
+  // Patch keywords favour surgical edits; Rewrite keywords favour full
+  // regeneration. When neither matches, default to Patch when there's an
+  // existing active version (iterating), Rewrite otherwise (first turn).
+  const PATCH_HINTS = /\b(change|tweak|adjust|edit|update|fix|make\s+(the|it|this|them)|swap|replace\s+(only|just)|rename|recolor|increase|decrease|reduce|bigger|smaller|darker|lighter|move|shift|shrink|grow|hide|show|add\s+(a|an|one|the))\b/i;
+  const REWRITE_HINTS = /\b(redo|redesign|rewrite|from\s+scratch|start\s+over|new\s+(layout|design)|completely|entirely\s+different|reimagine|totally\s+different|scrap\s+it)\b/i;
+
+  function classifyScope(prompt) {
+    if (REWRITE_HINTS.test(prompt)) return "rewrite";
+    if (PATCH_HINTS.test(prompt))   return "patch";
+    return state.versions.length > 0 ? "patch" : "rewrite";
+  }
+
+  function applyScopeChip(host, scope) {
+    state._scope = scope;
+    saveSession();
+    host.querySelectorAll(".design-scope-btn").forEach((b) =>
+      b.classList.toggle("active", b.dataset.scope === scope));
+  }
+
+  function onPromptInput(host) {
+    if (state._scopeLocked) return;
+    const input = host.querySelector("#design-input");
+    applyScopeChip(host, classifyScope(input.value || ""));
   }
 
   function renderVibes(host) {
@@ -407,6 +437,16 @@ No explanations after the artifact. The artifact IS the design.`;
         generate(host);
       }
     });
+    input.addEventListener("input", () => onPromptInput(host));
+    // Scope chip — click to override the auto-classification
+    host.querySelectorAll(".design-scope-btn").forEach((b) => {
+      b.addEventListener("click", () => {
+        state._scopeLocked = true;
+        applyScopeChip(host, b.dataset.scope);
+      });
+    });
+    // Initial scope (auto-classify empty prompt → defaults)
+    onPromptInput(host);
     host.querySelector('[data-action="generate"]').addEventListener("click", () => generate(host));
     host.querySelector('[data-action="reset"]').addEventListener("click", () => {
       if (!confirm("Clear this design session? Versions will be lost.")) return;
@@ -505,13 +545,20 @@ No explanations after the artifact. The artifact IS the design.`;
       // If this generation is a fork from an existing version, hand the
       // model the full HTML of the source so it can iterate rather than
       // start from scratch.
-      if (state._forkSeed) {
+      const activeV = state.versions[state.activeVersion];
+      const seedHtml = state._forkSeed || (state._scope === "patch" && activeV ? activeV.html : null);
+      if (seedHtml) {
+        const scopeNote = state._scope === "patch"
+          ? `SCOPE: PATCH. The user is making a targeted edit to the existing design. Produce the FULL updated HTML in the artifact, but change ONLY the parts implied by the request. Preserve layout, colors, fonts, and all unrelated elements exactly.`
+          : `The user is iterating on an existing design. Build on it rather than starting from scratch.`;
         messages.unshift({
           role: "system",
-          content: `The user is forking an existing design. Here is the full HTML of that design — build on it rather than starting from scratch:\n\n\`\`\`html\n${state._forkSeed.slice(0, 40000)}\n\`\`\``,
+          content: `${scopeNote}\n\nHere is the full HTML of the current design:\n\n\`\`\`html\n${seedHtml.slice(0, 40000)}\n\`\`\``,
         });
         state._forkSeed = null;
       }
+      // Unlock auto-classifier for next turn once the user has sent one.
+      state._scopeLocked = false;
 
       const runs = [];
       for (let i = 0; i < variants; i++) {
