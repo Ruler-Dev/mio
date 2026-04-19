@@ -2865,7 +2865,39 @@ function renderArtifactPreview(body, art) {
     const iframe = document.createElement('iframe');
     iframe.className = 'artifact-iframe';
     iframe.sandbox = 'allow-scripts';
-    const src = `<!doctype html><html><body style="margin:0;padding:20px;background:#fff;font-family:sans-serif"><pre class="mermaid">${escapeHtml(art.content)}</pre><script type="module">import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';mermaid.initialize({startOnLoad:true,theme:'default'});<\/script></body></html>`;
+    // Initialize manually so we can catch parse errors and fall
+    // back to a readable source-dump instead of the bomb icon.
+    const payload = safeJSONForScript(art.content);
+    const src = `<!doctype html><html><head><style>
+body{margin:0;padding:20px;background:#fff;font-family:-apple-system,sans-serif;color:#333}
+#err{display:none;padding:18px;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;color:#7f1d1d;font-size:13px;line-height:1.5}
+#err h3{margin:0 0 6px;font-size:14px}
+#err pre{background:#fff;border:1px solid #fecaca;border-radius:6px;padding:10px;margin:10px 0 0;white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:11px;color:#333;max-height:60vh;overflow:auto}
+#err button{margin-top:8px;padding:5px 10px;background:#dc2626;color:#fff;border:0;border-radius:5px;font-size:11px;cursor:pointer}
+</style></head><body>
+<div id="m" class="mermaid"></div>
+<div id="err"><h3>Mermaid couldn't parse this diagram</h3>
+<div id="why">…</div>
+<pre id="src"></pre>
+<button id="copy">Copy source</button></div>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+const src = ${payload};
+mermaid.initialize({startOnLoad:false, theme:'default', securityLevel:'loose'});
+try {
+  await mermaid.parse(src);
+  const { svg } = await mermaid.render('g', src);
+  document.getElementById('m').innerHTML = svg;
+} catch (e) {
+  document.getElementById('m').style.display = 'none';
+  document.getElementById('err').style.display = 'block';
+  document.getElementById('why').textContent = String(e && (e.message || e)).slice(0, 400);
+  document.getElementById('src').textContent = src;
+  document.getElementById('copy').addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(src); } catch (_) {}
+  });
+}
+<\/script></body></html>`;
     iframe.srcdoc = src;
     body.appendChild(iframe);
     return;
