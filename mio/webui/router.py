@@ -784,6 +784,170 @@ async def rag_search(q: str, limit: int = 10, label: str | None = None):
         return {"results": [], "error": str(e)}
 
 
+# --- Obsidian vault integration ------------------------------------
+#
+# Not just RAG: Mio knows how to list, read, and write notes in a
+# configured vault. The vault path persists in ~/.mio/obsidian.json;
+# everything is confined to that path (no traversal outside).
+
+def _obsidian_config_path() -> Path:
+    return Path.home() / ".mio" / "obsidian.json"
+
+
+def _load_obsidian_config() -> dict:
+    p = _obsidian_config_path()
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return {}
+
+
+def _save_obsidian_config(cfg: dict) -> None:
+    p = _obsidian_config_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
+
+
+def _obsidian_vault() -> Path | None:
+    cfg = _load_obsidian_config()
+    vp = cfg.get("vault_path")
+    if not vp:
+        return None
+    return Path(vp).expanduser()
+
+
+def _obsidian_safe_join(vault: Path, rel: str) -> Path | None:
+    """Resolve rel under vault, refusing any path that escapes it."""
+    if not rel:
+        return None
+    p = (vault / rel).resolve()
+    try:
+        p.relative_to(vault.resolve())
+    except ValueError:
+        return None
+    return p
+
+
+@router.get("/api/obsidian/config")
+async def obsidian_get_config():
+    cfg = _load_obsidian_config()
+    vp = cfg.get("vault_path") or ""
+    vault_exists = False
+    if vp:
+        vault_exists = Path(vp).expanduser().exists()
+    return {"vault_path": vp, "vault_exists": vault_exists}
+
+
+@router.post("/api/obsidian/config")
+async def obsidian_set_config(body: dict):
+    vp = (body or {}).get("vault_path", "").strip()
+    if not vp:
+        return {"error": "vault_path required"}
+    expanded = Path(vp).expanduser()
+    if not expanded.exists():
+        return {"error": f"path does not exist: {vp}"}
+    _save_obsidian_config({"vault_path": str(expanded)})
+    return {"ok": True, "vault_path": str(expanded)}
+
+
+@router.get("/api/obsidian/tree")
+async def obsidian_tree():
+    vault = _obsidian_vault()
+    if not vault:
+        return {"error": "vault not configured"}
+    if not vault.exists():
+        return {"error": f"vault missing: {vault}"}
+
+    def walk(d: Path, depth: int = 0) -> list:
+        if depth > 12:
+            return []
+        items = []
+        try:
+            entries = sorted(d.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
+        except PermissionError:
+            return []
+        for entry in entries:
+            name = entry.name
+            if name.startswith(".") or name == "node_modules":
+                continue
+            rel = str(entry.relative_to(vault))
+            if entry.is_dir():
+                items.append({
+                    "type": "folder",
+                    "name": name,
+                    "path": rel,
+                    "children": walk(entry, depth + 1),
+                })
+            elif entry.suffix.lower() in (".md", ".markdown"):
+                items.append({
+                    "type": "note",
+                    "name": name,
+                    "path": rel,
+                    "size": entry.stat().st_size,
+                    "mtime": entry.stat().st_mtime,
+                })
+        return items
+
+    return {"vault_path": str(vault), "tree": walk(vault)}
+
+
+@router.get("/api/obsidian/note")
+async def obsidian_read_note(path: str):
+    vault = _obsidian_vault()
+    if not vault:
+        return {"error": "vault not configured"}
+    p = _obsidian_safe_join(vault, path)
+    if not p or not p.exists() or not p.is_file():
+        return {"error": "note not found"}
+    try:
+        content = p.read_text()
+    except Exception as e:
+        return {"error": str(e)}
+    return {
+        "path":    path,
+        "name":    p.name,
+        "content": content,
+        "size":    p.stat().st_size,
+        "mtime":   p.stat().st_mtime,
+    }
+
+
+@router.post("/api/obsidian/note")
+async def obsidian_write_note(body: dict):
+    vault = _obsidian_vault()
+    if not vault:
+        return {"error": "vault not configured"}
+    rel = (body or {}).get("path", "").strip()
+    content = (body or {}).get("content", "")
+    if not rel:
+        return {"error": "path required"}
+    # Ensure .md suffix so Obsidian picks it up.
+    if not rel.lower().endswith((".md", ".markdown")):
+        rel += ".md"
+    p = _obsidian_safe_join(vault, rel)
+    if not p:
+        return {"error": "invalid path"}
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(content)
+    return {"ok": True, "path": rel, "size": len(content.encode("utf-8"))}
+
+
+@router.post("/api/obsidian/reindex")
+async def obsidian_reindex():
+    """Full-text index the vault into the local RAG store so `@note:`
+    references and chat search can find notes."""
+    vault = _obsidian_vault()
+    if not vault:
+        return {"error": "vault not configured"}
+    try:
+        from mio.webui.skills_rag import index_folder
+        return index_folder(str(vault), label="obsidian", replace=True)
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @router.delete("/api/ingest/{doc_id}")
 async def delete_ingested(doc_id: str):
     """Remove a stashed ingest file (and leave the RAG index to self-heal
