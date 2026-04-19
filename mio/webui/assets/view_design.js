@@ -558,7 +558,15 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
       state._pendingCompare = null;
     }
     if (tab === "code") {
-      canvas.innerHTML = `<pre class="design-code"><code>${escapeHtml(v.html || "")}</code></pre>`;
+      // Detect language from the body so Prism can colour it.
+      const text = v.html || "";
+      const lang = /^\s*<!doctype|<html/i.test(text) ? "markup"
+                 : /^[\s\S]*?(import\s+\w|const\s+\w|function\s+\w)/.test(text) ? "javascript"
+                 : /^[\s\S]*?(import\s+bpy|def\s+\w)/.test(text) ? "python"
+                 : "markup";
+      canvas.innerHTML = `<pre class="design-code language-${lang}"><code class="language-${lang}">${escapeHtml(text)}</code></pre>`;
+      // Re-run Prism if it loaded with the main chat surface.
+      try { window.Prism?.highlightAllUnder?.(canvas); } catch {}
     } else if (tab === "diff") {
       const idx = state.versions.indexOf(v);
       const prev = idx > 0 ? state.versions[idx - 1] : null;

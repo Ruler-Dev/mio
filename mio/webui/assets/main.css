@@ -1340,15 +1340,63 @@ body.focus-mode .input-area { max-width: 720px; }
 }
 .design-code {
   margin: 0;
-  padding: 16px;
-  width: 100%;
+  padding: 16px 18px;
+  flex: 1;
+  align-self: stretch;
   overflow: auto;
   background: #0d1117;
   color: #c9d1d9;
   font-family: var(--font-mono);
   font-size: 11px;
-  line-height: 1.55;
+  line-height: 1.6;
+  tab-size: 2;
+  white-space: pre;
+  box-sizing: border-box;
+  border-radius: 6px;
+  max-width: 100%;
 }
+.design-code code {
+  display: block;
+  min-width: max-content;
+  color: inherit;
+  background: transparent;
+  font-family: inherit;
+  font-size: inherit;
+  padding: 0;
+}
+/* Nudge Prism tomorrow colours to read well on the #0d1117 bg
+   (Prism ships with a slightly dimmer palette). */
+.design-code .token.comment,
+.design-code .token.prolog,
+.design-code .token.doctype,
+.design-code .token.cdata { color: #8b949e; font-style: italic; }
+.design-code .token.punctuation { color: #c9d1d9; }
+.design-code .token.property,
+.design-code .token.tag,
+.design-code .token.boolean,
+.design-code .token.number,
+.design-code .token.constant,
+.design-code .token.symbol,
+.design-code .token.deleted { color: #79c0ff; }
+.design-code .token.selector,
+.design-code .token.attr-name,
+.design-code .token.string,
+.design-code .token.char,
+.design-code .token.builtin,
+.design-code .token.inserted { color: #a5d6ff; }
+.design-code .token.operator,
+.design-code .token.entity,
+.design-code .token.url,
+.design-code .language-css .token.string,
+.design-code .style .token.string { color: #ff7b72; }
+.design-code .token.atrule,
+.design-code .token.attr-value,
+.design-code .token.keyword { color: #ff7b72; }
+.design-code .token.function,
+.design-code .token.class-name { color: #d2a8ff; }
+.design-code .token.regex,
+.design-code .token.important,
+.design-code .token.variable { color: #ffa657; }
 .design-empty {
   flex: 1;
   display: flex;
