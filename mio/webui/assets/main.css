@@ -3190,7 +3190,7 @@ body.focus-mode .input-area { max-width: 720px; }
 .mio-voice-fab {
   position: fixed;
   right: 20px;
-  bottom: 44px; /* sit above the sovereignty bar */
+  bottom: 72px; /* above the 32 px metrics row + 28 px sovereignty bar */
   width: 48px;
   height: 48px;
   border-radius: 50%;
@@ -3694,7 +3694,7 @@ body.focus-mode .input-area { max-width: 720px; }
 .mio-pad {
   position: fixed;
   right: 24px;
-  bottom: 90px; /* above sovereignty bar + voice fab */
+  bottom: 130px; /* above voice FAB + metrics row + sovereignty bar */
   width: 400px;
   max-width: calc(100vw - 48px);
   height: 480px;
