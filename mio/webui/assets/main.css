@@ -2739,3 +2739,116 @@ body.focus-mode .input-area { max-width: 720px; }
   opacity: 0.92;
   transform: translateX(-50%) translateY(0);
 }
+
+/* ===== Design Mode: coachmarks =========================== */
+.design-coach {
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+  animation: ws-fade-in 180ms ease;
+}
+.design-coach-card {
+  background: var(--bg-page);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 22px 24px 18px;
+  max-width: 520px;
+  box-shadow: var(--shadow-lg);
+}
+.design-coach-card h2 {
+  font-size: 17px;
+  font-weight: 600;
+  margin: 0 0 10px;
+}
+.design-coach-card p {
+  color: var(--text-secondary);
+  line-height: 1.55;
+  margin: 0 0 12px;
+  font-size: 13px;
+}
+.design-coach-card ul {
+  padding-left: 18px;
+  margin: 0 0 14px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.65;
+}
+.design-coach-card ul li { margin-bottom: 4px; }
+.design-coach-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 12px;
+}
+.design-coach-actions button {
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  background: var(--bg-sidebar);
+  color: var(--text-primary);
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.design-coach-actions button.primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+/* ===== Design Mode: element-picker menu =================== */
+.design-pick-menu {
+  position: fixed;
+  z-index: 10000;
+  min-width: 220px;
+  background: var(--bg-page);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-lg);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.design-pick-hdr {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  padding: 6px 10px 4px;
+  font-family: var(--font-mono);
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.design-pick-menu button {
+  text-align: left;
+  padding: 8px 10px;
+  font-size: 12px;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  border-radius: 5px;
+  cursor: pointer;
+}
+.design-pick-menu button:hover { background: var(--bg-hover); }
+
+.design-extract-toast {
+  position: fixed;
+  bottom: 56px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #34C759;
+  color: #fff;
+  padding: 7px 14px;
+  font-size: 12px;
+  border-radius: 6px;
+  box-shadow: 0 6px 16px rgba(52, 199, 89, 0.3);
+  z-index: 9999;
+  animation: pop-in 180ms ease;
+}

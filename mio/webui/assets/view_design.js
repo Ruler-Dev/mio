@@ -239,6 +239,69 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
 
   // --- Render ----------------------------------------------------------
 
+  // --- Shortcuts: only active while Design view is mounted ----------
+  function bindDesignShortcuts(host) {
+    if (host._designKb) return;
+    host._designKb = (e) => {
+      // Never hijack typing
+      const t = e.target;
+      const inText = t && (t.tagName === "TEXTAREA" || t.tagName === "INPUT" || t.isContentEditable);
+      if (inText && e.key !== "Enter") return; // Enter handled elsewhere
+      if (!document.querySelector(".view-design")) return;
+      if (!(e.metaKey || e.ctrlKey)) return;
+      if (e.shiftKey || e.altKey) return;
+      const k = e.key.toLowerCase();
+      if (k === "enter") { e.preventDefault(); generate(host); return; }
+      if (k === "i") { e.preventDefault(); toggleInspect(host, !state._inspect); return; }
+      if (k === "e") { e.preventDefault(); toggleEdit(host, !state._edit);       return; }
+      if (k === "t") { e.preventDefault(); toggleTokens(host);                    return; }
+      if (k === "r") {
+        // Only if user has a last prompt in history
+        const lastUser = [...state.history].reverse().find((m) => m.role === "user");
+        if (lastUser) {
+          e.preventDefault();
+          const input = host.querySelector("#design-input");
+          if (input) { input.value = lastUser.text; generate(host); }
+        }
+        return;
+      }
+    };
+    window.addEventListener("keydown", host._designKb);
+  }
+
+  // --- Onboarding coachmarks (first open) ---------------------------
+  const ONBOARDING_KEY = "mio.design.onboarded.v1";
+  function maybeShowCoachmarks(host) {
+    try { if (localStorage.getItem(ONBOARDING_KEY)) return; } catch {}
+    const ov = document.createElement("div");
+    ov.className = "design-coach";
+    ov.innerHTML = `
+      <div class="design-coach-card">
+        <h2>Design Mode</h2>
+        <p>A focused canvas for iterating on UIs, 3D scenes, AR models, shaders, games, parametric CAD, and Blender scripts — all in one place.</p>
+        <ul>
+          <li><b>Platform row</b> → picks your target shell (Web / iOS / Android / iPad) and wraps the preview in a real device frame.</li>
+          <li><b>Kind row</b> → sets what the model emits: Page · 3D · AR · Shader · Game · CAD · Blender.</li>
+          <li><b>Vibe chips</b> → quick style tokens that prepend into your prompt.</li>
+          <li><b>Shortcuts</b>: ⌘⏎ Generate · ⌘I Inspect · ⌘E Edit · ⌘T Tokens · ⌘R Re-run last.</li>
+          <li><b>📎 Paste a screenshot</b> in the composer to use it as visual reference (VL input).</li>
+          <li><b>.zip</b> exports every version + README + prompt log.</li>
+        </ul>
+        <div class="design-coach-actions">
+          <button data-act="tour-skip">Skip</button>
+          <button data-act="tour-ok" class="primary">Got it</button>
+        </div>
+      </div>
+    `;
+    host.appendChild(ov);
+    const dismiss = () => {
+      try { localStorage.setItem(ONBOARDING_KEY, "1"); } catch {}
+      ov.remove();
+    };
+    ov.querySelector('[data-act="tour-skip"]').addEventListener("click", dismiss);
+    ov.querySelector('[data-act="tour-ok"]').addEventListener("click", dismiss);
+  }
+
   function renderRoot(host) {
     host.innerHTML = `
       <div class="view-design">
@@ -313,6 +376,8 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
     renderHistory(host);
     renderVersions(host);
     wireHandlers(host);
+    bindDesignShortcuts(host);
+    maybeShowCoachmarks(host);
   }
 
   // --- Reference images (paste / drop) ---------------------------------
@@ -859,18 +924,79 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
   }
 
   function onElementPicked(host, pick) {
-    const input = host.querySelector("#design-input");
-    const hint = pick.textHint ? ` "${pick.textHint}"` : "";
-    const seed = `Change this specific element (${pick.tag}${hint}) at \`${pick.selector}\` so it `;
-    input.value = seed;
-    input.focus();
-    // Park the caret at the end so the user can type the change.
-    input.setSelectionRange(input.value.length, input.value.length);
-    // Seed the next gen with current HTML so we iterate in place.
-    const v = state.versions[state.activeVersion];
-    if (v) state._forkSeed = v.html;
-    // Turn inspect off after a pick so accidental clicks don't recur.
-    toggleInspect(host, false);
+    // Ask: edit-in-place OR extract-as-component?
+    const menu = document.createElement("div");
+    menu.className = "design-pick-menu";
+    menu.innerHTML = `
+      <div class="design-pick-hdr">${escapeHtml(pick.tag + (pick.textHint ? " · " + pick.textHint : ""))}</div>
+      <button data-act="edit"   title="Edit this specific element">Change this specific element</button>
+      <button data-act="extract" title="Save to the per-session component shelf for reuse">Extract as component</button>
+      <button data-act="regen"  title="Regenerate just this element">Regenerate just this</button>
+      <button data-act="cancel">Cancel</button>
+    `;
+    document.body.appendChild(menu);
+    // Position near the clicked element
+    const canvas = host.querySelector("#design-canvas");
+    const rect = canvas?.getBoundingClientRect();
+    if (rect && pick.rect) {
+      menu.style.left = (rect.left + pick.rect.x) + "px";
+      menu.style.top  = (rect.top + pick.rect.y + pick.rect.h + 6) + "px";
+    }
+    const close = () => menu.remove();
+    menu.querySelector('[data-act="cancel"]').addEventListener("click", close);
+    menu.querySelector('[data-act="edit"]').addEventListener("click", () => {
+      const input = host.querySelector("#design-input");
+      const hint = pick.textHint ? ` "${pick.textHint}"` : "";
+      input.value = `Change this specific element (${pick.tag}${hint}) at \`${pick.selector}\` so it `;
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+      const v = state.versions[state.activeVersion];
+      if (v) state._forkSeed = v.html;
+      toggleInspect(host, false);
+      close();
+    });
+    menu.querySelector('[data-act="extract"]').addEventListener("click", () => {
+      saveComponent(host, pick);
+      toggleInspect(host, false);
+      close();
+    });
+    menu.querySelector('[data-act="regen"]').addEventListener("click", () => {
+      const input = host.querySelector("#design-input");
+      const hint = pick.textHint ? ` "${pick.textHint}"` : "";
+      input.value = `Regenerate ONLY the ${pick.tag} element${hint} (at \`${pick.selector}\`). Keep everything else exactly as it is.`;
+      input.focus();
+      const v = state.versions[state.activeVersion];
+      if (v) state._forkSeed = v.html;
+      toggleInspect(host, false);
+      close();
+    });
+    // Auto-dismiss on outside click
+    setTimeout(() => {
+      const onClick = (e) => {
+        if (!menu.contains(e.target)) { close(); document.removeEventListener("click", onClick); }
+      };
+      document.addEventListener("click", onClick);
+    }, 50);
+  }
+
+  // --- Component shelf: reusable snippets per session --------------
+  function saveComponent(host, pick) {
+    state._components = state._components || [];
+    state._components.push({
+      id: "c" + Date.now(),
+      tag: pick.tag,
+      selector: pick.selector,
+      textHint: pick.textHint,
+      outer: pick.outer,
+      ts: Date.now(),
+    });
+    saveSession();
+    // Tiny toast
+    const tip = document.createElement("div");
+    tip.className = "design-extract-toast";
+    tip.textContent = `Extracted ${pick.tag}${pick.textHint ? " · " + pick.textHint : ""} — reusable via /components in the composer`;
+    document.body.appendChild(tip);
+    setTimeout(() => tip.remove(), 2200);
   }
 
   function toggleInspect(host, on) {
