@@ -2721,7 +2721,40 @@ function _normalizeArtifactType(t) {
     'text/x-threejs':               'application/vnd.pimio.threejs',
     'application/javascript+threejs': 'application/vnd.pimio.threejs',
   };
-  return aliases[t] || t;
+  if (aliases[t]) return aliases[t];
+  // Generic rescue: the model sometimes invents namespaces like
+  //   application/vnd.ant.mine.threejs
+  //   application/vnd.ant.mio.threejs
+  //   application/vnd.ant.anthropic.chartjs
+  //   application/vnd.pimio.ant.p5
+  // Strip any middle segment between "vnd.<X>" and the tail token
+  // and remap to the canonical pimio namespace.
+  const m = /^application\/vnd\.(?:ant|pimio|mio|mine|anthropic)\.(?:[a-z0-9_-]+\.)?([a-z0-9_-]+)$/i.exec(t);
+  if (m) {
+    const tail = m[1].toLowerCase().replace(/[-_]/g, "");
+    const canonical = {
+      threejs: "threejs", three: "threejs",
+      p5: "p5", p5js: "p5",
+      chartjs: "chartjs", chart: "chartjs",
+      leaflet: "leaflet", map: "leaflet",
+      math: "math", katex: "math",
+      graphviz: "graphviz", dot: "graphviz",
+      mindmap: "mindmap", markmap: "mindmap",
+      revealjs: "revealjs", slides: "revealjs",
+      timeline: "timeline",
+      mermaid: "mermaid",
+      react: "react",
+      code: "code",
+      shader: "shader",
+      tone: "tone",
+      pyrepl: "pyrepl",
+      weather: "weather",
+      image: "image",
+      file: "file",
+    }[tail];
+    if (canonical) return "application/vnd.pimio." + canonical;
+  }
+  return t;
 }
 
 function renderArtifactPreview(body, art) {
