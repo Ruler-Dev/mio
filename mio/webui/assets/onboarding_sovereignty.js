@@ -52,6 +52,19 @@
       </div>
     `;
     document.body.appendChild(ov);
+    // Click-outside and Esc dismiss — prevents "invisible card" from
+    // locking the user out if the card's background blends into the
+    // overlay (dark mode edge case).
+    const dismiss = () => {
+      localStorage.setItem(KEY, "1");
+      ov.remove();
+      window.removeEventListener("keydown", onEsc);
+    };
+    const onEsc = (e) => { if (e.key === "Escape") dismiss(); };
+    window.addEventListener("keydown", onEsc);
+    ov.addEventListener("click", (e) => {
+      if (e.target === ov) dismiss();
+    });
     ov.querySelector('[data-act="done"]').addEventListener("click", () => {
       const restricted = ov.querySelector("#mio-sov-restricted").checked;
       if (restricted) localStorage.setItem("mio.restricted", "1");

@@ -34,8 +34,11 @@ body {
 }
 
 /* ===== Layout ===== */
-.app { display: grid; grid-template-columns: 260px 1fr; grid-template-rows: 1fr 32px; height: 100vh; }
-.sidebar { grid-row: 1 / -1; background: var(--bg-sidebar); border-right: 1px solid var(--border-subtle); display: flex; flex-direction: column; overflow: hidden; }
+.app { display: grid; grid-template-columns: 48px 260px 1fr; grid-template-rows: 1fr 32px; height: calc(100vh - 28px); }
+.nav-rail { grid-row: 1 / -1; grid-column: 1; }
+.sidebar { grid-row: 1 / -1; grid-column: 2; background: var(--bg-sidebar); border-right: 1px solid var(--border-subtle); display: flex; flex-direction: column; overflow: hidden; }
+.main { grid-column: 3; grid-row: 1 / -1; }
+.view-stage { grid-column: 2 / -1; grid-row: 1 / -1; }
 .main { display: flex; flex-direction: column; overflow: hidden; }
 .metrics-bar { grid-column: 2; background: var(--bg-sidebar); border-top: 1px solid var(--border-subtle); display: flex; align-items: center; gap: 20px; padding: 0 20px; font-size: 11px; font-family: var(--font-mono); color: var(--text-secondary); }
 
@@ -485,8 +488,11 @@ body.focus-mode .input-area { max-width: 720px; }
 
 /* ===== Responsive ===== */
 @media (max-width: 768px) {
-  .app { grid-template-columns: 1fr; }
+  .app { grid-template-columns: 48px 1fr; }
   .sidebar { display: none; }
+  .nav-rail { grid-column: 1; }
+  .main { grid-column: 2; }
+  .view-stage { grid-column: 2; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -503,8 +509,6 @@ body.focus-mode .input-area { max-width: 720px; }
 /* 48px-wide icon strip injected at far-left of .app by nav_rail.js.
    Pushes the existing sidebar+main right by the same amount. */
 .nav-rail {
-  width: 48px;
-  flex: 0 0 48px;
   background: var(--bg-sidebar);
   border-right: 1px solid var(--border-subtle);
   display: flex;
@@ -2443,10 +2447,8 @@ body.focus-mode .input-area { max-width: 720px; }
   cursor: pointer;
 }
 
-/* Make space above the bar everywhere */
-.app { padding-bottom: 28px; }
-.view-stage { padding-bottom: 0; }
-.design-canvas { padding-bottom: 24px; }
+/* Sovereignty bar sits in the 28 px reserved at the bottom of the
+   viewport (see .app { height: calc(100vh - 28px) }). */
 
 /* ===== Design Mode: kind picker (Page / 3D / AR / Shader / Game) == */
 .design-kinds {
@@ -3514,14 +3516,20 @@ body.focus-mode .input-area { max-width: 720px; }
   animation: ws-fade-in 200ms ease;
 }
 .mio-sov-onboard-card {
-  background: var(--bg-page);
-  border: 1px solid var(--border);
+  background: #1f2230;
+  color: #e8e9ec;
+  border: 1px solid rgba(255,255,255,0.12);
   border-radius: 16px;
   padding: 32px 32px 24px;
   max-width: 720px;
   width: calc(100vw - 60px);
-  box-shadow: 0 32px 80px rgba(0,0,0,0.4);
+  box-shadow: 0 32px 80px rgba(0,0,0,0.55);
   position: relative;
+}
+[data-theme="light"] .mio-sov-onboard-card {
+  background: #ffffff;
+  color: #171717;
+  border-color: rgba(0,0,0,0.1);
 }
 .mio-sov-onboard-badge {
   position: absolute;
