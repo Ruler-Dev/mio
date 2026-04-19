@@ -3396,3 +3396,52 @@ body.focus-mode .input-area { max-width: 720px; }
   min-width: 14px;
   text-align: center;
 }
+
+/* ===== Graph view ==================================== */
+.view-graph {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  background: #0d1117;
+}
+.view-graph .view-header {
+  border-bottom-color: #30363d;
+  background: #0d1117;
+}
+.view-graph .view-header h1 { color: #e6edf3; }
+.view-graph .view-header .muted { color: #8b949e; }
+.graph-canvas {
+  flex: 1;
+  min-height: 0;
+  background: #0d1117;
+}
+.graph-filters {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.graph-filter {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border: 1px solid #30363d;
+  background: #161b22;
+  color: #8b949e;
+  border-radius: 999px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.graph-filter .dot {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+}
+.graph-filter.active { color: #e6edf3; border-color: #58a6ff; }
+.view-graph .btn-ghost {
+  background: #161b22;
+  border-color: #30363d;
+  color: #c9d1d9;
+}
+.view-graph .btn-ghost:hover { border-color: #58a6ff; color: #58a6ff; }

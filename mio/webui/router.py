@@ -1132,6 +1132,70 @@ async def flow_run_events(run_id: str):
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
+# --- Knowledge graph --------------------------------------------
+@router.get("/api/graph")
+async def knowledge_graph():
+    """Walk the user's local state + emit a node/edge graph suitable
+    for a Cytoscape-style visualiser.
+
+    Nodes: chat sessions · artifacts · ingest (clipped docs) · projects
+           (workspaces) · Obsidian notes (top level only).
+    Edges: session→artifact (contains), session→project (belongs-to),
+           session↔session (@-mention or title similarity skipped for
+           v1), artifact→session (reverse).
+    """
+    from pathlib import Path as _P
+    nodes = []
+    edges = []
+
+    # Sessions + their artifacts
+    if _sessions_dir and _sessions_dir.exists():
+        for p in sorted(_sessions_dir.glob("*.json"), key=lambda x: -x.stat().st_mtime)[:120]:
+            try:
+                data = json.loads(p.read_text())
+            except Exception:
+                continue
+            sid = data.get("id") or p.stem
+            title = (data.get("title") or sid)[:48]
+            nodes.append({"id": f"session:{sid}", "type": "session", "label": title})
+            pid = data.get("project_id")
+            if pid:
+                edges.append({"source": f"session:{sid}", "target": f"project:{pid}", "rel": "in"})
+            for art in data.get("artifacts", [])[:20]:
+                aid = art.get("id") or f"art-{hash(art.get('title',''))}"
+                atitle = (art.get("title") or art.get("type") or "artifact")[:42]
+                nodes.append({"id": f"artifact:{aid}", "type": "artifact", "label": atitle})
+                edges.append({"source": f"session:{sid}", "target": f"artifact:{aid}", "rel": "emitted"})
+
+    # Projects / workspaces
+    for pr in _load_projects():
+        nodes.append({"id": f"project:{pr['id']}", "type": "project",
+                      "label": pr.get("name", pr["id"])[:42]})
+
+    # Ingested docs
+    ing = _P.home() / ".mio" / "ingest"
+    if ing.exists():
+        for p in sorted(ing.glob("*.md"), reverse=True)[:60]:
+            nodes.append({
+                "id": f"doc:{p.stem}", "type": "doc",
+                "label": p.stem.split("-", 2)[-1][:42],
+            })
+
+    # Obsidian notes (top-level files only — keeps the graph tractable)
+    try:
+        cfg = _load_obsidian_config()
+        vp = cfg.get("vault_path")
+        if vp:
+            vault = _P(vp).expanduser()
+            if vault.exists():
+                for p in list(vault.glob("*.md"))[:40]:
+                    nodes.append({"id": f"note:{p.name}", "type": "note", "label": p.stem[:42]})
+    except Exception:
+        pass
+
+    return {"nodes": nodes, "edges": edges}
+
+
 # --- Daily Note --------------------------------------------------
 
 def _journal_path(date_str: str | None = None) -> Path:

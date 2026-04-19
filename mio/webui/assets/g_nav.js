@@ -29,6 +29,7 @@
     f: { kind: "view", target: "flow",       label: "Flow" },
     j: { kind: "view", target: "journal",    label: "Journal" },
     n: { kind: "view", target: "notebook",   label: "Notebook" },
+    g: { kind: "view", target: "graph",       label: "Graph" },
     a: { kind: "href", target: "/ui/attachments", label: "Attachments" },
     p: { kind: "href", target: "/ui/playground",  label: "Playground" },
     t: { kind: "href", target: "/ui/stats",       label: "Stats" },
