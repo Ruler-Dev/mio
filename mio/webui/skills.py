@@ -107,14 +107,42 @@ def _find_unicode_font() -> tuple[str, str] | None:
     return None
 
 
-def generate_pdf(title: str, content: str, filename: str | None = None) -> dict:
+def generate_pdf(
+    title: str,
+    content: str,
+    filename: str | None = None,
+    preset: str | None = None,
+    color: str | None = None,
+    theme: str | None = None,
+    **_ignored,
+) -> dict:
     """Generate a PDF document from markdown-like content.
 
     Registers a Unicode TTF (Arial Unicode on macOS, DejaVu on Linux) when
     available so characters like en-dash, smart quotes, and accented letters
     render correctly. Falls back to Helvetica with ASCII transliteration when
     no Unicode font is found.
+
+    If `preset`, `color`, or `theme` is passed, the call is delegated to
+    `generate_pdf_report` (which has the full 64-preset × 39-color styling
+    system). That keeps the tool DWIM — the model sometimes picks
+    `generate_pdf` by name but passes styling kwargs that only the rich
+    variant understands.
     """
+    if preset or color or theme:
+        try:
+            from mio.webui.skills_docs import generate_pdf_report
+        except ImportError:
+            pass
+        else:
+            return generate_pdf_report(
+                title=title,
+                content=content,
+                filename=filename,
+                preset=preset or theme or "auto",
+                color=color,
+            )
+
     try:
         from fpdf import FPDF
     except ImportError:
@@ -1784,10 +1812,27 @@ def get_tools_spec() -> list[dict]:
 
 
 def execute_skill(name: str, arguments: dict) -> dict:
-    """Execute a skill by name with given arguments."""
+    """Execute a skill by name with given arguments.
+
+    Silently drops any kwarg the target function doesn't accept — LLMs
+    occasionally hallucinate extra parameters (e.g. `preset` on a skill
+    that doesn't take one) and we'd rather produce a working result than
+    crash the tool-use loop with a TypeError. Skills can opt out by
+    declaring `**kwargs` in their signature to receive everything.
+    """
     if name not in SKILLS:
         return {"error": f"Unknown skill: {name}"}
-    return SKILLS[name]["function"](**arguments)
+    fn = SKILLS[name]["function"]
+    try:
+        import inspect
+        sig = inspect.signature(fn)
+        params = sig.parameters
+        accepts_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+        if not accepts_var_kw:
+            arguments = {k: v for k, v in arguments.items() if k in params}
+    except (TypeError, ValueError):
+        pass
+    return fn(**arguments)
 
 
 # ============================================================
