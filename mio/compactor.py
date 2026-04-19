@@ -234,8 +234,36 @@ def _run_summarization(
 
 
 def _count_tokens(engine, messages: list[dict], tools: list[dict] | None) -> int:
-    """Render+tokenize the messages to get a prompt-token count."""
-    return len(engine._apply_chat_template(messages, tools=tools))
+    """Render+tokenize the messages to get a prompt-token count.
+
+    Falls back to a byte-length heuristic (chars/4) when Jinja chat-
+    template rendering fails — this happens when a message's `content`
+    is a multimodal list (text + image parts) or contains sequences
+    the template can't render. Failing the whole request because the
+    compactor couldn't pre-count tokens is worse than a rough estimate.
+    """
+    try:
+        return len(engine._apply_chat_template(messages, tools=tools))
+    except Exception as e:
+        import json as _json
+        total = 0
+        for m in messages:
+            c = m.get("content")
+            if isinstance(c, str):
+                total += len(c)
+            elif isinstance(c, list):
+                # OpenAI-style multimodal parts
+                for part in c:
+                    if isinstance(part, dict):
+                        total += len(part.get("text") or "")
+                        # image_url counts as ~1000 tokens — conservative
+                        if part.get("type") == "image_url":
+                            total += 4000
+            else:
+                try: total += len(_json.dumps(c))
+                except Exception: total += 32
+        # chars → tokens ~= 4:1 for English+code
+        return max(1, total // 4)
 
 
 def compact(

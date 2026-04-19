@@ -366,14 +366,38 @@ class MioEngine:
         tmpl_kwargs_tries.append({"add_generation_prompt": True})
 
         if hasattr(self._tokenizer, "apply_chat_template"):
-            for kw in tmpl_kwargs_tries:
-                try:
-                    text = self._tokenizer.apply_chat_template(
-                        messages, tokenize=False, **kw,
-                    )
+            # Some chat templates can't render multimodal content-list
+            # messages (text + image_url parts) — collapse them to plain
+            # text as a fallback shape before trying the template.
+            def _flatten(msgs):
+                out = []
+                for m in msgs:
+                    c = m.get("content")
+                    if isinstance(c, list):
+                        bits = []
+                        for part in c:
+                            if isinstance(part, dict):
+                                if part.get("type") == "text":
+                                    bits.append(str(part.get("text") or ""))
+                                elif part.get("type") == "image_url":
+                                    bits.append("[image attached]")
+                        out.append({**m, "content": "\n".join(bits) or ""})
+                    else:
+                        out.append(m)
+                return out
+
+            candidates = [messages, _flatten(messages)]
+            for msg_set in candidates:
+                for kw in tmpl_kwargs_tries:
+                    try:
+                        text = self._tokenizer.apply_chat_template(
+                            msg_set, tokenize=False, **kw,
+                        )
+                        break
+                    except Exception:
+                        text = None
+                if text is not None:
                     break
-                except (TypeError, ValueError):
-                    text = None
         if text is None:
             parts = []
             for msg in messages:
