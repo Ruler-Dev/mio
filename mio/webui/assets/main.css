@@ -2473,3 +2473,57 @@ body.focus-mode .input-area { max-width: 720px; }
   border-color: var(--accent);
   font-weight: 500;
 }
+
+/* ===== Re-runnable user-message rail ==================== */
+.message.user, .msg-user, [data-role="user"], .chat-message--user {
+  position: relative;
+}
+.rerun-rail {
+  position: absolute;
+  top: 4px; right: 4px;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  pointer-events: none;
+}
+.message.user:hover .rerun-rail,
+.msg-user:hover .rerun-rail,
+[data-role="user"]:hover .rerun-rail,
+.chat-message--user:hover .rerun-rail,
+.message.user:focus .rerun-rail,
+.msg-user:focus .rerun-rail,
+[data-role="user"]:focus .rerun-rail,
+.chat-message--user:focus .rerun-rail {
+  opacity: 1;
+  pointer-events: auto;
+}
+.rerun-rail button {
+  width: 22px; height: 22px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-page);
+  color: var(--text-secondary);
+  border-radius: 5px;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  transition: background 100ms ease, color 100ms ease, border-color 100ms ease;
+}
+.rerun-rail button:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+}
+.rerun-flash {
+  position: absolute;
+  bottom: -20px;
+  right: 6px;
+  font-size: 10px;
+  color: var(--text-muted);
+  background: var(--bg-page);
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border-subtle);
+  pointer-events: none;
+}
