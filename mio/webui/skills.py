@@ -600,6 +600,30 @@ SKILLS["generate_pdf_report"] = {
             "author": {"type": "string", "description": "Author name (optional)"},
             "preset": _PRESET_PARAM,
             "color": _COLOR_PARAM,
+            "background_color": {
+                "type": "string",
+                "description": (
+                    "Override the page background. Accepts a color name "
+                    "('black', 'light green', 'mint', 'cream') or a hex "
+                    "('#09090b'). Use when the user asks for a specific "
+                    "background, e.g. 'make the background light green'."
+                ),
+            },
+            "text_color": {
+                "type": "string",
+                "description": (
+                    "Override the body text color. Same accepted formats as "
+                    "background_color. Use when the user asks for a specific "
+                    "text color, e.g. 'make the text black'."
+                ),
+            },
+            "accent_color": {
+                "type": "string",
+                "description": (
+                    "Override the accent color (headings / accent bar / "
+                    "links). Same accepted formats as background_color."
+                ),
+            },
         },
         "required": ["title"],
     },

@@ -833,7 +833,46 @@ def _pick_pdf_preset(skill_kind: str, *text_hints: str) -> str:
     return pool[h % len(pool)]
 
 
-def _pdf_theme(name: str, skill_kind: str = "general", *hints: str, color: str | None = None) -> dict:
+_NAMED_COLORS: dict = {
+    "black": "#000000", "white": "#ffffff",
+    "red": "#dc2626", "green": "#16a34a", "blue": "#2563eb",
+    "yellow": "#eab308", "orange": "#ea580c", "purple": "#7c3aed",
+    "pink": "#ec4899", "brown": "#92400e", "grey": "#6b7280", "gray": "#6b7280",
+    "light grey": "#e5e7eb", "light gray": "#e5e7eb",
+    "dark grey": "#1f2937", "dark gray": "#1f2937",
+    "cream": "#fef3c7", "beige": "#fde68a",
+    "light green": "#bbf7d0", "mint": "#d1fae5", "pale green": "#d1fae5",
+    "light blue": "#bfdbfe", "sky": "#e0f2fe",
+    "light pink": "#fbcfe8", "pale pink": "#fce7f3",
+    "light yellow": "#fef9c3", "pale yellow": "#fef3c7",
+    "light purple": "#ddd6fe", "lavender": "#e9d5ff",
+    "light orange": "#fed7aa", "peach": "#ffedd5",
+    "light red": "#fecaca", "coral": "#fecdd3",
+}
+
+
+def _coerce_color(value: str | None) -> str | None:
+    """Accept either a '#rrggbb' / 'rrggbb' string or a natural-language name,
+    return a '#rrggbb' string, or None if the input can't be parsed."""
+    if not value:
+        return None
+    s = str(value).strip().lower()
+    if s.startswith("#") and len(s) in (4, 7):
+        return s
+    if len(s) in (3, 6) and all(c in "0123456789abcdef" for c in s):
+        return "#" + s
+    return _NAMED_COLORS.get(s)
+
+
+def _pdf_theme(
+    name: str,
+    skill_kind: str = "general",
+    *hints: str,
+    color: str | None = None,
+    background_color: str | None = None,
+    text_color: str | None = None,
+    accent_color: str | None = None,
+) -> dict:
     """Resolve a preset name into a full palette ready for reportlab.
 
     - `name="auto"` (default): skill picks a preset based on `skill_kind`
@@ -841,6 +880,10 @@ def _pdf_theme(name: str, skill_kind: str = "general", *hints: str, color: str |
     - `color="emerald"` (optional): overrides ONLY the color triple
       (accent / head_bg / soft) while keeping the preset's fonts and
       decoration. Use this for "same look but different color" refinement.
+    - `background_color`, `text_color`, `accent_color` (optional): surgical
+      overrides that win over both preset and color palette. Accept either
+      a named color ("black", "light green", "mint") or a hex ("#09090b").
+      Use these when the user explicitly asks for a specific color.
     """
     from reportlab.lib import colors
     key = (name or "auto").strip().lower()
@@ -857,14 +900,32 @@ def _pdf_theme(name: str, skill_kind: str = "general", *hints: str, color: str |
     text = p.get("text", "#171717")
     muted = p.get("muted", "#6f6f6f")
     page_bg = p.get("page_bg")
+
+    # Surgical overrides — these win over the preset and the color palette.
+    bg_hex = _coerce_color(background_color)
+    text_hex = _coerce_color(text_color)
+    accent_hex = _coerce_color(accent_color)
+    if bg_hex:
+        page_bg = bg_hex
+    if text_hex:
+        text = text_hex
+    accent = accent_hex if accent_hex else p["accent"]
+    head_bg = p["head_bg"]
+    # When user sets a background but not an accent, re-derive head_bg
+    # from the text color so headers stay legible against the new bg.
+    if bg_hex and not accent_hex:
+        # Keep the preset's accent if it contrasts with the new bg;
+        # otherwise fall back to the text color.
+        head_bg = p["head_bg"]
+
     t = {
         "name":           key,
         "color_override": _resolve_color_palette(color) and (color or "").lower(),
-        "accent":         p["accent"],
+        "accent":         accent,
         "text":           text,
         "muted":          muted,
         "soft":           p["soft"],
-        "head_bg":        p["head_bg"],
+        "head_bg":        head_bg,
         "page_bg":        page_bg,
         "heading_font":   family["heading"],
         "body_font":      family["body"],
@@ -897,6 +958,9 @@ def generate_pdf_report(
     preset: str = "auto",
     color: str | None = None,
     theme: str | None = None,  # legacy alias for preset
+    background_color: str | None = None,
+    text_color: str | None = None,
+    accent_color: str | None = None,
 ) -> dict:
     """Rich PDF with headings, paragraphs, bullet lists, tables, and charts.
 
@@ -945,7 +1009,13 @@ def generate_pdf_report(
     out = _output_path(filename, ".pdf")
 
     # --- Resolve preset palette + page decoration (auto-picks by default) ---
-    T = _pdf_theme(preset or theme, "report", title, (content or "")[:400], color=color)
+    T = _pdf_theme(
+        preset or theme, "report", title, (content or "")[:400],
+        color=color,
+        background_color=background_color,
+        text_color=text_color,
+        accent_color=accent_color,
+    )
     ACCENT = T["accent_c"]
     MUTED = T["muted_c"]
     TEXT = T["text_c"]
