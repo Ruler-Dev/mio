@@ -1437,3 +1437,80 @@ body.focus-mode .input-area { max-width: 720px; }
   opacity: 0.75;
   margin-right: 4px;
 }
+
+/* ===== @-mention autocomplete ============================= */
+.at-mention-dropdown {
+  position: fixed;
+  z-index: 9999;
+  width: min(380px, 80vw);
+  max-height: 320px;
+  overflow-y: auto;
+  background: var(--bg-page);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-lg);
+  padding: 4px;
+  font-size: 13px;
+}
+.at-mention-group {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  padding: 7px 10px 3px;
+}
+.at-mention-item {
+  display: grid;
+  grid-template-columns: 22px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  text-align: left;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  transition: background 100ms ease;
+}
+.at-mention-item:hover, .at-mention-item.active {
+  background: var(--bg-hover);
+}
+.at-mention-item.active {
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+.at-mention-kind {
+  font-size: 13px;
+  opacity: 0.85;
+}
+.at-mention-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.at-mention-label mark {
+  background: var(--accent-subtle);
+  color: var(--accent);
+  padding: 0 1px;
+  border-radius: 2px;
+}
+.at-mention-hint {
+  font-size: 10px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 160px;
+  font-family: var(--font-mono);
+}
+.at-mention-empty {
+  padding: 14px 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
