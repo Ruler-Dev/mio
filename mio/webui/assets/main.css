@@ -3499,3 +3499,123 @@ body.focus-mode .input-area { max-width: 720px; }
   opacity: 0.55;
   pointer-events: none;
 }
+
+/* ===== Sovereignty onboarding ========================== */
+.mio-sov-onboard {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 12, 18, 0.80);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 8000;
+  animation: ws-fade-in 200ms ease;
+}
+.mio-sov-onboard-card {
+  background: var(--bg-page);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 32px 32px 24px;
+  max-width: 720px;
+  width: calc(100vw - 60px);
+  box-shadow: 0 32px 80px rgba(0,0,0,0.4);
+  position: relative;
+}
+.mio-sov-onboard-badge {
+  position: absolute;
+  top: 16px; right: 20px;
+  font-size: 11px;
+  color: #34C759;
+  font-family: var(--font-mono);
+}
+.mio-sov-onboard-card h1 {
+  margin: 0 0 6px;
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+}
+.mio-sov-onboard-lead {
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1.55;
+  margin: 0 0 22px;
+}
+.mio-sov-onboard-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+  margin-bottom: 20px;
+}
+.mio-sov-onboard-grid > div {
+  background: var(--bg-sidebar);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  padding: 14px 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.mio-sov-onboard-ico {
+  font-size: 22px;
+  color: var(--accent);
+}
+.mio-sov-onboard-grid strong {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.mio-sov-onboard-grid p {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin: 0 0 8px;
+  flex: 1;
+}
+.mio-sov-onboard-grid code {
+  background: var(--bg-page);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 10px;
+}
+.mio-sov-onboard-grid button {
+  padding: 6px 10px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-page);
+  color: var(--text-primary);
+  border-radius: 6px;
+  font-size: 11px;
+  cursor: pointer;
+  margin-top: auto;
+}
+.mio-sov-onboard-grid button:hover { border-color: var(--accent); color: var(--accent); }
+.mio-sov-onboard-grid button.muted { opacity: 0.6; cursor: default; }
+.mio-sov-onboard-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 16px;
+}
+.mio-sov-restricted {
+  font-size: 11px;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+.mio-sov-onboard-actions button.primary {
+  padding: 8px 18px;
+  background: var(--accent);
+  color: #fff;
+  border: 0;
+  border-radius: 7px;
+  font-weight: 500;
+  cursor: pointer;
+}
+@media (max-width: 640px) {
+  .mio-sov-onboard-grid { grid-template-columns: 1fr; }
+}
