@@ -1514,3 +1514,66 @@ body.focus-mode .input-area { max-width: 720px; }
   color: var(--text-muted);
   font-size: 12px;
 }
+
+/* ===== Design Mode: error bar ============================ */
+.design-error-bar {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  right: 8px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #7f1d1d;
+  border-radius: 8px;
+  padding: 8px 10px 8px 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  z-index: 10;
+  box-shadow: 0 2px 8px rgba(127, 29, 29, 0.08);
+}
+[data-theme="dark"] .design-error-bar {
+  background: #2a1616;
+  border-color: #7f1d1d;
+  color: #fca5a5;
+}
+.design-error-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+}
+.design-error-msg {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.design-error-fix {
+  padding: 4px 10px;
+  background: #dc2626;
+  color: #fff;
+  border: 0;
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.design-error-fix:hover { background: #b91c1c; }
+.design-error-close {
+  border: 0;
+  background: transparent;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  color: inherit;
+  opacity: 0.6;
+  padding: 0 4px;
+}
+.design-error-close:hover { opacity: 1; }
+.design-canvas { position: relative; }

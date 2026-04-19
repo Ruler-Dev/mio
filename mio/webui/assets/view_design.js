@@ -193,12 +193,68 @@ No explanations after the artifact. The artifact IS the design.`;
       }
     } else {
       canvas.innerHTML = "";
+      const errorBar = document.createElement("div");
+      errorBar.className = "design-error-bar";
+      errorBar.hidden = true;
+      canvas.appendChild(errorBar);
       const iframe = document.createElement("iframe");
       iframe.className = "design-iframe";
       iframe.sandbox = "allow-scripts";
-      iframe.srcdoc = v.html || "";
+      iframe.srcdoc = injectErrorReporter(v.html || "");
       canvas.appendChild(iframe);
+      // Listen once for error messages from this iframe.
+      const handler = (e) => {
+        if (!e.data || e.data.__mioDesignError !== true) return;
+        if (e.source !== iframe.contentWindow) return;
+        showError(host, errorBar, e.data);
+      };
+      window.addEventListener("message", handler);
+      // Clean up when the iframe is replaced
+      iframe.addEventListener("load", () => {
+        // Page reloaded inside iframe — reset the bar
+        errorBar.hidden = true;
+      });
     }
+  }
+
+  // Injects a small script into the artifact HTML that forwards
+  // JS errors + unhandled rejections to the parent window. The
+  // iframe has no allow-same-origin, so postMessage is the only
+  // way to surface errors.
+  function injectErrorReporter(html) {
+    const script = `
+<script>
+(function(){
+  function post(err){ try { parent.postMessage({__mioDesignError:true, message:String(err.message||err), stack:String(err.stack||''), source:String(err.filename||''), line:err.lineno||0, col:err.colno||0}, '*'); } catch(_){} }
+  window.addEventListener('error', (e) => post({message: e.message, filename: e.filename, lineno: e.lineno, colno: e.colno, stack: e.error?.stack}));
+  window.addEventListener('unhandledrejection', (e) => post({message: 'Unhandled rejection: ' + (e.reason?.message || e.reason), stack: e.reason?.stack}));
+})();
+</script>`;
+    if (/<\/head>/i.test(html)) return html.replace(/<\/head>/i, script + "</head>");
+    if (/<body/i.test(html))    return html.replace(/<body([^>]*)>/i, "<body$1>" + script);
+    return script + html;
+  }
+
+  function showError(host, bar, err) {
+    bar.hidden = false;
+    bar.innerHTML = `
+      <div class="design-error-left">
+        <strong>Iframe error:</strong>
+        <span class="design-error-msg">${escapeHtml(err.message || "")}</span>
+      </div>
+      <button class="design-error-fix" data-action="try-fix">Try fixing with Mio</button>
+      <button class="design-error-close" data-action="close" aria-label="Close">×</button>
+    `;
+    bar.querySelector('[data-action="close"]').addEventListener("click", () => { bar.hidden = true; });
+    bar.querySelector('[data-action="try-fix"]').addEventListener("click", () => {
+      const input = host.querySelector("#design-input");
+      const trace = err.stack ? err.stack.slice(0, 600) : "";
+      input.value = `Fix this error in the current design:\n\n${err.message}\n\n${trace}`.trim();
+      input.focus();
+      // Seed the fork so we pass the current HTML back as context
+      const v = state.versions[state.activeVersion];
+      if (v) state._forkSeed = v.html;
+    });
   }
 
   // Minimal line-level diff — no external deps. Good enough for
