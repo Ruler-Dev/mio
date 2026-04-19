@@ -482,6 +482,35 @@ _PRESET_PARAM = {
         "duotone), classic (walnut, parchment, brass, cambridge, claret)."
     ),
 }
+
+# Surgical color overrides. The model should pass ONLY the ones the user
+# explicitly asked for — everything else stays from the preset. These win
+# over both `preset` and `color` when set.
+_BG_COLOR_PARAM = {
+    "type": "string",
+    "description": (
+        "Override the page background. Accepts a color name ('black', "
+        "'white', 'light green', 'mint', 'cream', 'peach', 'lavender') or "
+        "a hex ('#09090b'). Use when the user asks for a specific "
+        "background, e.g. 'background light green', 'sfondo chiaro'."
+    ),
+}
+_TEXT_COLOR_PARAM = {
+    "type": "string",
+    "description": (
+        "Override the body text color. Same accepted formats as "
+        "background_color. Use when the user asks for a specific text "
+        "color, e.g. 'text black', 'testo bianco'."
+    ),
+}
+_ACCENT_COLOR_PARAM = {
+    "type": "string",
+    "description": (
+        "Override the accent color (headings / accent bar / links). Same "
+        "accepted formats as background_color."
+    ),
+}
+
 from mio.webui.weather import get_weather as _g_weather
 
 
@@ -501,6 +530,8 @@ SKILLS["generate_docx"] = {
             "author": {"type": "string", "description": "Document author (optional)"},
             "preset": _OFFICE_PRESET_PARAM,
             "color": _COLOR_PARAM,
+            "accent_color": _ACCENT_COLOR_PARAM,
+            "text_color": _TEXT_COLOR_PARAM,
         },
         "required": ["title", "content"],
     },
@@ -530,6 +561,8 @@ SKILLS["generate_xlsx"] = {
             "sheet_name": {"type": "string", "description": "Sheet name (optional)"},
             "preset": _OFFICE_PRESET_PARAM,
             "color": _COLOR_PARAM,
+            "accent_color": _ACCENT_COLOR_PARAM,
+            "text_color": _TEXT_COLOR_PARAM,
         },
         "required": ["headers", "rows"],
     },
@@ -556,6 +589,8 @@ SKILLS["generate_pptx"] = {
             "filename": {"type": "string", "description": "Output filename (optional)"},
             "preset": _OFFICE_PRESET_PARAM,
             "color": _COLOR_PARAM,
+            "accent_color": _ACCENT_COLOR_PARAM,
+            "text_color": _TEXT_COLOR_PARAM,
         },
         "required": ["title", "slides"],
     },
@@ -600,6 +635,9 @@ SKILLS["generate_pdf_report"] = {
             "author": {"type": "string", "description": "Author name (optional)"},
             "preset": _PRESET_PARAM,
             "color": _COLOR_PARAM,
+            "background_color": _BG_COLOR_PARAM,
+            "text_color": _TEXT_COLOR_PARAM,
+            "accent_color": _ACCENT_COLOR_PARAM,
             "background_color": {
                 "type": "string",
                 "description": (
@@ -652,6 +690,9 @@ SKILLS["generate_letter"] = {
             "filename": {"type": "string"},
             "preset": _PRESET_PARAM,
             "color": _COLOR_PARAM,
+            "background_color": _BG_COLOR_PARAM,
+            "text_color": _TEXT_COLOR_PARAM,
+            "accent_color": _ACCENT_COLOR_PARAM,
         },
         "required": ["recipient_name", "body"],
     },
@@ -677,6 +718,10 @@ SKILLS["generate_certificate"] = {
             },
             "filename": {"type": "string"},
             "preset": _PRESET_PARAM,
+            "color": _COLOR_PARAM,
+            "background_color": _BG_COLOR_PARAM,
+            "text_color": _TEXT_COLOR_PARAM,
+            "accent_color": _ACCENT_COLOR_PARAM,
             "orientation": {"type": "string", "enum": ["landscape", "portrait"]},
         },
         "required": ["recipient", "achievement"],
@@ -702,6 +747,9 @@ SKILLS["generate_flyer"] = {
             "filename": {"type": "string"},
             "preset": _PRESET_PARAM,
             "color": _COLOR_PARAM,
+            "background_color": _BG_COLOR_PARAM,
+            "text_color": _TEXT_COLOR_PARAM,
+            "accent_color": _ACCENT_COLOR_PARAM,
         },
         "required": ["title"],
     },
@@ -727,6 +775,9 @@ SKILLS["generate_menu"] = {
             "filename": {"type": "string"},
             "preset": _PRESET_PARAM,
             "color": _COLOR_PARAM,
+            "background_color": _BG_COLOR_PARAM,
+            "text_color": _TEXT_COLOR_PARAM,
+            "accent_color": _ACCENT_COLOR_PARAM,
         },
         "required": ["restaurant_name", "sections"],
     },
@@ -751,6 +802,9 @@ SKILLS["generate_brochure"] = {
             "filename": {"type": "string"},
             "preset": _PRESET_PARAM,
             "color": _COLOR_PARAM,
+            "background_color": _BG_COLOR_PARAM,
+            "text_color": _TEXT_COLOR_PARAM,
+            "accent_color": _ACCENT_COLOR_PARAM,
         },
         "required": ["title", "panels"],
     },
@@ -777,6 +831,9 @@ SKILLS["generate_newsletter"] = {
             "filename": {"type": "string"},
             "preset": _PRESET_PARAM,
             "color": _COLOR_PARAM,
+            "background_color": _BG_COLOR_PARAM,
+            "text_color": _TEXT_COLOR_PARAM,
+            "accent_color": _ACCENT_COLOR_PARAM,
         },
         "required": ["title"],
     },
@@ -801,6 +858,9 @@ SKILLS["generate_business_card"] = {
             "filename": {"type": "string"},
             "preset": _PRESET_PARAM,
             "color": _COLOR_PARAM,
+            "background_color": _BG_COLOR_PARAM,
+            "text_color": _TEXT_COLOR_PARAM,
+            "accent_color": _ACCENT_COLOR_PARAM,
         },
         "required": ["name"],
     },

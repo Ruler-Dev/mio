@@ -136,9 +136,20 @@ def _pick_office_preset(fmt: str, *text_hints: str) -> str:
     return pool[h % len(pool)]
 
 
-def _office_theme(name: str, fmt: str, *hints: str, color: str | None = None) -> dict:
+def _office_theme(
+    name: str,
+    fmt: str,
+    *hints: str,
+    color: str | None = None,
+    accent_color: str | None = None,
+    text_color: str | None = None,
+    header_color: str | None = None,
+    background_color: str | None = None,   # reserved for future DOCX/PPTX fill support
+) -> dict:
     """Resolve an Office preset. `color="emerald"` overrides only the color
-    triple (accent / header / row_alt) while preserving the font pairing.
+    triple (accent / header / row_alt). Surgical overrides (`accent_color`,
+    `text_color`, `header_color`) win over both preset and palette; they
+    accept natural names or hex.
     """
     key = (name or "auto").strip().lower()
     if key in ("auto", "", "default"):
@@ -148,19 +159,32 @@ def _office_theme(name: str, fmt: str, *hints: str, color: str | None = None) ->
     accent = p["accent"]
     header = p["header"]
     row_alt = p["row_alt"]
+    text = p.get("text", "111111")
     override = _resolve_color_palette(color)
     if override:
         # Office palette is stored without "#" prefix — strip it
         accent = override["accent"].lstrip("#").upper()
         header = override["head_bg"].lstrip("#").upper()
         row_alt = override["row_alt"].lstrip("#").upper()
+
+    def _office_hex(v: str | None) -> str | None:
+        h = _coerce_color(v)
+        return h.lstrip("#").upper() if h else None
+
+    if (h := _office_hex(accent_color)):
+        accent = h
+    if (h := _office_hex(header_color)):
+        header = h
+    if (h := _office_hex(text_color)):
+        text = h
+
     return {
         "name": key,
         "color_override": (color or "").lower() if override else None,
         "accent": accent,
         "header": header,
         "row_alt": row_alt,
-        "text": p.get("text", "111111"),
+        "text": text,
         "heading_font": f["heading"],
         "body_font": f["body"],
     }
@@ -197,6 +221,9 @@ def generate_docx(
     author: str = "",
     preset: str = "auto",
     color: str | None = None,
+    background_color: str | None = None,
+    text_color: str | None = None,
+    accent_color: str | None = None,
 ) -> dict:
     """Build a Word document from markdown content.
 
@@ -212,7 +239,12 @@ def generate_docx(
     except ImportError:
         return {"skill": "generate_docx", "error": "python-docx not installed."}
 
-    T = _office_theme(preset, "docx", title, (content or "")[:400], color=color)
+    T = _office_theme(
+        preset, "docx", title, (content or "")[:400],
+        color=color,
+        accent_color=accent_color,
+        text_color=text_color,
+    )
 
     def _hex_to_rgb(h):
         return RGBColor(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
@@ -292,6 +324,9 @@ def generate_xlsx(
     sheet_name: str = "Sheet1",
     preset: str = "auto",
     color: str | None = None,
+    background_color: str | None = None,
+    text_color: str | None = None,
+    accent_color: str | None = None,
 ) -> dict:
     """Build an Excel workbook with one sheet of tabular data."""
     try:
@@ -304,7 +339,13 @@ def generate_xlsx(
     if not headers:
         return {"skill": "generate_xlsx", "error": "headers required"}
 
-    T = _office_theme(preset, "xlsx", title, sheet_name, " ".join(str(h) for h in headers[:8]), color=color)
+    T = _office_theme(
+        preset, "xlsx", title, sheet_name,
+        " ".join(str(h) for h in headers[:8]),
+        color=color,
+        accent_color=accent_color,
+        text_color=text_color,
+    )
 
     wb = Workbook()
     ws = wb.active
@@ -372,6 +413,9 @@ def generate_pptx(
     subtitle: str = "",
     preset: str = "auto",
     color: str | None = None,
+    background_color: str | None = None,
+    text_color: str | None = None,
+    accent_color: str | None = None,
 ) -> dict:
     """Build a PowerPoint deck.
 
@@ -389,7 +433,11 @@ def generate_pptx(
         return {"skill": "generate_pptx", "error": "python-pptx not installed."}
 
     hints = " ".join([title, subtitle or ""] + [s.get("title", "") for s in (slides or [])[:6]])
-    T = _office_theme(preset, "pptx", hints, color=color)
+    T = _office_theme(
+        preset, "pptx", hints, color=color,
+        accent_color=accent_color,
+        text_color=text_color,
+    )
 
     def _hex_to_rgb(h):
         return RGBColor(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
@@ -1347,6 +1395,9 @@ def generate_letter(
     filename: str | None = None,
     preset: str = "auto",
     color: str | None = None,
+    background_color: str | None = None,
+    text_color: str | None = None,
+    accent_color: str | None = None,
 ) -> dict:
     """Formal business letter with letterhead, date, recipient block,
     salutation, body paragraphs, closing, and signature line.
@@ -1366,7 +1417,13 @@ def generate_letter(
         return {"skill": "generate_letter", "error": "reportlab not installed."}
     import datetime as _dt
 
-    T = _pdf_theme(preset, "letter", subject, (body or "")[:300], recipient_name, color=color)
+    T = _pdf_theme(
+        preset, "letter", subject, (body or "")[:300], recipient_name,
+        color=color,
+        background_color=background_color,
+        text_color=text_color,
+        accent_color=accent_color,
+    )
     out = _output_path(filename, ".pdf")
 
     def _on_page(canvas, doc_):
@@ -1438,6 +1495,9 @@ def generate_certificate(
     filename: str | None = None,
     preset: str = "auto",
     color: str | None = None,
+    background_color: str | None = None,
+    text_color: str | None = None,
+    accent_color: str | None = None,
     orientation: str = "landscape",
 ) -> dict:
     """Ornate bordered certificate with centered title, recipient, achievement
@@ -1450,7 +1510,12 @@ def generate_certificate(
     except ImportError:
         return {"skill": "generate_certificate", "error": "reportlab not installed."}
 
-    T = _pdf_theme(preset, "certificate", achievement, recipient, issuer, color=color)
+    T = _pdf_theme(
+        preset, "certificate", achievement, recipient, issuer, color=color,
+        background_color=background_color,
+        text_color=text_color,
+        accent_color=accent_color,
+    )
     out = _output_path(filename, ".pdf")
     page = landscape(A4) if (orientation or "landscape").lower() == "landscape" else A4
     W, H = page
@@ -1548,6 +1613,9 @@ def generate_flyer(
     filename: str | None = None,
     preset: str = "auto",
     color: str | None = None,
+    background_color: str | None = None,
+    text_color: str | None = None,
+    accent_color: str | None = None,
 ) -> dict:
     """Single-page poster-style flyer: hero title at top, optional hero image
     under it, body copy, a prominent call-to-action pill, and a footer.
@@ -1558,7 +1626,13 @@ def generate_flyer(
         return {"skill": "generate_flyer", "error": "reportlab not installed."}
     import os as _os
 
-    T = _pdf_theme(preset, "flyer", title, subtitle, (body or "")[:300], call_to_action, color=color)
+    T = _pdf_theme(
+        preset, "flyer", title, subtitle, (body or "")[:300], call_to_action,
+        color=color,
+        background_color=background_color,
+        text_color=text_color,
+        accent_color=accent_color,
+    )
     out = _output_path(filename, ".pdf")
     W, H = A4
     c = canvas_mod.Canvas(str(out), pagesize=A4)
@@ -1654,6 +1728,9 @@ def generate_menu(
     filename: str | None = None,
     preset: str = "auto",
     color: str | None = None,
+    background_color: str | None = None,
+    text_color: str | None = None,
+    accent_color: str | None = None,
 ) -> dict:
     """Restaurant menu: big restaurant name, tagline, then two-column grid of
     category sections. `sections` is a list of:
@@ -1669,7 +1746,12 @@ def generate_menu(
     except ImportError:
         return {"skill": "generate_menu", "error": "reportlab not installed."}
 
-    T = _pdf_theme(preset, "menu", restaurant_name, tagline, color=color)
+    T = _pdf_theme(
+        preset, "menu", restaurant_name, tagline, color=color,
+        background_color=background_color,
+        text_color=text_color,
+        accent_color=accent_color,
+    )
     out = _output_path(filename, ".pdf")
     W, H = A4
     c = canvas_mod.Canvas(str(out), pagesize=A4)
@@ -1750,6 +1832,9 @@ def generate_brochure(
     filename: str | None = None,
     preset: str = "auto",
     color: str | None = None,
+    background_color: str | None = None,
+    text_color: str | None = None,
+    accent_color: str | None = None,
 ) -> dict:
     """Landscape tri-fold brochure (3 equal panels). `panels` is a list of
     exactly three dicts: { "heading": "...", "body": "...", "bullets": [...] }.
@@ -1765,7 +1850,12 @@ def generate_brochure(
         (p.get("heading", "") + " " + p.get("body", ""))[:200]
         for p in (panels or [])[:3]
     )
-    T = _pdf_theme(preset, "brochure", title, panel_hints, color=color)
+    T = _pdf_theme(
+        preset, "brochure", title, panel_hints, color=color,
+        background_color=background_color,
+        text_color=text_color,
+        accent_color=accent_color,
+    )
     out = _output_path(filename, ".pdf")
     page = landscape(A4)
     W, H = page
@@ -1857,6 +1947,9 @@ def generate_newsletter(
     filename: str | None = None,
     preset: str = "auto",
     color: str | None = None,
+    background_color: str | None = None,
+    text_color: str | None = None,
+    accent_color: str | None = None,
 ) -> dict:
     """Newsletter-style PDF: masthead, lead story (full-width headline +
     paragraph), then two-column grid of article blocks (heading + body).
@@ -1871,7 +1964,12 @@ def generate_newsletter(
         (a.get("heading", "") + " " + a.get("body", ""))[:200]
         for a in (articles or [])[:4]
     )
-    T = _pdf_theme(preset, "newsletter", title, lead_headline, lead_body[:300] if lead_body else "", art_hints, color=color)
+    T = _pdf_theme(
+        preset, "newsletter", title, lead_headline, lead_body[:300] if lead_body else "", art_hints, color=color,
+        background_color=background_color,
+        text_color=text_color,
+        accent_color=accent_color,
+    )
     out = _output_path(filename, ".pdf")
     W, H = A4
     c = canvas_mod.Canvas(str(out), pagesize=A4)
@@ -1976,6 +2074,9 @@ def generate_business_card(
     filename: str | None = None,
     preset: str = "auto",
     color: str | None = None,
+    background_color: str | None = None,
+    text_color: str | None = None,
+    accent_color: str | None = None,
 ) -> dict:
     """Single business card at standard US 3.5"×2" size. Centered on an A4
     page for easy printing; laid out with name, role, and contact block.
@@ -1985,7 +2086,12 @@ def generate_business_card(
     except ImportError:
         return {"skill": "generate_business_card", "error": "reportlab not installed."}
 
-    T = _pdf_theme(preset, "card", name, role, company, color=color)
+    T = _pdf_theme(
+        preset, "card", name, role, company, color=color,
+        background_color=background_color,
+        text_color=text_color,
+        accent_color=accent_color,
+    )
     out = _output_path(filename, ".pdf")
     W, H = A4
     card_w, card_h = 88.9 * mm, 50.8 * mm  # 3.5 x 2 inches
