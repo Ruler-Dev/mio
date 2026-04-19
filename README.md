@@ -7,7 +7,7 @@
 
 Everything runs on-device via MLX. No cloud, no API keys, no Node.js. One `pip install -e .` and the engine is ready.
 
-Mio is a **passion project**, built first and foremost for the [r/LocalLLaMA](https://www.reddit.com/r/LocalLLaMA/) community and everyone running models on their own hardware. **Fork it, hack it, make it really yours** — pull requests, issues, and wild ideas all welcome. Local AI should belong to the people running it, not to the people serving it.
+Mio is a **passion project** for everyone running models on their own hardware. **Fork it, hack it, make it really yours** — pull requests, issues, and wild ideas all welcome. Local AI should belong to the people running it, not to the people serving it.
 
 ---
 
@@ -480,9 +480,8 @@ mio/
 
 ## Acknowledgements
 
-Mio would not exist without the following projects, communities, and their authors. Huge thanks:
+Mio would not exist without the following projects and their authors. Huge thanks:
 
-- The **[r/LocalLLaMA community](https://www.reddit.com/r/LocalLLaMA/)** — Mio is built first and foremost for the people running models on their own hardware. The endless stream of benchmarks, quantization tricks, prompting tips, and "have you tried this?" posts is what made the whole project worth doing. This one is for you.
 - **[MLX](https://github.com/ml-explore/mlx)** and **[mlx-lm](https://github.com/ml-explore/mlx-examples)** by Apple's ML Explore team — the foundation that makes fast local inference on Apple Silicon possible. Their `QuantizedKVCache` and `mx.quantized_matmul` Metal kernels are what let PolarQuant 4-bit achieve zero speed overhead.
 - **[DFlash](https://github.com/z-lab/dflash)** and **[DFlash-MLX](https://github.com/bstnxbt/dflash-mlx)** — speculative decoding runtime that delivers up to 4.1× generation speedup. The DFlash runtime is the heart of Mio's inference engine.
 - **[Caveman](https://github.com/juliusbrussee/caveman)** by [Julius Brussee](https://github.com/juliusbrussee) — the system-prompt token-compression idea Mio's `--caveman` modes are built on. Lite / full / ultra tiers shave 15–75% off output token counts without touching code blocks, which is what turns "fast" into "feels instant" end-to-end.
