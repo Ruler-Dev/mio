@@ -126,6 +126,164 @@ async def _run_http(data: dict, ctx: dict) -> Any:
         return {"error": str(e)}
 
 
+async def _run_constant(data: dict, ctx: dict) -> Any:
+    v = data.get("value", "")
+    # Allow JSON-shaped values (user types {...} in the field)
+    if isinstance(v, str):
+        s = v.strip()
+        if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
+            try: return json.loads(s)
+            except Exception: return v
+        return _interpolate(v, ctx)
+    return v
+
+
+async def _run_template(data: dict, ctx: dict) -> str:
+    return _interpolate(data.get("template", "{{input}}"), ctx)
+
+
+async def _run_parse_json(data: dict, ctx: dict) -> Any:
+    val = ctx.get("_last", "")
+    if isinstance(val, (dict, list)): return val
+    try:
+        return json.loads(str(val))
+    except Exception as e:
+        return {"error": f"parse_json: {e}"}
+
+
+async def _run_to_json(data: dict, ctx: dict) -> str:
+    indent = data.get("indent")
+    try: indent = int(indent) if indent is not None else None
+    except Exception: indent = None
+    val = ctx.get("_last", "")
+    try:
+        return json.dumps(val, indent=indent, ensure_ascii=False)
+    except Exception:
+        return str(val)
+
+
+async def _run_regex_extract(data: dict, ctx: dict) -> str:
+    pattern = _interpolate(data.get("pattern", ""), ctx)
+    flags_str = (data.get("flags") or "").lower()
+    flags = 0
+    if "i" in flags_str: flags |= re.IGNORECASE
+    if "m" in flags_str: flags |= re.MULTILINE
+    if "s" in flags_str: flags |= re.DOTALL
+    try:
+        m = re.search(pattern, str(ctx.get("_last", "")), flags)
+        if not m: return ""
+        return m.group(1) if m.groups() else m.group(0)
+    except Exception as e:
+        return f"(regex error: {e})"
+
+
+async def _run_split(data: dict, ctx: dict) -> list:
+    delim = data.get("delim", ",")
+    return str(ctx.get("_last", "")).split(delim)
+
+
+async def _run_join(data: dict, ctx: dict) -> str:
+    delim = data.get("delim", ", ")
+    last = ctx.get("_last", [])
+    if isinstance(last, str): last = [last]
+    try:
+        return delim.join(str(x) for x in last)
+    except Exception:
+        return str(last)
+
+
+def _memory_path() -> "Any":
+    from pathlib import Path as _P
+    p = _P.home() / ".mio" / "flow-memory.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _memory_load() -> dict:
+    p = _memory_path()
+    if not p.exists(): return {}
+    try: return json.loads(p.read_text())
+    except Exception: return {}
+
+
+def _memory_save(data: dict) -> None:
+    _memory_path().write_text(json.dumps(data, indent=2, ensure_ascii=False))
+
+
+async def _run_mem_get(data: dict, ctx: dict) -> Any:
+    key = _interpolate(data.get("key", ""), ctx)
+    mem = _memory_load()
+    return mem.get(key, None)
+
+
+async def _run_mem_set(data: dict, ctx: dict) -> Any:
+    key = _interpolate(data.get("key", ""), ctx)
+    if not key: return ctx.get("_last")
+    mem = _memory_load()
+    mem[key] = ctx.get("_last")
+    _memory_save(mem)
+    return ctx.get("_last")  # passthrough
+
+
+async def _run_delay(data: dict, ctx: dict) -> Any:
+    ms = float(data.get("ms", 500) or 500)
+    await asyncio.sleep(ms / 1000.0)
+    return ctx.get("_last")
+
+
+async def _run_clock(data: dict, ctx: dict) -> str:
+    import datetime as _dt
+    return _dt.datetime.now().isoformat(timespec="seconds")
+
+
+async def _run_random(data: dict, ctx: dict) -> Any:
+    import random as _rand
+    val = ctx.get("_last", [])
+    if isinstance(val, str):
+        try: val = json.loads(val)
+        except Exception: val = val.split("\n")
+    if not isinstance(val, list) or not val: return None
+    return _rand.choice(val)
+
+
+async def _run_rag_search(data: dict, ctx: dict) -> dict:
+    try:
+        from mio.webui.skills_rag import search_local_folder
+        q = _interpolate(data.get("query", "{{input}}"), ctx) or str(ctx.get("_last", ""))
+        limit = int(data.get("limit", 5) or 5)
+        r = search_local_folder(q, limit=limit)
+        return {"count": r.get("count", 0), "results": r.get("results", [])}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+async def _run_artifact_emit(data: dict, ctx: dict) -> dict:
+    """Package the last output as an <antArtifact> chunk. Surfacing is
+    best-effort: we write to ~/.mio/flows-output.jsonl which the chat
+    UI can tail via a future integration; for now the output bucket
+    already collects this."""
+    import datetime as _dt
+    from pathlib import Path as _P
+    title = data.get("title", "Flow output")
+    kind  = data.get("type", "text/html")
+    body  = ctx.get("_last", "")
+    if not isinstance(body, str):
+        try: body = json.dumps(body, ensure_ascii=False)
+        except Exception: body = str(body)
+    art = (
+        f'<antArtifact identifier="flow-{int(_dt.datetime.now().timestamp())}" '
+        f'type="{kind}" title="{title}">{body}</antArtifact>'
+    )
+    out_path = _P.home() / ".mio" / "flows-output.jsonl"
+    try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with out_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": _dt.datetime.now().isoformat(), "artifact": art}) + "\n")
+    except Exception:
+        pass
+    return {"artifact": art}
+
+
 async def _run_if_else(data: dict, ctx: dict) -> dict:
     expr = _interpolate(data.get("expr", ""), ctx)
     # Refuse anything that smells risky — we only allow simple comparison
@@ -224,6 +382,20 @@ async def _execute_run(run: _Run) -> None:
             elif cls == "output":
                 out = ctx["_last"]
                 outputs_bucket.append(out)
+            elif cls == "constant":        out = await _run_constant(data, ctx)
+            elif cls == "template":        out = await _run_template(data, ctx)
+            elif cls == "parse_json":      out = await _run_parse_json(data, ctx)
+            elif cls == "to_json":         out = await _run_to_json(data, ctx)
+            elif cls == "regex_extract":   out = await _run_regex_extract(data, ctx)
+            elif cls == "split":           out = await _run_split(data, ctx)
+            elif cls == "join":            out = await _run_join(data, ctx)
+            elif cls == "mem_get":         out = await _run_mem_get(data, ctx)
+            elif cls == "mem_set":         out = await _run_mem_set(data, ctx)
+            elif cls == "delay":           out = await _run_delay(data, ctx)
+            elif cls == "clock":           out = await _run_clock(data, ctx)
+            elif cls == "random":          out = await _run_random(data, ctx)
+            elif cls == "rag_search":      out = await _run_rag_search(data, ctx)
+            elif cls == "artifact_emit":   out = await _run_artifact_emit(data, ctx)
             else:
                 out = {"error": f"unknown class: {cls}"}
 

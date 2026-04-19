@@ -21,20 +21,55 @@
   const STATE = { currentId: null, currentName: "", editor: null };
 
   const NODE_TYPES = [
-    { type: "llm_call",   label: "LLM call",   color: "#6366f1", io: ["in","out"],
+    // --- Core (existing) ---
+    { type: "llm_call",      label: "LLM call",       color: "#6366f1", io: ["in","out"],
       desc: "Chat completion on the loaded model" },
-    { type: "skill_call", label: "Skill",      color: "#0ea5e9", io: ["in","out"],
-      desc: "Run any Mio skill (web_search, generate_pdf_report, etc.)" },
-    { type: "http_fetch", label: "HTTP fetch", color: "#64748b", io: ["in","out"],
+    { type: "skill_call",    label: "Skill",          color: "#0ea5e9", io: ["in","out"],
+      desc: "Run any Mio skill (web_search, generate_pdf_report, …)" },
+    { type: "http_fetch",    label: "HTTP fetch",     color: "#64748b", io: ["in","out"],
       desc: "GET/POST any URL" },
-    { type: "if_else",    label: "If / Else",  color: "#f59e0b", io: ["in","true","false"],
+    { type: "if_else",       label: "If / Else",      color: "#f59e0b", io: ["in","true","false"],
       desc: "Route on a boolean expression" },
-    { type: "iterate",    label: "Iterate",    color: "#10b981", io: ["in","out"],
+    { type: "iterate",       label: "Iterate",        color: "#10b981", io: ["in","out"],
       desc: "Run the downstream subgraph for each item in a list" },
-    { type: "user_input", label: "User input", color: "#a855f7", io: ["out"],
+    { type: "user_input",    label: "User input",     color: "#a855f7", io: ["out"],
       desc: "Pause for user response" },
-    { type: "output",     label: "Output",     color: "#ec4899", io: ["in"],
+    { type: "output",        label: "Output",         color: "#ec4899", io: ["in"],
       desc: "Surface as chat message or artifact" },
+
+    // --- New: data shaping ---
+    { type: "constant",      label: "Constant",       color: "#94a3b8", io: ["out"],
+      desc: "Static value / seed string. Great start node." },
+    { type: "template",      label: "Template",       color: "#60a5fa", io: ["in","out"],
+      desc: "Mustache-style {{input}} / {{n.out}} / {{env.X}} interpolation" },
+    { type: "parse_json",    label: "Parse JSON",     color: "#22d3ee", io: ["in","out"],
+      desc: "JSON.parse the input" },
+    { type: "to_json",       label: "To JSON",        color: "#22d3ee", io: ["in","out"],
+      desc: "JSON.stringify the input (pretty)" },
+    { type: "regex_extract", label: "Regex extract",  color: "#fb923c", io: ["in","out"],
+      desc: "First capture group of a regex run over the input" },
+    { type: "split",         label: "Split",          color: "#fbbf24", io: ["in","out"],
+      desc: "Split a string by delimiter → list" },
+    { type: "join",          label: "Join",           color: "#fbbf24", io: ["in","out"],
+      desc: "Join a list by delimiter → string" },
+
+    // --- New: memory + time ---
+    { type: "mem_get",       label: "Memory get",     color: "#14b8a6", io: ["in","out"],
+      desc: "Read ~/.mio/memory.json by key" },
+    { type: "mem_set",       label: "Memory set",     color: "#14b8a6", io: ["in","out"],
+      desc: "Write a value under a key (persistent across runs)" },
+    { type: "delay",         label: "Delay",          color: "#d946ef", io: ["in","out"],
+      desc: "Wait N ms, then pass input through" },
+    { type: "clock",         label: "Clock",          color: "#d946ef", io: ["out"],
+      desc: "Emit the current ISO timestamp" },
+    { type: "random",        label: "Random pick",    color: "#f43f5e", io: ["in","out"],
+      desc: "Pick a random item from a list input" },
+
+    // --- New: knowledge + surface ---
+    { type: "rag_search",    label: "RAG search",     color: "#84cc16", io: ["in","out"],
+      desc: "Full-text search across indexed folders + clipped docs" },
+    { type: "artifact_emit", label: "Emit artifact",  color: "#ec4899", io: ["in","out"],
+      desc: "Wrap the input as an <antArtifact> and append to the chat" },
   ];
 
   async function ensureDrawflow() {
@@ -154,13 +189,27 @@
   }
 
   function defaultData(type) {
-    if (type === "llm_call")   return { prompt: "Hello {{input}}", system: "", _hint: "prompt…" };
-    if (type === "skill_call") return { skill: "web_search", args: "{\"query\": \"{{input}}\"}", _hint: "web_search" };
-    if (type === "http_fetch") return { method: "GET", url: "https://example.com", _hint: "GET example.com" };
-    if (type === "if_else")    return { expr: "value == true", _hint: "value == true" };
-    if (type === "iterate")    return { list_expr: "{{input}}", _hint: "over {{input}}" };
-    if (type === "user_input") return { label: "Enter value", _hint: "prompt user" };
-    if (type === "output")     return { mode: "chat", _hint: "→ chat" };
+    if (type === "llm_call")      return { prompt: "Hello {{input}}", system: "", _hint: "prompt…" };
+    if (type === "skill_call")    return { skill: "web_search", args: "{\"query\": \"{{input}}\"}", _hint: "web_search" };
+    if (type === "http_fetch")    return { method: "GET", url: "https://example.com", _hint: "GET example.com" };
+    if (type === "if_else")       return { expr: "value == true", _hint: "value == true" };
+    if (type === "iterate")       return { list_expr: "{{input}}", _hint: "over {{input}}" };
+    if (type === "user_input")    return { label: "Enter value", _hint: "prompt user" };
+    if (type === "output")        return { mode: "chat", _hint: "→ chat" };
+    if (type === "constant")      return { value: "hello world", _hint: "\"hello world\"" };
+    if (type === "template")      return { template: "You said: {{input}}", _hint: "{{input}}" };
+    if (type === "parse_json")    return { _hint: "JSON → obj" };
+    if (type === "to_json")       return { indent: 2, _hint: "obj → JSON" };
+    if (type === "regex_extract") return { pattern: "\\b([A-Za-z]+)\\b", flags: "i", _hint: "first group" };
+    if (type === "split")         return { delim: ",", _hint: "by \",\"" };
+    if (type === "join")          return { delim: ", ", _hint: "with \", \"" };
+    if (type === "mem_get")       return { key: "last_run", _hint: "mem[last_run]" };
+    if (type === "mem_set")       return { key: "last_run", _hint: "mem[last_run] ←" };
+    if (type === "delay")         return { ms: 500, _hint: "500 ms" };
+    if (type === "clock")         return { _hint: "now()" };
+    if (type === "random")        return { _hint: "pick one" };
+    if (type === "rag_search")    return { query: "{{input}}", limit: 5, _hint: "top-5" };
+    if (type === "artifact_emit") return { type: "text/html", title: "Flow output", _hint: "→ chat artifact" };
     return {};
   }
 
