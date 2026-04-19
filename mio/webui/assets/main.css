@@ -2236,3 +2236,95 @@ body.focus-mode .input-area { max-width: 720px; }
   color: var(--accent);
   background: var(--accent-subtle);
 }
+
+/* ===== Design Mode: in-frame edit toolbar ================ */
+.design-edit-toolbar {
+  position: absolute;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: var(--bg-page);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  font-size: 12px;
+  color: var(--text-primary);
+  animation: pop-in 140ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+@keyframes pop-in { from { transform: scale(0.9); opacity: 0; } }
+.design-edit-toolbar button,
+.design-edit-toolbar input {
+  height: 28px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-sidebar);
+  color: var(--text-primary);
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 6px;
+}
+.design-edit-toolbar input[type="color"] {
+  width: 28px;
+  padding: 2px;
+}
+.design-edit-toolbar input[type="number"] {
+  width: 48px;
+  font-family: var(--font-mono);
+  text-align: center;
+}
+.design-edit-toolbar button.on {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+.design-edit-slot {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  background: var(--bg-sidebar);
+  border-radius: 5px;
+  padding: 0 4px;
+  height: 28px;
+}
+.design-edit-slot span {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.design-edit-slot input[type="color"] { border: 0; background: transparent; height: 22px; width: 22px; }
+.design-edit-sep {
+  width: 1px;
+  height: 18px;
+  background: var(--border-subtle);
+}
+.design-edit-size { display: flex; gap: 2px; align-items: center; }
+.design-edit-b { font-weight: 700; }
+.design-edit-i { font-style: italic; }
+.design-edit-u { text-decoration: underline; }
+.design-edit-close {
+  font-size: 11px !important;
+  padding: 0 10px !important;
+  background: var(--accent) !important;
+  color: #fff !important;
+  border-color: var(--accent) !important;
+}
+
+/* "Bake local edits" floating button above the scrubber */
+.design-edit-bake {
+  position: absolute;
+  bottom: 48px;
+  right: 16px;
+  z-index: 25;
+  padding: 8px 14px;
+  background: #34C759;
+  color: #fff;
+  border: 0;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(52, 199, 89, 0.4);
+  animation: pop-in 180ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.design-edit-bake:hover { filter: brightness(1.08); }

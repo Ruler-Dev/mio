@@ -171,7 +171,8 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
             </div>
             <div class="design-version-label" id="design-version-label">No design yet</div>
             <div style="flex:1"></div>
-            <button class="btn-ghost" data-action="inspect" title="Click an element in the preview to edit it">Inspect</button>
+            <button class="btn-ghost" data-action="inspect" title="Click an element → draft a prompt to change it">Inspect</button>
+            <button class="btn-ghost" data-action="edit" title="Click any element and edit its text + styles directly (no model call)">Edit</button>
             <button class="btn-ghost" data-action="tokens" title="Tweak colors, radii, fonts live (no model call)">Tokens</button>
             <button class="btn-ghost" data-action="fork" title="Fork a variant from this version">Fork</button>
             <button class="btn-ghost" data-action="copy">Copy HTML</button>
@@ -400,7 +401,7 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
       const iframe = document.createElement("iframe");
       iframe.className = "design-iframe";
       iframe.sandbox = "allow-scripts";
-      iframe.srcdoc = injectRuntimeHelpers(v.html || "", { inspect: !!state._inspect });
+      iframe.srcdoc = injectRuntimeHelpers(v.html || "", { inspect: !!state._inspect, edit: !!state._edit });
 
       // Wrap with a device frame when platform != web
       if (pInfo.frame) {
@@ -412,13 +413,17 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
 
       if (!pInfo.viewport.w) applyWidth(sizer, state._width || "fit");
 
-      // Messages from the iframe — errors + element clicks in inspect mode.
+      // Messages from the iframe — errors + element clicks in inspect/edit mode.
       const handler = (e) => {
         if (!e.data || e.source !== iframe.contentWindow) return;
         if (e.data.__mioDesignError === true) {
           showError(host, errorBar, e.data);
         } else if (e.data.__mioDesignPick === true) {
           onElementPicked(host, e.data);
+        } else if (e.data.__mioDesignEditPick === true) {
+          onEditPicked(host, iframe, e.data);
+        } else if (e.data.__mioDesignEditText === true) {
+          onEditText(host, e.data);
         }
       };
       window.addEventListener("message", handler);
@@ -578,7 +583,7 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
   //     posts a selector + outerHTML snippet back to parent
   // The iframe has sandbox="allow-scripts" only, so postMessage is
   // the only channel back.
-  function injectRuntimeHelpers(html, { inspect = false } = {}) {
+  function injectRuntimeHelpers(html, { inspect = false, edit = false } = {}) {
     const errorScript = `
 <script>
 (function(){
@@ -633,7 +638,96 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
   }, true);
 })();
 </script>`;
-    const head = errorScript + inspectScript;
+    const editScript = !edit ? "" : `
+<style>
+  html.__mio_edit, html.__mio_edit * { cursor: pointer !important; }
+  html.__mio_edit *:hover { outline: 1px dashed #34C759 !important; outline-offset: 1px; }
+  .__mio_edit_target {
+    outline: 2px solid #34C759 !important;
+    outline-offset: 2px;
+    box-shadow: 0 0 0 6px rgba(52, 199, 89, 0.20) !important;
+  }
+  .__mio_edit_target[contenteditable="true"] { cursor: text !important; }
+</style>
+<script>
+(function(){
+  document.documentElement.classList.add('__mio_edit');
+  function cssPath(el){
+    if (!(el instanceof Element)) return '';
+    const parts = [];
+    while (el && el.nodeType === 1 && parts.length < 6) {
+      let name = el.nodeName.toLowerCase();
+      if (el.id) { name += '#' + el.id; parts.unshift(name); break; }
+      const cls = (el.className || '').toString().trim().split(/\\s+/).filter(Boolean).slice(0,2);
+      if (cls.length) name += '.' + cls.join('.');
+      const parent = el.parentElement;
+      if (parent) {
+        const sibs = [...parent.children].filter(c => c.nodeName === el.nodeName);
+        if (sibs.length > 1) name += ':nth-of-type(' + (sibs.indexOf(el) + 1) + ')';
+      }
+      parts.unshift(name);
+      el = parent;
+    }
+    return parts.join(' > ');
+  }
+  let current = null;
+  function unselect() {
+    if (current) { current.classList.remove('__mio_edit_target'); current.removeAttribute('contenteditable'); current = null; }
+  }
+  document.addEventListener('click', function(e){
+    if (e.target.closest('.__mio_edit_toolbar')) return; // allow toolbar clicks
+    const t = e.target;
+    if (!(t instanceof Element)) return;
+    e.preventDefault(); e.stopPropagation();
+    unselect();
+    current = t;
+    t.classList.add('__mio_edit_target');
+    t.setAttribute('contenteditable', 'true');
+    const rect = t.getBoundingClientRect();
+    const styles = getComputedStyle(t);
+    try {
+      parent.postMessage({
+        __mioDesignEditPick: true,
+        selector: cssPath(t),
+        tag: t.tagName.toLowerCase(),
+        rect: { x: rect.x, y: rect.y, w: rect.width, h: rect.height },
+        styles: {
+          color:           styles.color,
+          backgroundColor: styles.backgroundColor,
+          fontSize:        styles.fontSize,
+          fontWeight:      styles.fontWeight,
+          fontStyle:       styles.fontStyle,
+          textDecoration:  styles.textDecorationLine || styles.textDecoration,
+        },
+        text: (t.innerText || '').slice(0, 500),
+      }, '*');
+    } catch(_) {}
+  }, true);
+  // Forward text edits on blur so parent can bake innerHTML back into source.
+  document.addEventListener('blur', function(e){
+    const t = e.target;
+    if (!(t instanceof Element) || !t.classList.contains('__mio_edit_target')) return;
+    try {
+      parent.postMessage({
+        __mioDesignEditText: true,
+        selector: cssPath(t),
+        newText: t.innerText || '',
+      }, '*');
+    } catch(_) {}
+  }, true);
+  // Parent → iframe commands: apply live style changes
+  window.addEventListener('message', (e) => {
+    if (!e.data) return;
+    if (e.data.__mioDesignStyleSet === true && current) {
+      for (const [k, v] of Object.entries(e.data.styles || {})) {
+        current.style[k] = v;
+      }
+    }
+    if (e.data.__mioDesignUnselect === true) unselect();
+  });
+})();
+</script>`;
+    const head = errorScript + inspectScript + editScript;
     if (/<\/head>/i.test(html)) return html.replace(/<\/head>/i, head + "</head>");
     if (/<body/i.test(html))    return html.replace(/<body([^>]*)>/i, "<body$1>" + head);
     return head + html;
@@ -656,12 +750,215 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
 
   function toggleInspect(host, on) {
     state._inspect = !!on;
+    if (on) state._edit = false;
     saveSession();
     const btn = host.querySelector('[data-action="inspect"]');
     if (btn) btn.classList.toggle("active", !!on);
+    const editBtn = host.querySelector('[data-action="edit"]');
+    if (editBtn) editBtn.classList.remove("active");
+    hideEditToolbar(host);
     // Re-render so the iframe gets the helper script refreshed.
     const v = state.versions[state.activeVersion];
     if (v) showVersion(host, v);
+  }
+
+  function toggleEdit(host, on) {
+    state._edit = !!on;
+    if (on) state._inspect = false;
+    saveSession();
+    host.querySelector('[data-action="edit"]')?.classList.toggle("active", !!on);
+    host.querySelector('[data-action="inspect"]')?.classList.remove("active");
+    hideEditToolbar(host);
+    const v = state.versions[state.activeVersion];
+    if (v) showVersion(host, v);
+  }
+
+  // --- Edit-mode state & handlers --------------------------------------
+  // state._edits: { [selector]: { text?, styles: {prop:value} } }
+
+  function onEditPicked(host, iframe, msg) {
+    state._editCurrent = { iframe, selector: msg.selector };
+    showEditToolbar(host, iframe, msg);
+  }
+
+  function onEditText(host, msg) {
+    if (!msg.selector) return;
+    state._edits = state._edits || {};
+    state._edits[msg.selector] = state._edits[msg.selector] || { styles: {} };
+    state._edits[msg.selector].text = msg.newText;
+    markDirty(host);
+  }
+
+  function setEditStyle(host, prop, value) {
+    const cur = state._editCurrent;
+    if (!cur) return;
+    state._edits = state._edits || {};
+    state._edits[cur.selector] = state._edits[cur.selector] || { styles: {} };
+    state._edits[cur.selector].styles[prop] = value;
+    // Live-apply in iframe
+    const payload = {};
+    payload[prop] = value;
+    try {
+      cur.iframe.contentWindow?.postMessage({ __mioDesignStyleSet: true, styles: payload }, "*");
+    } catch {}
+    markDirty(host);
+  }
+
+  function markDirty(host) {
+    const btn = host.querySelector(".design-edit-bake");
+    if (!btn) return;
+    const count = Object.keys(state._edits || {}).length;
+    btn.hidden = count === 0;
+    btn.textContent = count ? `Bake ${count} edit${count === 1 ? "" : "s"} → new version` : "";
+  }
+
+  function showEditToolbar(host, iframe, msg) {
+    hideEditToolbar(host);
+    const canvas = host.querySelector("#design-canvas");
+    if (!canvas || !msg.rect) return;
+    const iframeRect = iframe.getBoundingClientRect();
+    const canvasRect = canvas.getBoundingClientRect();
+    // Position relative to canvas, above the clicked element.
+    const x = iframeRect.left - canvasRect.left + msg.rect.x;
+    const y = iframeRect.top  - canvasRect.top  + msg.rect.y;
+    const bar = document.createElement("div");
+    bar.className = "design-edit-toolbar";
+    bar.style.left = Math.max(10, x) + "px";
+    bar.style.top  = Math.max(10, y - 44) + "px";
+    const s = msg.styles || {};
+    const sizePx = parseFloat(s.fontSize) || 16;
+    bar.innerHTML = `
+      <label class="design-edit-slot" title="Text color">
+        <span>A</span><input type="color" value="${toHex(s.color) || "#000000"}" data-prop="color">
+      </label>
+      <label class="design-edit-slot" title="Background">
+        <span>▦</span><input type="color" value="${toHex(s.backgroundColor) || "#ffffff"}" data-prop="backgroundColor">
+      </label>
+      <span class="design-edit-sep"></span>
+      <div class="design-edit-size">
+        <button data-delta="-2" aria-label="Smaller">A-</button>
+        <input type="number" min="8" max="120" step="1" value="${Math.round(sizePx)}" data-prop="fontSize-px">
+        <button data-delta="2" aria-label="Bigger">A+</button>
+      </div>
+      <span class="design-edit-sep"></span>
+      <button class="design-edit-b" data-tog="bold"   title="Bold">B</button>
+      <button class="design-edit-i" data-tog="italic" title="Italic">I</button>
+      <button class="design-edit-u" data-tog="underline" title="Underline">U</button>
+      <span class="design-edit-sep"></span>
+      <button class="design-edit-close" aria-label="Done">Done</button>
+    `;
+    // Reflect current state on toggles
+    if ((s.fontWeight || "") >= 600)            bar.querySelector(".design-edit-b").classList.add("on");
+    if ((s.fontStyle || "") === "italic")       bar.querySelector(".design-edit-i").classList.add("on");
+    if ((s.textDecoration || "").includes("underline")) bar.querySelector(".design-edit-u").classList.add("on");
+    canvas.appendChild(bar);
+
+    bar.querySelector('[data-prop="color"]').addEventListener("input", (e) =>
+      setEditStyle(host, "color", e.target.value));
+    bar.querySelector('[data-prop="backgroundColor"]').addEventListener("input", (e) =>
+      setEditStyle(host, "backgroundColor", e.target.value));
+    const sizeInput = bar.querySelector('[data-prop="fontSize-px"]');
+    sizeInput.addEventListener("input", (e) =>
+      setEditStyle(host, "fontSize", e.target.value + "px"));
+    bar.querySelectorAll("[data-delta]").forEach((b) => {
+      b.addEventListener("click", () => {
+        const next = Math.max(8, Math.min(120, parseFloat(sizeInput.value) + parseFloat(b.dataset.delta)));
+        sizeInput.value = next;
+        setEditStyle(host, "fontSize", next + "px");
+      });
+    });
+    bar.querySelectorAll("[data-tog]").forEach((b) => {
+      b.addEventListener("click", () => {
+        const prop = b.dataset.tog;
+        const on = !b.classList.contains("on");
+        b.classList.toggle("on", on);
+        if (prop === "bold")      setEditStyle(host, "fontWeight", on ? "700" : "400");
+        if (prop === "italic")    setEditStyle(host, "fontStyle",  on ? "italic" : "normal");
+        if (prop === "underline") setEditStyle(host, "textDecoration", on ? "underline" : "none");
+      });
+    });
+    bar.querySelector(".design-edit-close").addEventListener("click", () => {
+      try { iframe.contentWindow?.postMessage({ __mioDesignUnselect: true }, "*"); } catch {}
+      hideEditToolbar(host);
+      state._editCurrent = null;
+    });
+  }
+
+  function hideEditToolbar(host) {
+    host.querySelector(".design-edit-toolbar")?.remove();
+  }
+
+  function bakeEditsIntoNewVersion(host) {
+    const edits = state._edits || {};
+    if (!Object.keys(edits).length) return;
+    const v = state.versions[state.activeVersion];
+    if (!v) return;
+    let html = v.html || "";
+
+    // 1) Append a style block at end of <head> with selector-scoped
+    //    overrides for any style changes.
+    const styleRules = [];
+    for (const [selector, entry] of Object.entries(edits)) {
+      if (!entry.styles) continue;
+      const decls = Object.entries(entry.styles)
+        .map(([p, val]) => `${p.replace(/([A-Z])/g, "-$1").toLowerCase()}: ${val} !important;`)
+        .join(" ");
+      if (decls) styleRules.push(`${selector} { ${decls} }`);
+    }
+    if (styleRules.length) {
+      const block = `\n<style id="__mio-baked-edits">\n${styleRules.join("\n")}\n</style>`;
+      if (/<\/head>/i.test(html)) html = html.replace(/<\/head>/i, block + "\n</head>");
+      else html = block + html;
+    }
+
+    // 2) For text edits, append a small script that rewrites elements
+    //    by selector at load. This survives React hydration since it
+    //    runs after ReactDOM.render() in the <body> order we injected.
+    const textEdits = [];
+    for (const [selector, entry] of Object.entries(edits)) {
+      if (typeof entry.text === "string" && entry.text) {
+        textEdits.push([selector, entry.text]);
+      }
+    }
+    if (textEdits.length) {
+      const payload = JSON.stringify(textEdits);
+      const script = `
+<script>
+(function(){
+  function apply(){
+    var edits = ${payload};
+    for (var i = 0; i < edits.length; i++) {
+      try {
+        var el = document.querySelector(edits[i][0]);
+        if (el) el.innerText = edits[i][1];
+      } catch(_){}
+    }
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => setTimeout(apply, 50));
+  else setTimeout(apply, 50);
+})();
+</script>
+`;
+      if (/<\/body>/i.test(html)) html = html.replace(/<\/body>/i, script + "</body>");
+      else html = html + script;
+    }
+
+    // Push as a new version
+    const n = state.versions.length + 1;
+    state.versions.push({
+      n,
+      title: `v${n} (edits)`,
+      html,
+      prompt: `(local edits: ${Object.keys(edits).length} element${Object.keys(edits).length === 1 ? "" : "s"})`,
+      ts: Date.now(),
+    });
+    state.activeVersion = state.versions.length - 1;
+    state._edits = {};
+    state._editCurrent = null;
+    saveSession();
+    hideEditToolbar(host);
+    renderVersions(host);
+    markDirty(host);
   }
 
   function showError(host, bar, err) {
@@ -876,10 +1173,27 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
     if (state._inspect) {
       host.querySelector('[data-action="inspect"]')?.classList.add("active");
     }
+    // Edit-mode toggle
+    host.querySelector('[data-action="edit"]').addEventListener("click", () => {
+      toggleEdit(host, !state._edit);
+    });
+    if (state._edit) {
+      host.querySelector('[data-action="edit"]')?.classList.add("active");
+    }
     // Tokens panel toggle
     host.querySelector('[data-action="tokens"]').addEventListener("click", () => {
       toggleTokens(host);
     });
+    // Floating "Bake edits" bar — shown whenever there are pending
+    // local edits. Positioned above the scrubber.
+    if (!host.querySelector(".design-edit-bake")) {
+      const bakeBtn = document.createElement("button");
+      bakeBtn.className = "design-edit-bake";
+      bakeBtn.hidden = true;
+      bakeBtn.addEventListener("click", () => bakeEditsIntoNewVersion(host));
+      host.querySelector(".design-right").appendChild(bakeBtn);
+      markDirty(host);
+    }
     // Platform picker
     const currentPlatform = state._platform || "web";
     host.querySelectorAll(".design-platform").forEach((b) => {
