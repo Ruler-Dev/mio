@@ -2447,3 +2447,29 @@ body.focus-mode .input-area { max-width: 720px; }
 .app { padding-bottom: 28px; }
 .view-stage { padding-bottom: 0; }
 .design-canvas { padding-bottom: 24px; }
+
+/* ===== Design Mode: kind picker (Page / 3D / AR / Shader / Game) == */
+.design-kinds {
+  display: flex;
+  gap: 2px;
+  padding: 4px 10px 6px;
+  border-bottom: 1px solid var(--border-subtle);
+  flex-wrap: wrap;
+}
+.design-kind {
+  padding: 4px 8px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-sidebar);
+  color: var(--text-secondary);
+  font-size: 10px;
+  cursor: pointer;
+  border-radius: 999px;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.design-kind:hover { color: var(--text-primary); border-color: var(--border); }
+.design-kind.active {
+  background: var(--accent-subtle);
+  color: var(--accent);
+  border-color: var(--accent);
+  font-weight: 500;
+}

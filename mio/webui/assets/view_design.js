@@ -31,6 +31,69 @@
     "editorial", "warm earthy", "neon arcade", "monochrome",
   ];
 
+  // --- Output kinds -----------------------------------------------------
+  // A second axis alongside platform: what *kind* of artifact the model
+  // should produce. Each kind has its own system-prompt addendum that
+  // biases the generation toward a specific stack. `page` is the
+  // default (existing behaviour).
+  const KINDS = {
+    page:   { label: "Page",      icon: "🖼",  addendum: "" },
+    scene:  { label: "3D Scene",  icon: "🧊",  addendum: SCENE_ADDENDUM() },
+    ar:     { label: "AR",        icon: "📦",  addendum: AR_ADDENDUM() },
+    shader: { label: "Shader",    icon: "🌈",  addendum: SHADER_ADDENDUM() },
+    game:   { label: "Game",      icon: "🎮",  addendum: GAME_ADDENDUM() },
+  };
+
+  function SCENE_ADDENDUM() {
+    return `\n\nOUTPUT KIND: 3D SCENE.
+Use Three.js via UMD from https://cdn.jsdelivr.net/npm/three@0.162 plus OrbitControls
+(https://cdn.jsdelivr.net/npm/three@0.162/examples/jsm/controls/OrbitControls.js via importmap). Ship a full-screen canvas that fills the viewport. Required:
+- Real geometry (TorusKnot / IcosahedronGeometry / a glTF load from https://cdn.jsdelivr.net/npm/three@0.162/examples/models/gltf/DamagedHelmet/glTF/DamagedHelmet.gltf — or similar well-hosted asset)
+- HDRI environment via RGBELoader + PMREMGenerator (Poly Haven 1K HDRI, e.g. https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/kloofendal_48d_partly_cloudy_puresky_1k.hdr)
+- At least one PBR material (MeshStandardMaterial with metalness/roughness and the HDRI as envMap)
+- Shadow-casting directional light + ambient + soft background
+- OrbitControls enabled, damping on
+- One subtle post effect (FilmPass or dust particles) — optional but welcome
+- renderer.outputColorSpace = THREE.SRGBColorSpace; ACES tone mapping
+NO rotating cube on grey. Produce a scene worth looking at.`;
+  }
+
+  function AR_ADDENDUM() {
+    return `\n\nOUTPUT KIND: AR-READY MODEL VIEWER.
+Use Google's <model-viewer> web component via
+<script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/3.5.0/model-viewer.min.js"></script>.
+Single <model-viewer> element taking the full viewport, with these attributes:
+  src="<glb url>"
+  ios-src="<usdz url>"
+  ar ar-modes="scene-viewer quick-look webxr"
+  camera-controls
+  shadow-intensity="1"
+  auto-rotate
+  environment-image="neutral"
+Prefer assets from https://modelviewer.dev/shared-assets/models/ or the Khronos glTF sample models at https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Models/master/2.0/. If the user hasn't given a specific model, pick one relevant to the prompt (Horse, Astronaut, Duck, DamagedHelmet, RobotExpressive, SciFiHelmet). Add a translucent info pill at the top with the model's name + a "View in AR" prompt on mobile. Include a small loading poster image.`;
+  }
+
+  function SHADER_ADDENDUM() {
+    return `\n\nOUTPUT KIND: SHADER ART.
+Ship a single <canvas> filling the viewport + a fullscreen triangle vertex shader + a fragment shader that reads classic ShaderToy-style uniforms:
+  iTime (seconds since start)
+  iResolution (vec3)
+  iMouse (vec4)
+Write the fragment shader in GLSL ES 3.00 with \`out vec4 fragColor;\`. Use WebGL2. Include time-animated distance fields, fbm noise, domain warping, polar mappings — produce art, not a solid color. No external libraries. If the user mentions a ShaderToy ID (e.g. "ShaderToy XsXXDn") or pastes a \`mainImage(fragColor, fragCoord)\` function, wrap it in the WebGL2 boilerplate as-is — preserving their logic.`;
+  }
+
+  function GAME_ADDENDUM() {
+    return `\n\nOUTPUT KIND: PLAYABLE GAME PROTOTYPE.
+Use kaboom.js from https://unpkg.com/kaboom@3000/dist/kaboom.js — smallest viable game engine. Or Phaser 3 for larger scopes. Ship a fullscreen canvas with:
+- A game loop (real update/render split)
+- Pointer-lock or WASD keyboard input (Pointer is better for touch)
+- A real objective (collect / avoid / score) — not just "move around"
+- Score / timer / restart UI overlay
+- Forgiving physics (no frame-rate-dependent deltas)
+- Post-game recap (final score + restart button)
+Use kaboom's component idioms (pos, area, body, sprite) — don't hand-roll everything. For sprites use CC0 kit assets from Kay Lousberg / Quaternius when the model knows a relevant GLB; otherwise draw with kaboom primitives.`;
+  }
+
   // --- Platform system prompts ----------------------------------------
   // Each platform has its own spec for what "good" looks like.
   // Prompts are deliberately specific (components, token names, font
@@ -136,6 +199,13 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
             <button class="design-platform" data-platform="ios"     title="iOS · HIG · iPhone 16 Pro">iOS</button>
             <button class="design-platform" data-platform="android" title="Android · Material 3 · Pixel 9 Pro">Android</button>
             <button class="design-platform" data-platform="ipad"    title="iPad Pro · HIG · landscape">iPad</button>
+          </div>
+          <div class="design-kinds" role="tablist" aria-label="Output kind">
+            <button class="design-kind" data-kind="page"   title="Regular page / component">🖼 Page</button>
+            <button class="design-kind" data-kind="scene"  title="Three.js 3D scene with HDRI + PBR">🧊 3D</button>
+            <button class="design-kind" data-kind="ar"     title="&lt;model-viewer&gt; — iOS Quick Look + Android Scene Viewer">📦 AR</button>
+            <button class="design-kind" data-kind="shader" title="Full-screen ShaderToy-style fragment shader">🌈 Shader</button>
+            <button class="design-kind" data-kind="game"   title="Playable kaboom.js game prototype">🎮 Game</button>
           </div>
           <div class="design-history" id="design-history"></div>
           <div class="design-composer">
@@ -1194,6 +1264,17 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
       host.querySelector(".design-right").appendChild(bakeBtn);
       markDirty(host);
     }
+    // Kind picker
+    const currentKind = state._kind || "page";
+    host.querySelectorAll(".design-kind").forEach((b) => {
+      b.classList.toggle("active", b.dataset.kind === currentKind);
+      b.addEventListener("click", () => {
+        state._kind = b.dataset.kind;
+        saveSession();
+        host.querySelectorAll(".design-kind").forEach((x) =>
+          x.classList.toggle("active", x.dataset.kind === state._kind));
+      });
+    });
     // Platform picker
     const currentPlatform = state._platform || "web";
     host.querySelectorAll(".design-platform").forEach((b) => {
@@ -1603,7 +1684,9 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
       // Use the existing OpenAI-compatible endpoint. Model pick-up:
       // whatever the server has loaded as default (mio-large-moe).
       const platform = state._platform || "web";
-      const sysPrompt = (PLATFORMS[platform] || PLATFORMS.web).systemPrompt;
+      const kind     = state._kind || "page";
+      const sysPrompt = (PLATFORMS[platform] || PLATFORMS.web).systemPrompt
+                      + ((KINDS[kind] || KINDS.page).addendum || "");
       const messages = [
         { role: "system", content: sysPrompt },
         ...state.history
