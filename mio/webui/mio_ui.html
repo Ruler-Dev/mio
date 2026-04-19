@@ -37,6 +37,11 @@
     return;
   }
   const MODULES = [
+    // Navigation shell — loaded first so the rail and view stage exist
+    // before any feature module that might need to mount into a view.
+    'views', 'nav_rail',
+    'view_workspaces', 'view_docs', 'view_design', 'view_obsidian',
+    // Cross-cutting chat-surface enhancements
     'pinned', 'density', 'tips', 'clipboard_context', 'artifact_export',
     'presentation', 'image_paste', 'keys', 'onboarding', 'templates',
     'followups', 'chat_export', 'branching', 'reactions', 'chat_import',

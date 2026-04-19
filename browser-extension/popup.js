@@ -1,12 +1,13 @@
 // popup.js — controls the extension popup.
 // Reads endpoint from storage, wires the two action buttons.
 
+const api = (typeof browser !== "undefined") ? browser : chrome;
 const $ = (id) => document.getElementById(id);
 
 async function init() {
   // Load current endpoint.
   const endpoint = await new Promise((r) =>
-    chrome.runtime.sendMessage({ type: "mio-endpoint-get" }, r),
+    api.runtime.sendMessage({ type: "mio-endpoint-get" }, r),
   );
   $("endpoint").value = endpoint || "http://localhost:9090/ui/api/ingest";
 
@@ -14,7 +15,7 @@ async function init() {
   $("endpoint").addEventListener("change", async () => {
     const ep = $("endpoint").value.trim();
     await new Promise((r) =>
-      chrome.runtime.sendMessage({ type: "mio-endpoint-set", endpoint: ep }, r),
+      api.runtime.sendMessage({ type: "mio-endpoint-set", endpoint: ep }, r),
     );
     showStatus("Endpoint saved", "ok");
   });
@@ -32,7 +33,7 @@ async function clip({ selectionOnly }) {
 
   showStatus(selectionOnly ? "Clipping selection…" : "Clipping page…", "");
   const result = await new Promise((r) =>
-    chrome.runtime.sendMessage({ type: "mio-clip", selectionOnly, tags }, r),
+    api.runtime.sendMessage({ type: "mio-clip", selectionOnly, tags }, r),
   );
   if (!result) {
     showStatus("Failed — is Mio running?", "err");

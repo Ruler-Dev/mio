@@ -498,3 +498,239 @@ body.focus-mode .input-area { max-width: 720px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
+
+/* ===== Nav rail ============================================ */
+/* 48px-wide icon strip injected at far-left of .app by nav_rail.js.
+   Pushes the existing sidebar+main right by the same amount. */
+.nav-rail {
+  width: 48px;
+  flex: 0 0 48px;
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 10px 0 6px;
+  gap: 2px;
+  z-index: 10;
+}
+.nav-rail-logo {
+  width: 32px; height: 32px;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--accent);
+  margin-bottom: 6px;
+  opacity: 0.9;
+}
+.nav-rail-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  align-items: center;
+}
+.nav-rail-spacer { flex: 1; }
+.nav-rail-btn {
+  position: relative;
+  width: 36px; height: 36px;
+  border-radius: 8px;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: background 120ms ease, color 120ms ease;
+}
+.nav-rail-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.nav-rail-btn.active {
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+.nav-rail-btn.active::before {
+  content: '';
+  position: absolute;
+  left: -6px; top: 6px; bottom: 6px;
+  width: 2px;
+  border-radius: 0 2px 2px 0;
+  background: var(--accent);
+}
+.nav-rail-icon svg { display: block; }
+.nav-rail-tip {
+  position: absolute;
+  left: calc(100% + 10px);
+  top: 50%;
+  transform: translateY(-50%);
+  background: var(--text-primary);
+  color: var(--bg-page);
+  font-size: 11px;
+  padding: 3px 7px;
+  border-radius: 4px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  z-index: 1000;
+}
+.nav-rail-btn:hover .nav-rail-tip { opacity: 1; }
+
+/* ===== View stage ========================================== */
+/* Overlay container that hosts non-chat views. Lives as a sibling of
+   .sidebar and .main; when a view is active, .sidebar + .main get
+   display:none and #view-stage gets display:flex. */
+.view-stage {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  background: var(--bg-page);
+}
+.view {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+.view-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+}
+.view-empty-inner {
+  max-width: 520px;
+  text-align: center;
+}
+.view-empty-inner h1 {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 0 0 12px;
+  color: var(--text-primary);
+}
+.view-empty-inner p {
+  color: var(--text-secondary);
+  line-height: 1.55;
+  margin: 0 0 10px;
+}
+.view-empty-inner .muted {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin-top: 18px;
+}
+
+/* ===== View header (shared) ================================ */
+.view-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 22px 28px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.view-header h1 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+}
+.view-header .muted {
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin-top: 3px;
+}
+.view-header-actions { display: flex; gap: 8px; }
+.btn-ghost {
+  padding: 6px 11px;
+  border: 1px solid var(--border);
+  background: var(--bg-sidebar);
+  color: var(--text-primary);
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.btn-ghost:hover { border-color: var(--border-strong); }
+.view-body {
+  padding: 20px 28px 28px;
+  overflow-y: auto;
+  height: calc(100vh - 86px);
+}
+
+/* ===== Docs view =========================================== */
+.docs-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 14px;
+}
+.docs-card {
+  background: var(--bg-sidebar);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  padding: 14px 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: border-color 120ms ease;
+}
+.docs-card:hover { border-color: var(--border-strong); }
+.docs-card-title {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.docs-card-url {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.docs-card-url:hover { color: var(--accent); text-decoration: underline; }
+.docs-card-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+  display: flex;
+  gap: 6px;
+  margin-top: 2px;
+}
+.docs-card-actions {
+  margin-top: auto;
+  display: flex;
+  gap: 6px;
+  padding-top: 8px;
+}
+.docs-card-actions button {
+  flex: 1;
+  padding: 6px 8px;
+  font-size: 11px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-page);
+  color: var(--text-primary);
+  border-radius: 5px;
+  cursor: pointer;
+  transition: border-color 120ms ease;
+}
+.docs-card-actions button:hover { border-color: var(--accent); color: var(--accent); }
+.docs-card-actions button.danger:hover { border-color: #dc2626; color: #dc2626; }
+.docs-empty {
+  grid-column: 1 / -1;
+  padding: 50px 20px;
+  text-align: center;
+  color: var(--text-muted);
+}
+.docs-empty h2 {
+  font-size: 16px;
+  margin: 0 0 8px;
+  color: var(--text-secondary);
+}
+.docs-empty code {
+  background: var(--bg-sidebar);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 12px;
+}

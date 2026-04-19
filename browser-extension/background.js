@@ -1,16 +1,21 @@
 // Mio Clip — background service worker.
 // Owns the context-menu entries, dispatches ingest requests to the local
 // Mio instance, and surfaces success/failure via browser notifications.
+//
+// Cross-browser: Safari exposes `browser.*`, Chromium exposes `chrome.*`.
+// Both recognise the other as a de-facto alias for the permissions we use,
+// but we normalise here so the rest of the file reads naturally.
+const api = (typeof browser !== "undefined") ? browser : chrome;
 
 const DEFAULT_ENDPOINT = "http://localhost:9090/ui/api/ingest";
 
 async function endpoint() {
-  const { mioEndpoint } = await chrome.storage.sync.get("mioEndpoint");
+  const { mioEndpoint } = await api.storage.sync.get("mioEndpoint");
   return (mioEndpoint || DEFAULT_ENDPOINT).replace(/\/$/, "");
 }
 
 function notify(title, message, type = "basic") {
-  chrome.notifications?.create?.(
+  api.notifications?.create?.(
     { type, iconUrl: "icons/icon-128.png", title, message },
   );
 }
@@ -40,7 +45,7 @@ async function ingest(payload) {
 }
 
 async function extractFromTab(tab, { selectionOnly = false } = {}) {
-  const [result] = await chrome.scripting.executeScript({
+  const [result] = await api.scripting.executeScript({
     target: { tabId: tab.id },
     func: (selectionOnly) => {
       const selection = window.getSelection()?.toString() || "";
@@ -75,27 +80,27 @@ async function extractFromTab(tab, { selectionOnly = false } = {}) {
 }
 
 async function clipActive({ selectionOnly = false, tags = [] } = {}) {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const [tab] = await api.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id) return null;
   const extracted = await extractFromTab(tab, { selectionOnly });
   if (!extracted) return null;
   return ingest({ ...extracted, tags, target: "rag" });
 }
 
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({
+api.runtime.onInstalled.addListener(() => {
+  api.contextMenus.create({
     id: "mio-clip-page",
     title: "Send this page to Mio",
     contexts: ["page"],
   });
-  chrome.contextMenus.create({
+  api.contextMenus.create({
     id: "mio-clip-selection",
     title: "Send selection to Mio",
     contexts: ["selection"],
   });
 });
 
-chrome.contextMenus.onClicked.addListener(async (info) => {
+api.contextMenus.onClicked.addListener(async (info) => {
   if (info.menuItemId === "mio-clip-page") {
     await clipActive({ selectionOnly: false });
   } else if (info.menuItemId === "mio-clip-selection") {
@@ -103,7 +108,7 @@ chrome.contextMenus.onClicked.addListener(async (info) => {
   }
 });
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === "mio-clip") {
     clipActive({
       selectionOnly: !!msg.selectionOnly,
@@ -116,7 +121,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true;
   }
   if (msg?.type === "mio-endpoint-set") {
-    chrome.storage.sync.set({ mioEndpoint: msg.endpoint || DEFAULT_ENDPOINT })
+    api.storage.sync.set({ mioEndpoint: msg.endpoint || DEFAULT_ENDPOINT })
       .then(() => sendResponse({ ok: true }));
     return true;
   }

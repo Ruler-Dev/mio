@@ -16,8 +16,10 @@
     "http://127.0.0.1:9090/*"
   ],
   "background": {
+    "scripts": ["background.js"],
     "service_worker": "background.js",
-    "type": "module"
+    "type": "module",
+    "persistent": false
   },
   "action": {
     "default_popup": "popup.html",
@@ -34,5 +36,10 @@
     "32": "icons/icon-32.png",
     "48": "icons/icon-48.png",
     "128": "icons/icon-128.png"
+  },
+  "browser_specific_settings": {
+    "safari": {
+      "strict_min_version": "16.4"
+    }
   }
 }
