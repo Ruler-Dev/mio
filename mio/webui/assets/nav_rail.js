@@ -18,6 +18,7 @@
     { view: "design",      title: "Design",     icon: iconDesign(),     shortcut: "⌘4" },
     { view: "obsidian",    title: "Obsidian",   icon: iconObsidian(),   shortcut: "⌘5" },
     { view: "dashboards",  title: "Dashboards", icon: iconDashboards(), shortcut: "⌘6" },
+    { view: "flow",        title: "Flow",       icon: iconFlow(),       shortcut: "⌘7" },
   ];
   // Bottom section (below a spacer) — settings + dashboard link
   const BOTTOM = [
@@ -96,6 +97,7 @@
       const match = {
         Digit1: "chat", Digit2: "workspaces", Digit3: "docs",
         Digit4: "design", Digit5: "obsidian", Digit6: "dashboards",
+        Digit7: "flow",
       }[e.code];
       if (!match) return;
       e.preventDefault();
@@ -136,6 +138,7 @@
   function iconDesign()     { return svg(`<path d="M12 3l1.8 5 5.2 1.8L15 13.8 16 19l-4-2.6L8 19l1-5.2-4-4.2L10.2 8z"/>`); }
   function iconObsidian()   { return svg(`<path d="M12 2l8 6-3 11H7L4 8z"/><path d="M12 2l-5 6 5 6 5-6z" opacity="0.5"/>`); }
   function iconDashboards() { return svg(`<rect x="3" y="3" width="8" height="5" rx="1.5"/><rect x="13" y="3" width="8" height="9" rx="1.5"/><rect x="3" y="10" width="8" height="11" rx="1.5"/><rect x="13" y="14" width="8" height="7" rx="1.5"/>`); }
+  function iconFlow()       { return svg(`<circle cx="5" cy="6" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><path d="M7 7l3 9M17 7l-3 9"/>`); }
   function iconDashboard()  { return svg(`<path d="M3 12L12 4l9 8"/><path d="M5 10v10h14V10"/>`); }
   function iconPlayground() { return svg(`<circle cx="12" cy="12" r="9"/><path d="M10 9l5 3-5 3z" fill="currentColor"/>`); }
   function iconStats()      { return svg(`<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>`); }

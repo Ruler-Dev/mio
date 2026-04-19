@@ -2852,3 +2852,111 @@ body.focus-mode .input-area { max-width: 720px; }
   z-index: 9999;
   animation: pop-in 180ms ease;
 }
+
+/* ===== Flow Mode ========================================== */
+.view-flow {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.flow-split {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  flex: 1;
+  min-height: 0;
+}
+.flow-palette {
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.flow-palette header {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+.flow-nodes {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.flow-node-card {
+  padding: 8px 10px;
+  background: var(--bg-page);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  cursor: grab;
+  user-select: none;
+  transition: border-color 120ms ease, transform 120ms ease;
+}
+.flow-node-card:hover { border-color: var(--border); transform: translateX(2px); }
+.flow-node-card-title {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+.flow-node-card-desc {
+  font-size: 10px;
+  color: var(--text-muted);
+  line-height: 1.35;
+  margin-top: 2px;
+}
+
+.flow-canvas-wrap {
+  position: relative;
+  overflow: hidden;
+  background:
+    linear-gradient(var(--border-subtle) 1px, transparent 1px) 0 0 / 22px 22px,
+    linear-gradient(90deg, var(--border-subtle) 1px, transparent 1px) 0 0 / 22px 22px,
+    var(--bg-page);
+}
+.flow-canvas {
+  height: 100%;
+  width: 100%;
+  position: relative;
+}
+.flow-toast {
+  position: absolute;
+  bottom: 40px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #34C759;
+  color: #fff;
+  padding: 6px 14px;
+  font-size: 12px;
+  border-radius: 6px;
+  z-index: 1000;
+  animation: pop-in 180ms ease;
+}
+
+/* Re-style Drawflow nodes to match Mio theme */
+.drawflow .drawflow-node {
+  background: var(--bg-page) !important;
+  border: 1px solid var(--border) !important;
+  color: var(--text-primary) !important;
+  border-radius: 8px !important;
+  padding: 10px 12px !important;
+  min-width: 120px !important;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+}
+.drawflow .drawflow-node.selected {
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 2px var(--accent-subtle) !important;
+}
+.drawflow .input, .drawflow .output {
+  background: var(--accent) !important;
+  border: 2px solid var(--bg-page) !important;
+}
+.drawflow .connection .main-path {
+  stroke: var(--text-muted) !important;
+  stroke-width: 2 !important;
+}

@@ -1034,6 +1034,65 @@ async def design_export(body: dict):
     )
 
 
+# --- Flow Mode (visual agent graphs) ------------------------------
+
+def _flows_dir() -> Path:
+    p = Path.home() / ".mio" / "flows"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+@router.get("/api/flows")
+async def list_flows():
+    flows = []
+    for p in sorted(_flows_dir().glob("*.json"), key=lambda x: -x.stat().st_mtime):
+        try:
+            data = json.loads(p.read_text())
+            flows.append({
+                "id":       p.stem,
+                "name":     data.get("name", p.stem),
+                "nodes":    len(data.get("nodes", {})),
+                "updated":  p.stat().st_mtime,
+            })
+        except Exception:
+            continue
+    return {"flows": flows}
+
+
+@router.get("/api/flows/{flow_id}")
+async def get_flow(flow_id: str):
+    safe = flow_id.replace("/", "_").replace("..", "_")
+    p = _flows_dir() / f"{safe}.json"
+    if not p.exists():
+        return {"error": "not found"}
+    return json.loads(p.read_text())
+
+
+@router.post("/api/flows")
+async def save_flow(body: dict):
+    fid = (body or {}).get("id") or str(uuid.uuid4())[:8]
+    safe = fid.replace("/", "_").replace("..", "_")
+    p = _flows_dir() / f"{safe}.json"
+    data = {
+        "id":      fid,
+        "name":    body.get("name", "Untitled flow"),
+        "nodes":   body.get("nodes", {}),
+        "edges":   body.get("edges", []),
+        "updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    p.write_text(json.dumps(data, indent=2))
+    return {"ok": True, "id": fid}
+
+
+@router.delete("/api/flows/{flow_id}")
+async def delete_flow(flow_id: str):
+    safe = flow_id.replace("/", "_").replace("..", "_")
+    p = _flows_dir() / f"{safe}.json"
+    if p.exists() and p.is_file():
+        p.unlink()
+    return {"ok": True}
+
+
 @router.post("/api/reveal")
 async def reveal_in_finder(body: dict):
     """Open a local path in the user's file browser (Finder on macOS)."""

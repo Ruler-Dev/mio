@@ -26,6 +26,7 @@
     s: { kind: "view", target: "design",     label: "Design" },
     o: { kind: "view", target: "obsidian",   label: "Obsidian" },
     b: { kind: "view", target: "dashboards", label: "Dashboards" },
+    f: { kind: "view", target: "flow",       label: "Flow" },
     a: { kind: "href", target: "/ui/attachments", label: "Attachments" },
     p: { kind: "href", target: "/ui/playground",  label: "Playground" },
     t: { kind: "href", target: "/ui/stats",       label: "Stats" },
