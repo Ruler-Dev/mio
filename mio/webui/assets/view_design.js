@@ -2092,11 +2092,14 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
           });
         };
         const text = await runOne(messages, 0.7, onDelta);
-        // Finalise the live entry: replace streamed preview with a
-        // terse final summary ("Generated v{N}") once the artifact
-        // parses; the actual HTML is in state.versions.
+        // Finalise the live entry: KEEP the streamed preview (which
+        // already collapses any artifact body to "📄 …artifact ready…")
+        // so the user sees the model's actual commentary around the
+        // artifact. Append a status footer with size / token stats.
         state.history[liveIdx].streaming = false;
-        state.history[liveIdx].text = `Generating v${state.versions.length + 1}…`;
+        const finalPreview = streamPreview(text);
+        state.history[liveIdx].text = finalPreview || "(empty reply — model returned nothing)";
+        state.history[liveIdx]._liveFinal = true;
         results = [text];
       } else {
         const runs = [];
@@ -2125,11 +2128,28 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
       // When we have variants, stage them for comparison on the next
       // showVersion — the user gets a 3-up grid until they pick one.
       state._pendingCompare = variantGroup;
-      state.history.push({
-        role: "assistant",
-        text: variantGroup ? `Generated ${variants} variants — pick one to keep (the others stay in the scrubber).`
-                           : `Generated v${state.versions.length}.`,
-      });
+      // For the single-variant path we already have a finalised live
+      // entry — append a status footer onto it rather than pushing a
+      // second redundant "Generated v{N}." message. For variants we
+      // push the comparison hint as a fresh message since there was no
+      // live streaming entry.
+      if (variantGroup) {
+        state.history.push({
+          role: "assistant",
+          text: `Generated ${variants} variants — pick one to keep (the others stay in the scrubber).`,
+        });
+      } else {
+        const last = state.history[state.history.length - 1];
+        const firstNew = state.versions[startIdx];
+        const sizeKB = firstNew?.html ? (firstNew.html.length / 1024).toFixed(1) : "0";
+        const label = extractArtifact(results[0]) ? `v${startIdx + 1}` : `v${startIdx + 1} · error`;
+        const footer = `\n\n— **${label}** · ${sizeKB} KB · ${results[0].length.toLocaleString()} chars`;
+        if (last && last._liveFinal) {
+          last.text = (last.text || "") + footer;
+        } else {
+          state.history.push({ role: "assistant", text: footer.trim() });
+        }
+      }
       // Drop references — they were one-shot seeds for this turn.
       state._refs = [];
       renderReferences(host);
@@ -2375,7 +2395,16 @@ document.getElementById('snap').addEventListener('click', async () => {
   }
 
   function renderErrorHTML(rawReply) {
-    return `<!doctype html><html><body style="margin:0;padding:24px;font-family:-apple-system,system-ui,sans-serif;color:#333;background:#fff"><h2 style="margin:0 0 10px">No &lt;antArtifact&gt; in the reply</h2><p style="color:#666;font-size:13px;margin:0 0 12px">The model didn't wrap its output in the expected tag. Raw reply:</p><pre style="background:#f5f5f5;padding:12px;border-radius:6px;font-size:12px;white-space:pre-wrap;overflow:auto;max-height:60vh">${escapeHtml(rawReply)}</pre></body></html>`;
+    const raw = (rawReply || "").trim();
+    const hasBody = raw.length > 0;
+    const body = hasBody
+      ? `<pre style="background:#0d1117;color:#c9d1d9;padding:14px;border-radius:8px;font:12px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap;overflow:auto;max-height:60vh;border:1px solid #1f2937">${escapeHtml(raw)}</pre>`
+      : `<div style="padding:16px;border-radius:8px;background:#0d1117;color:#9ca3af;border:1px solid #1f2937;font:13px/1.55 ui-monospace,Menlo,monospace">The model returned an <b>empty</b> reply. This usually means the prompt triggered a filter, the context was truncated, or the request was interrupted. Try <b>Generate</b> again — or shorten the conversation.</div>`;
+    return `<!doctype html><html><body style="margin:0;padding:28px;font-family:-apple-system,system-ui,sans-serif;color:#e5e7eb;background:#0a0a0a">
+      <h2 style="margin:0 0 6px;font-size:18px;font-weight:600;color:#f87171">No &lt;antArtifact&gt; in the reply</h2>
+      <p style="color:#9ca3af;font-size:13px;margin:0 0 16px">The model didn't wrap its output in the expected tag. ${hasBody ? "Raw reply:" : ""}</p>
+      ${body}
+    </body></html>`;
   }
 
   function escapeHtml(s) {

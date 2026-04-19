@@ -1329,8 +1329,9 @@ body.focus-mode .input-area { max-width: 720px; }
   flex: 1;
   display: flex;
   overflow: hidden;
-  background: #fafafa;
+  background: var(--bg-page);
 }
+[data-theme="light"] .design-canvas { background: #f3f4f6; }
 .design-iframe {
   flex: 1;
   width: 100%;
@@ -1574,6 +1575,7 @@ body.focus-mode .input-area { max-width: 720px; }
 }
 
 /* ===== Design Mode: error bar ============================ */
+.design-error-bar[hidden] { display: none !important; }
 .design-error-bar {
   position: absolute;
   top: 8px;
