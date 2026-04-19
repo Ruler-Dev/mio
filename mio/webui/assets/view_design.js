@@ -42,6 +42,7 @@
     ar:     { label: "AR",        icon: "📦",  addendum: AR_ADDENDUM() },
     shader: { label: "Shader",    icon: "🌈",  addendum: SHADER_ADDENDUM() },
     game:   { label: "Game",      icon: "🎮",  addendum: GAME_ADDENDUM() },
+    cad:    { label: "CAD",       icon: "📐",  addendum: CAD_ADDENDUM() },
   };
 
   function SCENE_ADDENDUM() {
@@ -80,6 +81,37 @@ Ship a single <canvas> filling the viewport + a fullscreen triangle vertex shade
   iResolution (vec3)
   iMouse (vec4)
 Write the fragment shader in GLSL ES 3.00 with \`out vec4 fragColor;\`. Use WebGL2. Include time-animated distance fields, fbm noise, domain warping, polar mappings — produce art, not a solid color. No external libraries. If the user mentions a ShaderToy ID (e.g. "ShaderToy XsXXDn") or pastes a \`mainImage(fragColor, fragCoord)\` function, wrap it in the WebGL2 boilerplate as-is — preserving their logic.`;
+  }
+
+  function CAD_ADDENDUM() {
+    return `\n\nOUTPUT KIND: PARAMETRIC CAD.
+Produce a single-file interactive CAD viewer using JSCAD (functional parametric modeling).
+Import core modules via esm.sh:
+  <script type="importmap">
+  { "imports": {
+      "@jscad/modeling": "https://esm.sh/@jscad/modeling@2",
+      "@jscad/regl-renderer": "https://esm.sh/@jscad/regl-renderer@2"
+  }}
+  </script>
+Layout:
+  - Full-viewport <canvas> on the right for the regl-renderer viewport
+    (orbit + pan + zoom). Dark canvas bg (#18181b), grid-on-floor, axes.
+  - Left 280 px parameter panel with real <input> controls (range, number,
+    checkbox, color) bound to the scene. Each slider re-runs the model
+    and updates the viewport live. Use native <input> + a tiny evented
+    pattern — no frameworks.
+  - Toolbar on top: [Export STL] [Export 3MF] [Reset camera] [Wireframe].
+Model building:
+  - Write the CAD as one function \`build(params)\` returning a single
+    geometry (primitives + booleans + transforms + extrudeLinear/Rotate).
+  - Prefer additive composition (union / subtract / intersect) with
+    clear named sub-parts.
+  - Export via \`stlSerializer.serialize({ binary: true }, geom)\` from
+    @jscad/io (also via esm.sh) and trigger a Blob download.
+  - Parameters must include realistic defaults so the viewer shows a
+    finished object on load, not an empty scene.
+Prefer JSCAD over OpenSCAD-WASM unless the user explicitly asks for
+.scad syntax — JSCAD is lighter, pure JS, and renders instantly.`;
   }
 
   function GAME_ADDENDUM() {
@@ -206,6 +238,7 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
             <button class="design-kind" data-kind="ar"     title="&lt;model-viewer&gt; — iOS Quick Look + Android Scene Viewer">📦 AR</button>
             <button class="design-kind" data-kind="shader" title="Full-screen ShaderToy-style fragment shader">🌈 Shader</button>
             <button class="design-kind" data-kind="game"   title="Playable kaboom.js game prototype">🎮 Game</button>
+            <button class="design-kind" data-kind="cad"    title="Parametric CAD (JSCAD) with sliders + STL export">📐 CAD</button>
           </div>
           <div class="design-history" id="design-history"></div>
           <div class="design-composer">
