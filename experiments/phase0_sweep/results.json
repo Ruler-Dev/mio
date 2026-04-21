@@ -1,0 +1,260 @@
+{
+  "rows": [
+    {
+      "ctx": 2048,
+      "pq_bits": 4,
+      "chunk_size": 8,
+      "prefill_ms": 1441.010666,
+      "gen_tps": 147.43630638444435,
+      "accept": 7.285714285714286
+    },
+    {
+      "ctx": 4096,
+      "pq_bits": 4,
+      "chunk_size": 8,
+      "prefill_ms": 2868.900209,
+      "gen_tps": 131.05584553606982,
+      "accept": 6.8
+    },
+    {
+      "ctx": 8192,
+      "pq_bits": 4,
+      "chunk_size": 8,
+      "prefill_ms": 6055.743750000001,
+      "gen_tps": 121.70720938430286,
+      "accept": 6.866666666666666
+    },
+    {
+      "ctx": 16384,
+      "pq_bits": 4,
+      "chunk_size": 8,
+      "prefill_ms": 13440.965084,
+      "gen_tps": 100.21072094241947,
+      "accept": 6.8
+    },
+    {
+      "ctx": 2048,
+      "pq_bits": 4,
+      "chunk_size": 16,
+      "prefill_ms": 1701.6142089999998,
+      "gen_tps": 145.10761523564423,
+      "accept": 7.285714285714286
+    },
+    {
+      "ctx": 4096,
+      "pq_bits": 4,
+      "chunk_size": 16,
+      "prefill_ms": 3257.7162089999997,
+      "gen_tps": 130.1759083384144,
+      "accept": 6.8
+    },
+    {
+      "ctx": 8192,
+      "pq_bits": 4,
+      "chunk_size": 16,
+      "prefill_ms": 6415.6985,
+      "gen_tps": 122.31783383738765,
+      "accept": 6.866666666666666
+    },
+    {
+      "ctx": 16384,
+      "pq_bits": 4,
+      "chunk_size": 16,
+      "prefill_ms": 12525.191458000001,
+      "gen_tps": 104.69880808889003,
+      "accept": 6.8
+    },
+    {
+      "ctx": 2048,
+      "pq_bits": 4,
+      "chunk_size": 32,
+      "prefill_ms": 1542.079333,
+      "gen_tps": 145.6266062240214,
+      "accept": 7.285714285714286
+    },
+    {
+      "ctx": 4096,
+      "pq_bits": 4,
+      "chunk_size": 32,
+      "prefill_ms": 2950.001167,
+      "gen_tps": 130.82364283916436,
+      "accept": 6.8
+    },
+    {
+      "ctx": 8192,
+      "pq_bits": 4,
+      "chunk_size": 32,
+      "prefill_ms": 6059.378875,
+      "gen_tps": 122.58210881597677,
+      "accept": 6.866666666666666
+    },
+    {
+      "ctx": 16384,
+      "pq_bits": 4,
+      "chunk_size": 32,
+      "prefill_ms": 12801.233666,
+      "gen_tps": 101.33010243649555,
+      "accept": 6.8
+    },
+    {
+      "ctx": 2048,
+      "pq_bits": 4,
+      "chunk_size": 64,
+      "prefill_ms": 1658.111416,
+      "gen_tps": 142.05690369250593,
+      "accept": 7.285714285714286
+    },
+    {
+      "ctx": 4096,
+      "pq_bits": 4,
+      "chunk_size": 64,
+      "prefill_ms": 3237.6872089999993,
+      "gen_tps": 127.33346517708924,
+      "accept": 6.8
+    },
+    {
+      "ctx": 8192,
+      "pq_bits": 4,
+      "chunk_size": 64,
+      "prefill_ms": 6515.876292000001,
+      "gen_tps": 119.94287002608439,
+      "accept": 6.866666666666666
+    },
+    {
+      "ctx": 16384,
+      "pq_bits": 4,
+      "chunk_size": 64,
+      "prefill_ms": 13099.017834000002,
+      "gen_tps": 101.84147539336269,
+      "accept": 6.8
+    },
+    {
+      "ctx": 2048,
+      "pq_bits": 16,
+      "chunk_size": 8,
+      "prefill_ms": 1692.7885840000001,
+      "gen_tps": 135.8540776844195,
+      "accept": 7.285714285714286
+    },
+    {
+      "ctx": 4096,
+      "pq_bits": 16,
+      "chunk_size": 8,
+      "prefill_ms": 3539.224375,
+      "gen_tps": 120.13603045284668,
+      "accept": 6.8
+    },
+    {
+      "ctx": 8192,
+      "pq_bits": 16,
+      "chunk_size": 8,
+      "prefill_ms": 7760.041458,
+      "gen_tps": 106.66004867010798,
+      "accept": 6.8
+    },
+    {
+      "ctx": 16384,
+      "pq_bits": 16,
+      "chunk_size": 8,
+      "prefill_ms": 18119.341625,
+      "gen_tps": 73.80221090133125,
+      "accept": 6.8
+    },
+    {
+      "ctx": 2048,
+      "pq_bits": 16,
+      "chunk_size": 16,
+      "prefill_ms": 1607.23525,
+      "gen_tps": 139.19393626943548,
+      "accept": 7.285714285714286
+    },
+    {
+      "ctx": 4096,
+      "pq_bits": 16,
+      "chunk_size": 16,
+      "prefill_ms": 3553.2145839999994,
+      "gen_tps": 120.229650513767,
+      "accept": 6.8
+    },
+    {
+      "ctx": 8192,
+      "pq_bits": 16,
+      "chunk_size": 16,
+      "prefill_ms": 7865.800833,
+      "gen_tps": 106.81545419917425,
+      "accept": 6.8
+    },
+    {
+      "ctx": 16384,
+      "pq_bits": 16,
+      "chunk_size": 16,
+      "prefill_ms": 18112.212917,
+      "gen_tps": 75.25700594012638,
+      "accept": 6.8
+    },
+    {
+      "ctx": 2048,
+      "pq_bits": 16,
+      "chunk_size": 32,
+      "prefill_ms": 1624.170541,
+      "gen_tps": 139.07455986423594,
+      "accept": 7.285714285714286
+    },
+    {
+      "ctx": 4096,
+      "pq_bits": 16,
+      "chunk_size": 32,
+      "prefill_ms": 3584.6567919999998,
+      "gen_tps": 120.93756247803498,
+      "accept": 6.8
+    },
+    {
+      "ctx": 8192,
+      "pq_bits": 16,
+      "chunk_size": 32,
+      "prefill_ms": 7856.211375000001,
+      "gen_tps": 106.6855632580124,
+      "accept": 6.8
+    },
+    {
+      "ctx": 16384,
+      "pq_bits": 16,
+      "chunk_size": 32,
+      "prefill_ms": 18125.161208999998,
+      "gen_tps": 74.57861028801995,
+      "accept": 6.8
+    },
+    {
+      "ctx": 2048,
+      "pq_bits": 16,
+      "chunk_size": 64,
+      "prefill_ms": 1596.342792,
+      "gen_tps": 140.30053097377078,
+      "accept": 7.285714285714286
+    },
+    {
+      "ctx": 4096,
+      "pq_bits": 16,
+      "chunk_size": 64,
+      "prefill_ms": 3514.203458,
+      "gen_tps": 121.72240176936616,
+      "accept": 6.8
+    },
+    {
+      "ctx": 8192,
+      "pq_bits": 16,
+      "chunk_size": 64,
+      "prefill_ms": 7761.403292000001,
+      "gen_tps": 107.00375888773912,
+      "accept": 6.8
+    },
+    {
+      "ctx": 16384,
+      "pq_bits": 16,
+      "chunk_size": 64,
+      "prefill_ms": 17940.839541,
+      "gen_tps": 75.14215304129836,
+      "accept": 6.8
+    }
+  ]
+}
