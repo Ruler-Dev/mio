@@ -18,7 +18,23 @@
   - Frozen KV (C3): 326× (4K) → 1734× (32K) warm-vs-cold prefill speedup on sort_bug.
   - DDTree (ddtree-mlx port): 0.03–0.42× vs baseline — does not work on hybrid model, killed after 3 cells.
 
-## Phase 0 complete — awaiting Federico gate-review
+## Latest state
+
+**Phase 4 (Path C productization) in progress.** All Phase 1-3 research landed positive: 5 of 10 attention layers in Qwen3.6-35B-A3B are fully spliceable with byte-exact output preservation. Projected prefill speedup: **12% at 4K → 22% at 32K**, scaling with context size.
+
+Branch: `prefill-research`. Never merged to main (user direction).
+
+## Path C results summary
+
+- **Phase 1 (K_base context-robustness):** 4/4 candidate chunks pass splice-safety threshold. Early attention layers (L3-L11) nearly context-invariant.
+- **Phase 2 (RoPE math):** implementation sanity bit-exact (rel RMSE 0.0005). Splice error scales with layer depth, matching Phase 1 variance under sqrt transformation.
+- **Phase 3 end-to-end:** K=1 single-layer splice preserves semantic output (paraphrase drift on tied logits). **K=5 splice [L3,L7,L11,L15,L19] produces byte-exact match with fresh baseline.** K=6+ adding L23 breaks it — structural boundary at mid-point of attention stack.
+
+Full writeup: `docs/theories/path_c_results.md`.
+
+## Prior phase history
+
+**Phase 0 complete — baselines locked.**
 
 **Phase 0 deliverables shipped:**
 - `tools/profile_prefill.py` — per-layer wall-clock profiler (class-level patching with id-keyed slot map so it works under MLX's method-resolution).
