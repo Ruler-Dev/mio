@@ -340,6 +340,231 @@ def common_prefix_fingerprints(
     return results
 
 
+def bundle_freeze(
+    *,
+    target_cache: list[Any],
+    draft_cache: list[Any],
+    target_hidden: Optional[mx.array],
+    offset: int,
+    prompt_tokens: list[int],
+    prefix_len: int,
+    model_id: str,
+    pq_bits: int,
+    tq_bits: int,
+    ctx_window: int,
+    base_dir: Optional[Path] = None,
+) -> Path:
+    """Freeze the full warm_state envelope to disk.
+
+    The envelope matches the shape mio's runtime consumes:
+        {"target_cache": [...], "draft_cache": [...],
+         "target_hidden": mx.array | None, "offset": int}
+
+    Unlike `freeze()` (which handles any cache list exposing .state), this
+    function also serializes the draft-side caches — which are custom
+    ContextOnlyDraftKVCache objects that don't implement .state — by
+    pulling (keys, values, offset, sink_size, window_size) out directly.
+    """
+    fp = fingerprint(
+        prompt_tokens,
+        prefix_len=prefix_len,
+        model_id=model_id,
+        pq_bits=pq_bits,
+        tq_bits=tq_bits,
+        ctx_window=ctx_window,
+    )
+    target = _bundle_path(fp, base_dir)
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    # --- target side: same pattern as freeze() ---
+    target_state_list = [c.state for c in target_cache]
+    target_flat = tree_flatten(target_state_list)
+    arrays: dict[str, mx.array] = {}
+    for name, value in target_flat:
+        if not isinstance(value, mx.array):
+            raise ValueError(f"non-array in target cache state at {name}")
+        arrays[f"target/{name}"] = value
+    target_meta_states = [_serialize_meta_state(c) for c in target_cache]
+    target_classes = [type(c).__name__ for c in target_cache]
+
+    # --- draft side: explicit per-layer extraction ---
+    draft_info: list[dict] = []
+    for i, dc in enumerate(draft_cache):
+        if dc.keys is not None and dc.values is not None:
+            arrays[f"draft/layer{i}/keys"] = dc.keys
+            arrays[f"draft/layer{i}/values"] = dc.values
+            has_state = True
+        else:
+            has_state = False
+        draft_info.append(
+            {
+                "has_state": has_state,
+                "sink_size": int(dc.sink_size),
+                "window_size": int(dc.window_size),
+                "offset": int(dc.offset or 0),
+            }
+        )
+
+    # --- target_hidden ---
+    if target_hidden is not None:
+        arrays["target_hidden"] = target_hidden
+
+    metadata = {
+        "mio_frozen_kv_version": str(FROZEN_KV_VERSION),
+        "bundle_format_version": "1",
+        "model_id": model_id,
+        "pq_bits": str(int(pq_bits)),
+        "tq_bits": str(int(tq_bits)),
+        "ctx_window": str(int(ctx_window)),
+        "prefix_len": str(int(prefix_len)),
+        "offset": str(int(offset)),
+        "token_hash": fp,
+        "created_at": str(int(time.time())),
+        "target_classes": json.dumps(target_classes),
+        "target_meta_states": json.dumps(target_meta_states),
+        "draft_layer_count": str(len(draft_cache)),
+        "draft_info": json.dumps(draft_info),
+        "has_target_hidden": str(bool(target_hidden is not None)),
+    }
+
+    tmp_stem = target.with_name(f".{target.stem}.tmp")
+    mx.save_safetensors(str(tmp_stem), arrays, metadata)
+    written = tmp_stem.with_suffix(tmp_stem.suffix + ".safetensors")
+    os.replace(written, target)
+    return target
+
+
+def bundle_try_load(
+    *,
+    target_template: list[Any],
+    draft_template: list[Any],
+    prompt_tokens: list[int],
+    prefix_len: int,
+    model_id: str,
+    pq_bits: int,
+    tq_bits: int,
+    ctx_window: int,
+    base_dir: Optional[Path] = None,
+) -> Optional[dict]:
+    """Load a bundled warm_state or return None.
+
+    Returns a dict shaped like mio's runtime warm_state:
+        {"target_cache": [...], "draft_cache": [...],
+         "target_hidden": mx.array | None, "offset": int}
+
+    On any mismatch, corruption, or version skew, returns None.
+    Templates are mutated in-place; caller owns them after success.
+    """
+    try:
+        fp = fingerprint(
+            prompt_tokens,
+            prefix_len=prefix_len,
+            model_id=model_id,
+            pq_bits=pq_bits,
+            tq_bits=tq_bits,
+            ctx_window=ctx_window,
+        )
+    except (ValueError, TypeError):
+        return None
+
+    target = _bundle_path(fp, base_dir)
+    if not target.exists():
+        return None
+    try:
+        arrays, metadata = mx.load(str(target), return_metadata=True)
+    except Exception:
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    if metadata.get("mio_frozen_kv_version") != str(FROZEN_KV_VERSION):
+        return None
+    if metadata.get("bundle_format_version") != "1":
+        return None
+    if metadata.get("token_hash") != fp:
+        return None
+    if metadata.get("prefix_len") != str(int(prefix_len)):
+        return None
+    if metadata.get("model_id") != model_id:
+        return None
+    if metadata.get("pq_bits") != str(int(pq_bits)):
+        return None
+    if metadata.get("tq_bits") != str(int(tq_bits)):
+        return None
+    if metadata.get("ctx_window") != str(int(ctx_window)):
+        return None
+
+    # --- target side ---
+    try:
+        target_classes = json.loads(metadata.get("target_classes", "[]"))
+        target_meta_states = json.loads(metadata.get("target_meta_states", "[]"))
+        live_classes = [type(c).__name__ for c in target_template]
+        if target_classes != live_classes:
+            return None
+        if len(target_meta_states) != len(target_template):
+            return None
+    except Exception:
+        return None
+
+    # Pull out target/ prefix arrays, strip the prefix, unflatten.
+    target_arrays = {
+        k[len("target/"):]: v for k, v in arrays.items() if k.startswith("target/")
+    }
+    try:
+        target_state_list = tree_unflatten(list(target_arrays.items()))
+        if not isinstance(target_state_list, list):
+            return None
+        if len(target_state_list) != len(target_template):
+            return None
+        for cache, state, serialized_meta in zip(
+            target_template, target_state_list, target_meta_states, strict=True
+        ):
+            _install_state(cache, state, serialized_meta)
+    except Exception:
+        return None
+
+    # --- draft side ---
+    try:
+        draft_info = json.loads(metadata.get("draft_info", "[]"))
+        if not isinstance(draft_info, list):
+            return None
+        if len(draft_info) != len(draft_template):
+            return None
+        for i, (dc, info) in enumerate(
+            zip(draft_template, draft_info, strict=True)
+        ):
+            dc.sink_size = int(info["sink_size"])
+            dc.window_size = int(info["window_size"])
+            dc.offset = int(info["offset"])
+            if info.get("has_state"):
+                keys = arrays.get(f"draft/layer{i}/keys")
+                values = arrays.get(f"draft/layer{i}/values")
+                if keys is None or values is None:
+                    return None
+                dc.keys = keys
+                dc.values = values
+            else:
+                dc.keys = None
+                dc.values = None
+    except Exception:
+        return None
+
+    # --- target_hidden ---
+    has_hidden = metadata.get("has_target_hidden", "False") == "True"
+    target_hidden = arrays.get("target_hidden") if has_hidden else None
+
+    return {
+        "target_cache": target_template,
+        "draft_cache": draft_template,
+        "target_hidden": target_hidden,
+        "offset": int(metadata.get("offset", prefix_len)),
+    }
+
+
+def _bundle_path(fp: str, base_dir: Optional[Path] = None) -> Path:
+    base = Path(base_dir) if base_dir is not None else DEFAULT_DIR
+    return base / f"bundle-{fp}.safetensors"
+
+
 def prune_cache_dir(
     base_dir: Optional[Path] = None,
     *,

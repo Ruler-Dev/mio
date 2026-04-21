@@ -458,6 +458,122 @@ def test_engine_frozen_kv_roundtrip_with_synthetic_cache(tmp_path: Path, monkeyp
         assert live.offset == orig.offset
 
 
+def test_bundle_freeze_then_load_roundtrip(tmp_path: Path):
+    """Full warm_state envelope round-trip: target + draft + hidden."""
+    from mio.dflash.model import ContextOnlyDraftKVCache
+    from mio.frozen_kv import bundle_freeze, bundle_try_load
+
+    cfg = _canonical_config()
+    tokens = list(range(2048))
+
+    # Synthesize a warm_state as the runtime would produce it.
+    target_cache = [_kv_cache_with(n_tokens=128) for _ in range(3)]
+    draft_cache = [
+        ContextOnlyDraftKVCache(sink_size=64, window_size=256) for _ in range(2)
+    ]
+    draft_cache[0].keys = mx.random.normal((1, 2, 32, 8))
+    draft_cache[0].values = mx.random.normal((1, 2, 32, 8))
+    draft_cache[0].offset = 32
+    # Leave draft_cache[1] empty (keys/values = None, offset = 0).
+    target_hidden = mx.random.normal((1, 128, 16))
+
+    path = bundle_freeze(
+        target_cache=target_cache,
+        draft_cache=draft_cache,
+        target_hidden=target_hidden,
+        offset=128,
+        prompt_tokens=tokens,
+        prefix_len=1024,
+        base_dir=tmp_path,
+        **cfg,
+    )
+    assert path.exists()
+
+    # Fresh templates, simulate what engine.py would build.
+    fresh_target = [mlx_cache.KVCache() for _ in range(3)]
+    fresh_draft = [
+        ContextOnlyDraftKVCache(sink_size=1, window_size=1) for _ in range(2)
+    ]
+
+    loaded = bundle_try_load(
+        target_template=fresh_target,
+        draft_template=fresh_draft,
+        prompt_tokens=tokens,
+        prefix_len=1024,
+        base_dir=tmp_path,
+        **cfg,
+    )
+    assert loaded is not None
+    assert loaded["target_cache"] is fresh_target  # mutated in-place
+    assert loaded["draft_cache"] is fresh_draft
+    assert loaded["offset"] == 128
+    assert loaded["target_hidden"] is not None
+    assert loaded["target_hidden"].shape == target_hidden.shape
+
+    # Target caches match.
+    for live, orig in zip(fresh_target, target_cache, strict=True):
+        assert live.offset == orig.offset
+        assert _states_equal(live.state, orig.state)
+
+    # Draft state restored correctly per layer.
+    assert fresh_draft[0].sink_size == 64
+    assert fresh_draft[0].window_size == 256
+    assert fresh_draft[0].offset == 32
+    assert fresh_draft[0].keys is not None
+    assert bool(mx.all(fresh_draft[0].keys == draft_cache[0].keys).item())
+    assert fresh_draft[0].values is not None
+    assert bool(mx.all(fresh_draft[0].values == draft_cache[0].values).item())
+    # Empty draft layer restored as empty (not leaking template defaults).
+    assert fresh_draft[1].keys is None
+    assert fresh_draft[1].values is None
+    assert fresh_draft[1].offset == 0
+
+
+def test_bundle_try_load_returns_none_on_draft_count_mismatch(tmp_path: Path):
+    from mio.dflash.model import ContextOnlyDraftKVCache
+    from mio.frozen_kv import bundle_freeze, bundle_try_load
+
+    cfg = _canonical_config()
+    tokens = list(range(512))
+    bundle_freeze(
+        target_cache=[_kv_cache_with(n_tokens=32)],
+        draft_cache=[
+            ContextOnlyDraftKVCache(sink_size=8, window_size=16) for _ in range(2)
+        ],
+        target_hidden=None,
+        offset=32,
+        prompt_tokens=tokens,
+        prefix_len=128,
+        base_dir=tmp_path,
+        **cfg,
+    )
+    # Try to load with only ONE draft layer → mismatch.
+    loaded = bundle_try_load(
+        target_template=[mlx_cache.KVCache()],
+        draft_template=[ContextOnlyDraftKVCache(sink_size=1, window_size=1)],
+        prompt_tokens=tokens,
+        prefix_len=128,
+        base_dir=tmp_path,
+        **cfg,
+    )
+    assert loaded is None
+
+
+def test_bundle_try_load_returns_none_on_no_file(tmp_path: Path):
+    from mio.dflash.model import ContextOnlyDraftKVCache
+    from mio.frozen_kv import bundle_try_load
+
+    cfg = _canonical_config()
+    assert bundle_try_load(
+        target_template=[mlx_cache.KVCache()],
+        draft_template=[ContextOnlyDraftKVCache(sink_size=1, window_size=1)],
+        prompt_tokens=list(range(256)),
+        prefix_len=128,
+        base_dir=tmp_path,
+        **cfg,
+    ) is None
+
+
 def test_version_bump_invalidates(tmp_path: Path, monkeypatch):
     """If FROZEN_KV_VERSION is bumped, existing snapshots stop loading."""
     cfg = _canonical_config()

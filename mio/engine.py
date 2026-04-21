@@ -250,6 +250,102 @@ class MioEngine:
             "ctx_window": int(tc.context_window),
         }
 
+    def _frozen_kv_build_templates(self) -> tuple[list, list] | None:
+        """Construct fresh (target_cache, draft_cache) templates for load.
+
+        Mirrors what generate_dflash_once does internally so bundle_try_load
+        has the right cache types + sizes to install state into. Returns
+        None if the engine is missing the pieces (unloaded, no draft).
+        """
+        if not self._loaded or self._draft_model is None:
+            return None
+        from mio.dflash.runtime import make_target_cache, _resolve_draft_window
+        from mio.dflash.model import ContextOnlyDraftKVCache
+
+        tq_bits = self._resolved_tq_bits()
+        pq_bits = self._resolved_pq_bits()
+        target_cache = make_target_cache(
+            self._target_model,
+            enable_speculative_linear_cache=True,
+            quantize_kv_cache=False,
+            tq_bits=tq_bits,
+            pq_bits=pq_bits,
+        )
+        sink, window = _resolve_draft_window()
+        draft_cache = [
+            ContextOnlyDraftKVCache(sink_size=sink, window_size=window)
+            for _ in range(len(self._draft_model.layers))
+        ]
+        return target_cache, draft_cache
+
+    def _frozen_kv_lookup(self, prompt_tokens: list[int]) -> dict | None:
+        """Try to load a frozen warm_state for prompt_tokens. None on miss."""
+        if not self._frozen_kv_enabled():
+            return None
+        tpls = self._frozen_kv_build_templates()
+        if tpls is None:
+            return None
+        target_tpl, draft_tpl = tpls
+        prefix_len = self._frozen_kv_prefix_len()
+        if prefix_len >= len(prompt_tokens):
+            return None
+        from mio.frozen_kv import bundle_try_load
+        cfg = self._frozen_kv_config()
+        return bundle_try_load(
+            target_template=target_tpl,
+            draft_template=draft_tpl,
+            prompt_tokens=prompt_tokens,
+            prefix_len=prefix_len,
+            base_dir=self._frozen_kv_base_dir(),
+            **cfg,
+        )
+
+    def _frozen_kv_store(
+        self,
+        prompt_tokens: list[int],
+        summary: dict | None,
+    ) -> None:
+        """Freeze the prefix-length slice of `summary`'s final_state to disk.
+
+        Called after a cold prefill. Silently no-ops when: feature is off,
+        summary missing final_state, prompt shorter than prefix_len, or on
+        any I/O error.
+        """
+        if not self._frozen_kv_enabled():
+            return
+        if not isinstance(summary, dict):
+            return
+        final = summary.get("final_state")
+        if not isinstance(final, dict):
+            return
+        target_cache = final.get("target_cache")
+        draft_cache = final.get("draft_cache")
+        if target_cache is None or draft_cache is None:
+            return
+        prefix_len = self._frozen_kv_prefix_len()
+        if prefix_len >= len(prompt_tokens):
+            return
+        # Only freeze when the cache is at least prefix_len deep; otherwise
+        # we'd be serializing tokens we don't actually have.
+        first = target_cache[0] if target_cache else None
+        if first is None or int(getattr(first, "offset", 0) or 0) < prefix_len:
+            return
+        try:
+            from mio.frozen_kv import bundle_freeze
+            bundle_freeze(
+                target_cache=target_cache,
+                draft_cache=draft_cache,
+                target_hidden=final.get("target_hidden"),
+                offset=prefix_len,
+                prompt_tokens=prompt_tokens,
+                prefix_len=prefix_len,
+                base_dir=self._frozen_kv_base_dir(),
+                **self._frozen_kv_config(),
+            )
+        except Exception:
+            # Never fail a generate() call because the freeze misbehaved.
+            pass
+
     @staticmethod
     def _prepare_ddtree_env() -> None:
         """Force exact-commit mode so DDTree works with any KV cache type.
@@ -607,6 +703,11 @@ class MioEngine:
             warm_state = None
             if self._prefix_cache_enabled():
                 warm_state = self._prefix_cache_lookup(prompt_tokens)
+            # Frozen KV falls in AFTER the in-memory prefix cache (which is
+            # more up-to-date if present) but BEFORE cold prefill.
+            if warm_state is None:
+                warm_state = self._frozen_kv_lookup(prompt_tokens)
+            cold_prefill = warm_state is None
             result = generate_dflash_once(
                 target_model=self._target_model,
                 tokenizer=self._tokenizer,
@@ -620,9 +721,12 @@ class MioEngine:
                 tq_bits=tq_bits,
                 pq_bits=pq_bits,
                 warm_state=warm_state,
+                return_final_state=cold_prefill and self._frozen_kv_enabled(),
             )
             if self._prefix_cache_enabled():
                 self._prefix_cache_store(prompt_tokens, result)
+            if cold_prefill:
+                self._frozen_kv_store(prompt_tokens, result)
         else:
             from mio.dflash.runtime import generate_baseline_once
             result = generate_baseline_once(
@@ -686,6 +790,9 @@ class MioEngine:
         warm_state = None
         if ddtree_budget == 0 and self._prefix_cache_enabled():
             warm_state = self._prefix_cache_lookup(prompt_tokens)
+        if ddtree_budget == 0 and warm_state is None:
+            warm_state = self._frozen_kv_lookup(prompt_tokens)
+        stream_cold_prefill = warm_state is None
 
         if ddtree_budget > 0:
             self._prepare_ddtree_env()
@@ -771,4 +878,6 @@ class MioEngine:
                 self._last_metrics = metrics
                 if self._prefix_cache_enabled():
                     self._prefix_cache_store(prompt_tokens, event)
+                if stream_cold_prefill:
+                    self._frozen_kv_store(prompt_tokens, event)
                 yield "", metrics
