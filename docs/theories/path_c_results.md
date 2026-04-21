@@ -191,3 +191,78 @@ simply not enough saved attention compute to amortize the splice-hook plumbing.
 
 **Do not merge** until we have a measured win on a realistic scenario. Byte-exact quality alone is not
 enough — the plumbing cost must be paid back.
+
+## Phase 4.6 — realistic chunk-size sweep + in-place overlay (2026-04-21)
+
+### Chunk-size sweep at 8K context
+
+Tool-def-flavored chunks (JSON schema) built to four target sizes, placed at the middle of an ~8K
+context, large-moe tier, DFlash on, 32-token generation.
+
+**With per-size warmup (`v2`, concat-heavy splice, baseline):**
+
+| chunk | frac | fresh_ms | splice_ms | Δ | lcp | SHA |
+|---:|---:|---:|---:|---:|---:|:---:|
+| 133 | 1.65% | 5261 | 5362 | −1.9% | 1.00 | MATCH |
+| 257 | 3.20% | 5442 | 5457 | −0.3% | 1.00 | MATCH |
+| 508 | 6.28% | 5740 | 5865 | −2.2% | 1.00 | MATCH |
+| 1010 | 12.54% | 5812 | 8493 | −46.1% † | 1.00 | MATCH |
+
+† The 1010-token splice run had gen=7.4 t/s (vs 47.9 baseline); a different run of the same bench (`v1`)
+had the opposite pattern (fresh slow, splice fast — +36.7%). At 1K-token chunks a single trial per cell
+is too noisy to read: measured variance across 3 runs is ±3 s on a ~6 s baseline. Smaller chunk sizes
+are stable to ±2%.
+
+**With in-place overlay splice (`v3`, this commit):**
+
+| chunk | frac | fresh_ms | splice_ms | Δ | lcp | SHA |
+|---:|---:|---:|---:|---:|---:|:---:|
+| 133 | 1.65% | 5300 | 5400 | −1.9% | 1.00 | MATCH |
+| 257 | 3.20% | 5807 | 5890 | −1.4% | 1.00 | MATCH |
+| 508 | 6.28% | 6110 | 6154 | −0.7% | 1.00 | MATCH |
+| 1010 | 12.54% | 7332 | 8244 | −12.4% † | 1.00 | MATCH |
+
+### What changed in the overlay splice
+
+Before: `y.reshape(B, L, n_kv, d_h).transpose(0, 2, 1, 3)` then per-site
+`mx.concatenate([pre, spliced, post], axis=2)` then `.transpose(0, 2, 1, 3).reshape(B, L, total)`.
+Each big transpose is a physical copy of the full sequence tensor; with 5 layers × 2 projections that
+was 20 full-sequence copies per prefill.
+
+After: operate directly on `(B, L, total)`. The stored `(n_kv, chunk_len, d_h)` spliced block is
+transposed to `(chunk_len, n_kv, d_h)` and reshaped to `(chunk_len, total)` — a *small* tensor
+operation. Then a single `mx.concatenate([y[:, :start, :], spliced, y[:, end:, :]], axis=1)` per
+projection. Multi-site support via single-pass partition (sorted sites, interleaved segments, one
+concat).
+
+Net result: the two big transposes are eliminated; the remaining concat is equivalent to the old
+concat; plumbing cost now scales with chunk size, not sequence length. Quality unchanged — all 4 chunk
+sizes still SHA-match byte-exact.
+
+At 508 tokens (the largest stable data point), the overlay recovers 1.5 pp (−2.2% → −0.7%), consistent
+with "fewer full-sequence copies." The effect is small because plumbing overhead at 8K is already small.
+
+### Where Path C stands
+
+- **Quality is solved.** Byte-exact output across chunk sizes 39 → 1011, context positions 4K / 8K /
+  12K of 15K, and two splice implementations. The research hypothesis from Phase 3 holds at scale.
+- **Speed is a wash at the sizes we've tested.** The Phase 3 projection of +12 to +22% speedup was
+  derived from attention's share of prefill — i.e. the ceiling if splice plumbing were free. Measured
+  overhead eats the savings at 1.6–6% chunk coverage; at 12.5% coverage the signal is lost in run-to-
+  run variance.
+- **Measurement is the next bottleneck, not the technique.** A single trial per cell doesn't tell us
+  whether a +36% or −46% result on the same bench is the truth. Need median-of-N (N ≥ 5) at the
+  critical chunk sizes before we can claim anything about 1K+ chunks.
+
+### Action items (Phase 4.7)
+
+1. **Median-of-N bench harness** — run each (chunk size, position) cell N=5 times, report median and
+   p10/p90. Only then can we detect real effects < 5% against the measured ±50% run-to-run variance at
+   1K tokens.
+2. **Profile the 1K-chunk variance source** — is it thermal? prefix-cache state after ingest? MLX
+   kernel cache? `mx.metal.start_capture` / `powermetrics` during the 1011-token run would identify the
+   source.
+3. **Multi-chunk bench** — real prompts have 3–5 reusable chunks (system preamble, tool defs, retrieved
+   docs). Aggregate coverage of 30–50% should make the attention savings exceed plumbing regardless of
+   per-chunk-size noise.
+4. **Do not ship**, do not merge. The pipeline is correct; the payoff is not yet demonstrated.

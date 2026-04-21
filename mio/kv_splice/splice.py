@@ -108,27 +108,50 @@ def install_splice_hooks(
         B, L, total = y.shape
         if L < min_L:
             return y  # decode-time call, no splice
-        n_kv = int(attn.num_key_value_heads)
-        d_h = int(attn.head_dim)
-        y_r = y.reshape(B, L, n_kv, d_h).transpose(0, 2, 1, 3)
-        # Apply each site's override.
-        for (_, start, end, k_base, v) in layer_payload[li]:
+        entries = layer_payload[li]
+        if not entries:
+            return y
+
+        # In-place overlay: operate directly on y in (B, L, total) shape.
+        # Avoids the two big (B, L, n_kv, d_h) <-> (B, n_kv, L, d_h)
+        # transposes of the naive implementation (each copies the full
+        # sequence). Plumbing cost now scales with chunk size, not context
+        # length, because pre/post are views and only the small spliced
+        # block is materialized.
+        #
+        # Multi-site support: partition y into interleaved segments and
+        # concat once. Sites are non-overlapping by construction (detect
+        # enforces this via the `taken` list), so a single ordered pass
+        # covers every position.
+        entries_sorted = sorted(entries, key=lambda e: e[1])
+        parts = []
+        cursor = 0
+        for (_, start, end, k_base, v) in entries_sorted:
             spliced_full = k_base if is_k else v
-            # Stored chunk may have more tokens than site.chunk_len due to
-            # BPE edge-merging at detection time. Slice to match.
             site_len = end - start
             stored_len = int(spliced_full.shape[1])
             if stored_len < site_len:
-                # Stored has fewer tokens — unlikely but skip safely.
                 continue
-            spliced = spliced_full[:, :site_len, :]
+            # (n_kv, site_len, d_h) -> (site_len, n_kv, d_h) -> (site_len, total)
+            spliced = (
+                spliced_full[:, :site_len, :]
+                .transpose(1, 0, 2)
+                .reshape(site_len, total)
+            )
             spliced = mx.broadcast_to(
-                spliced[None, :, :, :], (B, n_kv, site_len, d_h),
-            ).astype(y_r.dtype)
-            pre = y_r[:, :, :start, :]
-            post = y_r[:, :, end:, :]
-            y_r = mx.concatenate([pre, spliced, post], axis=2)
-        return y_r.transpose(0, 2, 1, 3).reshape(B, L, total)
+                spliced[None, :, :], (B, site_len, total),
+            ).astype(y.dtype)
+            if cursor < start:
+                parts.append(y[:, cursor:start, :])
+            parts.append(spliced)
+            cursor = end
+        if not parts:
+            return y
+        if cursor < L:
+            parts.append(y[:, cursor:, :])
+        if len(parts) == 1:
+            return parts[0]
+        return mx.concatenate(parts, axis=1)
 
     def attn_wrap(original_call):
         def wrapper(self, x, mask=None, cache=None):
