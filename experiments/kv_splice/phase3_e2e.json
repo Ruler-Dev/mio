@@ -1,0 +1,20 @@
+{
+  "chunk_length": 40,
+  "source_chunk_pos": [
+    26,
+    66
+  ],
+  "target_chunk_pos": [
+    79,
+    119
+  ],
+  "fresh_sha": "58e18c2d7b07d4e2",
+  "fresh_text_head": "The statement `from pathlib import Path` imports the `Path` class from Python's standard `pathlib` module, providing an object-oriented interface for handling filesystem paths. This allows developers to manipulate file and directory paths using intuitive methods and operators rather than relying on string concatenation or the older `os.path` functions.\n",
+  "fresh_gen_tps": 51.52143717306632,
+  "splice_sha": "d90772cc6dadf3e2",
+  "splice_text_head": "The statement `from pathlib import Path` imports the `Path` class from Python's standard `pathlib` module, which provides an object-oriented interface for handling filesystem paths. This allows developers to manipulate file and directory paths using intuitive methods and operators rather than relying on string concatenation or the older `os.path` functions.\n",
+  "splice_gen_tps": 61.55092487287857,
+  "lcp": 107,
+  "lcp_fraction": 0.30140845070422534,
+  "verdict": "PARTIAL"
+}

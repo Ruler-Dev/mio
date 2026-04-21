@@ -1,0 +1,80 @@
+{
+  "fresh": {
+    "sha": "58e18c2d7b07d4e2",
+    "text_head": "The statement `from pathlib import Path` imports the `Path` class from Python's standard `pathlib` module, providing an object-oriented interface for handling filesystem paths. This allows developers to manipulate file and directory paths using intuitive methods and operators rather than relying on string concatenation or the older `os.path` functions.\n",
+    "prefill_tps": 907.2382773364595,
+    "gen_tps": 51.60049824409094
+  },
+  "splice_results": {
+    "3": {
+      "layers": [
+        3
+      ],
+      "sha": "1584e8cfbe35f653",
+      "prefill_tps": 982.373456003639,
+      "gen_tps": 62.30312430323004,
+      "lcp": 107,
+      "lcp_fraction": 0.30140845070422534,
+      "verdict": "PARTIAL",
+      "text_head": "The statement `from pathlib import Path` imports the `Path` class from Python's standard `pathlib` module, which provides an object-oriented interface for working with filesystem paths. This allows developers to manipulate file and directory paths using intuitive methods and operators rather than re"
+    },
+    "3,7": {
+      "layers": [
+        3,
+        7
+      ],
+      "sha": "1584e8cfbe35f653",
+      "prefill_tps": 980.0693899942673,
+      "gen_tps": 62.80305985965038,
+      "lcp": 107,
+      "lcp_fraction": 0.30140845070422534,
+      "verdict": "PARTIAL",
+      "text_head": "The statement `from pathlib import Path` imports the `Path` class from Python's standard `pathlib` module, which provides an object-oriented interface for working with filesystem paths. This allows developers to manipulate file and directory paths using intuitive methods and operators rather than re"
+    },
+    "3,7,11": {
+      "layers": [
+        3,
+        7,
+        11
+      ],
+      "sha": "172ba3b30f9f02bd",
+      "prefill_tps": 979.2527806929496,
+      "gen_tps": 68.52829034665878,
+      "lcp": 107,
+      "lcp_fraction": 0.30140845070422534,
+      "verdict": "PARTIAL",
+      "text_head": "The statement `from pathlib import Path` imports the `Path` class from Python's standard `pathlib` module, which provides an object-oriented interface for working with filesystem paths. This allows developers to manipulate file and directory paths using intuitive methods and operators rather than re"
+    },
+    "3,7,11,15": {
+      "layers": [
+        3,
+        7,
+        11,
+        15
+      ],
+      "sha": "1584e8cfbe35f653",
+      "prefill_tps": 972.3361969751962,
+      "gen_tps": 65.42672333173827,
+      "lcp": 107,
+      "lcp_fraction": 0.30140845070422534,
+      "verdict": "PARTIAL",
+      "text_head": "The statement `from pathlib import Path` imports the `Path` class from Python's standard `pathlib` module, which provides an object-oriented interface for working with filesystem paths. This allows developers to manipulate file and directory paths using intuitive methods and operators rather than re"
+    },
+    "3,7,11,15,19": {
+      "layers": [
+        3,
+        7,
+        11,
+        15,
+        19
+      ],
+      "sha": "58e18c2d7b07d4e2",
+      "prefill_tps": 972.0024221227804,
+      "gen_tps": 58.35272681788465,
+      "lcp": 355,
+      "lcp_fraction": 1.0,
+      "verdict": "SHA MATCH",
+      "text_head": "The statement `from pathlib import Path` imports the `Path` class from Python's standard `pathlib` module, providing an object-oriented interface for handling filesystem paths. This allows developers to manipulate file and directory paths using intuitive methods and operators rather than relying on "
+    }
+  }
+}
