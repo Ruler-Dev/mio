@@ -1,0 +1,364 @@
+{
+  "baselines": {
+    "fib_memo": {
+      "text": "```python\ndef fib(n: int) -> int:\n    \"\"\"\n    Compute the n-th Fibonacci number using memoization.\n\n    The Fibonacci sequence is defined as:\n        F(0) = 0\n        F(1) = 1\n        F(n) = F(n-1) + ",
+      "prompt_tokens": 4281,
+      "prefill_ms": 2881.684083,
+      "gen_tps": 189.97251819942906,
+      "accept": 9.846153846153847,
+      "sha": "432f3d5200b571bc"
+    },
+    "binsearch": {
+      "text": "```python\ndef binary_search(arr, target):\n    \"\"\"\n    Perform binary search on a sorted list.\n    \n    Args:\n        arr: A sorted list of comparable elements.\n        target: The element to search fo",
+      "prompt_tokens": 4292,
+      "prefill_ms": 2892.237209,
+      "gen_tps": 154.50387870958306,
+      "accept": 8.0,
+      "sha": "294688e935bee100"
+    },
+    "list_dedupe": {
+      "text": "**Approach:**\nUse a `set` to track seen items for O(1) lookup efficiency. Iterate through the input list, appending items to the result only if they haven't been encountered before, thereby preserving",
+      "prompt_tokens": 4285,
+      "prefill_ms": 2946.519,
+      "gen_tps": 75.92386892293736,
+      "accept": 3.6923076923076925,
+      "sha": "4852de14af5d6ad4"
+    },
+    "class_bst": {
+      "text": "```python\nclass BinarySearchTree:\n    def __init__(self, value=None):\n        self.value = value\n        self.left = None\n        self.right = None\n\n    def insert(self, value: int) -> None:\n        i",
+      "prompt_tokens": 4279,
+      "prefill_ms": 2966.68675,
+      "gen_tps": 172.20569436522888,
+      "accept": 8.727272727272727,
+      "sha": "20f214da8a3225d0"
+    }
+  },
+  "by_K": {
+    "1": {
+      "swapped_layers": [
+        1
+      ],
+      "matches": 0,
+      "avg_lcp": 0.05625,
+      "avg_prefill_delta_ms": 80.04123950000042,
+      "per_prompt": [
+        {
+          "prompt_id": "fib_memo",
+          "prefill_ms": 2956.828958,
+          "gen_tps": 112.1798710432056,
+          "accept": 5.565217391304348,
+          "sha": "3ffa3b8114af41d3",
+          "lcp": 104,
+          "delta_prefill_ms": 75.14487499999996,
+          "text_head": "```python\ndef fib(n: int) -> int:\n    \"\"\"\n    Compute the n-th Fibonacci number using memoization.\n\n    Args:\n        n (int): The index of the Fibonacci sequence to compute.\n\n    Returns:\n        int: The n-th Fibonacci number.\n\n    Examples:\n        >>> fib(0)\n        0\n        >>> fib(1)\n        "
+        },
+        {
+          "prompt_id": "binsearch",
+          "prefill_ms": 2990.926667,
+          "gen_tps": 154.44769997855403,
+          "accept": 7.8125,
+          "sha": "e3ac0cd616259b2b",
+          "lcp": 76,
+          "delta_prefill_ms": 98.68945800000029,
+          "text_head": "```python\ndef binary_search(arr, target):\n    \"\"\"\n    Perform binary search for target in sorted list arr.\n    Returns index of target if found, else -1.\n    \"\"\"\n    left, right = 0, len(arr) - 1\n    while left <= right:\n        mid = (left + right) // 2\n        if arr[mid] == target:\n            re"
+        },
+        {
+          "prompt_id": "list_dedupe",
+          "prefill_ms": 3011.3486250000005,
+          "gen_tps": 108.21024373675256,
+          "accept": 5.470588235294118,
+          "sha": "b539e2e8a9d57ddc",
+          "lcp": 0,
+          "delta_prefill_ms": 64.82962500000076,
+          "text_head": "To remove duplicates while preserving order, we can iterate through the list and keep track of seen items in a set, adding them to the result list only if they haven't been seen before.\n\n```python\ndef dedupe(items):\n    seen = set()\n    result = []\n    for item in items:\n        if item not in seen:"
+        },
+        {
+          "prompt_id": "class_bst",
+          "prefill_ms": 3048.1877500000005,
+          "gen_tps": 80.432938671386,
+          "accept": 4.0,
+          "sha": "4c8d4e5b83cfa442",
+          "lcp": 0,
+          "delta_prefill_ms": 81.50100000000066,
+          "text_head": "Here is a minimal implementation of a Binary Search Tree (Binary Search Tree) in Python.\n\nNote: A standard Binary Search Tree is typically a Binary Search Tree (BST). The term \"BinarySearchTree\" in the prompt is likely a typo for \"Binary Search Tree\". I will implement a standard Binary Search Tree.\n"
+        }
+      ]
+    },
+    "2": {
+      "swapped_layers": [
+        1,
+        2
+      ],
+      "matches": 0,
+      "avg_lcp": 0.0059375,
+      "avg_prefill_delta_ms": 125.23378125000022,
+      "per_prompt": [
+        {
+          "prompt_id": "fib_memo",
+          "prefill_ms": 3033.7161250000004,
+          "gen_tps": 73.53336706995593,
+          "accept": 3.6666666666666665,
+          "sha": "82c766d0cb587f35",
+          "lcp": 19,
+          "delta_prefill_ms": 152.03204200000027,
+          "text_head": "```python\ndef fib(n):\n    \"\"\"\n    Computes the n-th Fibonacci number using memoization.\n\n    Args:\n        n (int): The number to compute.\n\n    Returns:\n        int: The n-th Fibonacci number using memoization.\n\n    Examples:\n        1. fib(5) -> 120\n        2. fib(0) -> 1\n```\n"
+        },
+        {
+          "prompt_id": "binsearch",
+          "prefill_ms": 3006.9872910000004,
+          "gen_tps": 65.95585063950989,
+          "accept": 3.2,
+          "sha": "2e91b894a5fbf5f6",
+          "lcp": 0,
+          "delta_prefill_ms": 114.75008200000048,
+          "text_head": "The code provided provided.\n\nHere is a list of the following Python function `binarysearch(arr, target)` that returns the index of `target` in a sorted list `arr`, or -1 if not found. Include 3 test case calls.\n\n```python\ndef binarysearch(arr, target):\n    \"\"\"\n    # Sort the array\n    sorted_arr = s"
+        },
+        {
+          "prompt_id": "list_dedupe",
+          "prefill_ms": 3033.453417,
+          "gen_tps": 95.9349521690918,
+          "accept": 4.8,
+          "sha": "159b67b651ec9c76",
+          "lcp": 0,
+          "delta_prefill_ms": 86.9344170000004,
+          "text_head": "The provided code contains numerous errors, typos, and typos, and typos, and typos, and typos, and typos, and typos, and typos, and typos, and typos, and typos, and typos, and typos, and typos, and typos, and typos, and typos, and typos, and typos, and typos, and typos, and typos, and ty"
+        },
+        {
+          "prompt_id": "class_bst",
+          "prefill_ms": 3113.9053339999996,
+          "gen_tps": 84.12836279348899,
+          "accept": 4.085106382978723,
+          "sha": "6ee3783be2fafece",
+          "lcp": 0,
+          "delta_prefill_ms": 147.21858399999974,
+          "text_head": "Here is the corrected the provided.\n\nThe code provided in the provided.\n\n```python\nimport hashlib\nimport json\nimport os\nimport time\nfrom dataclasses import dataclass\nfrom pathlib import Path\nfrom typing import Any, Dict, List, Optional\n\n\n@dataclass\nclass CacheEntry:\n    key: str\n    value: Any\n    c"
+        }
+      ]
+    },
+    "3": {
+      "swapped_layers": [
+        1,
+        2,
+        3
+      ],
+      "matches": 0,
+      "avg_lcp": 0.0075,
+      "avg_prefill_delta_ms": 203.37772925000002,
+      "per_prompt": [
+        {
+          "prompt_id": "fib_memo",
+          "prefill_ms": 3078.09825,
+          "gen_tps": 64.86161629502571,
+          "accept": 3.1219512195121952,
+          "sha": "d8a3c8bbf84078c6",
+          "lcp": 14,
+          "delta_prefill_ms": 196.4141669999999,
+          "text_head": "```python\ndef div(n: int) -> None:\n    \"\"\"\n    Calculate the n-th purposeosest number using the n-th purposeosest.\n    Include `n`-th purposese`-th.\n    \"\"\"\n    Calculate the n-th purposese`-test.\n    \"\"\"\n    Calculate the n-th purpose e`-test.\n    \"\"\"\n    Calculate the n-th purpose e`-test.\n    \"\"\""
+        },
+        {
+          "prompt_id": "binsearch",
+          "prefill_ms": 3117.027833,
+          "gen_tps": 79.714594747202,
+          "accept": 3.878787878787879,
+          "sha": "c72f72a9c68c38db",
+          "lcp": 0,
+          "delta_prefill_ms": 224.7906240000002,
+          "text_head": "The provided request is not valid.\n\nThe provided request is not valid.\n\nThe provided request is not valid.\n\nThe provided request is not valid.\n\nThe provided request is not valid.\n\nThe provided request is not valid.\n\nThe provided request is not valid.\n\nThe provided request is not valid.\n\nThe provided"
+        },
+        {
+          "prompt_id": "list_dedupe",
+          "prefill_ms": 3144.590667,
+          "gen_tps": 88.34747771069543,
+          "accept": 4.363636363636363,
+          "sha": "079789b7011f3331",
+          "lcp": 0,
+          "delta_prefill_ms": 198.07166700000016,
+          "text_head": "The provided provided\n\nThe provided\n\nThe provided\n\nThe provided\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe\n\nThe"
+        },
+        {
+          "prompt_id": "class_bst",
+          "prefill_ms": 3160.9212089999996,
+          "gen_tps": 97.34170126028307,
+          "accept": 4.8,
+          "sha": "e937a95f6635bf4b",
+          "lcp": 10,
+          "delta_prefill_ms": 194.2344589999998,
+          "text_head": "```python\nimport heapq\nfrom typing import Any, List, Optional\n\n\nclass InMemory:\n    def __init__(self, capacity: int) -> None:\n        self.capacity = int(capacity)\n        self._store: dict[str, CacheEntry] = {}\n        self._order: list[str] = []\n\n    def get(self, key: str) -> Any | None:\n       "
+        }
+      ]
+    },
+    "5": {
+      "swapped_layers": [
+        1,
+        2,
+        3,
+        10,
+        4
+      ],
+      "matches": 0,
+      "avg_lcp": 0.0,
+      "avg_prefill_delta_ms": 141.51488525000013,
+      "per_prompt": [
+        {
+          "prompt_id": "fib_memo",
+          "prefill_ms": 3056.8817080000003,
+          "gen_tps": 29.061677129486856,
+          "accept": 1.411764705882353,
+          "sha": "6cb29ae21807ca19",
+          "lcp": 0,
+          "delta_prefill_ms": 175.19762500000024,
+          "text_head": "The provided `n` is a valideyuga\n\ndef testows in (a):\n    return a\n"
+        },
+        {
+          "prompt_id": "binsearch",
+          "prefill_ms": 3060.8415,
+          "gen_tps": 21.949364858832297,
+          "accept": 1.1666666666666667,
+          "sha": "6f98d780a060798d",
+          "lcp": 0,
+          "delta_prefill_ms": 168.6042910000001,
+          "text_head": "It is not possible.\n"
+        },
+        {
+          "prompt_id": "list_dedupe",
+          "prefill_ms": 3054.46475,
+          "gen_tps": 53.34713070896724,
+          "accept": 2.526315789473684,
+          "sha": "39a624c831949bac",
+          "lcp": 0,
+          "delta_prefill_ms": 107.94575000000032,
+          "text_head": "The provided `d` is not a validormsg.\n\nThe `d` is not a list\u4fe9 class:\n\n```python\n`\n```python\n`\n```python\n`\n```python\n`\n```\n```\n```\n```\n```\n```\n```\n```\n```\n```\n```\n```\n```\n```\n```\n```\n```\n```\n```\n```\n```\n```\n```\n```\n```\n```\n"
+        },
+        {
+          "prompt_id": "class_bst",
+          "prefill_ms": 3080.9986249999997,
+          "gen_tps": 84.41457604283892,
+          "accept": 4.0,
+          "sha": "fe6d4390b26acc54",
+          "lcp": 0,
+          "delta_prefill_ms": 114.31187499999987,
+          "text_head": "It looksly\n\n```python\nwriteenas\n```\n\n```python\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```\n\n```"
+        }
+      ]
+    },
+    "8": {
+      "swapped_layers": [
+        1,
+        2,
+        3,
+        10,
+        4,
+        6,
+        5,
+        39
+      ],
+      "matches": 0,
+      "avg_lcp": 0.0,
+      "avg_prefill_delta_ms": -60.909458749999885,
+      "per_prompt": [
+        {
+          "prompt_id": "fib_memo",
+          "prefill_ms": 2852.2599999999998,
+          "gen_tps": 29.627373087529623,
+          "accept": 1.368421052631579,
+          "sha": "9d94f10b183031cc",
+          "lcp": 0,
+          "delta_prefill_ms": -29.424083000000337,
+          "text_head": "#\n\nI have a comprehensive LLM (202\n202\n202\n20.\n"
+        },
+        {
+          "prompt_id": "binsearch",
+          "prefill_ms": 2878.641666,
+          "gen_tps": 97.54388803184153,
+          "accept": 4.413793103448276,
+          "sha": "8c20bfc6ae04cbd7",
+          "lcp": 0,
+          "delta_prefill_ms": -13.595542999999907,
+          "text_head": "It is a valid\n```python\nuse the `get` method to return the `get` method to return the `get` method to return the `get` method to return the `get` method to return the `get` method to return the `get` method to return the `get` method to return the `get` method to return the `get` method to the `get`"
+        },
+        {
+          "prompt_id": "list_dedupe",
+          "prefill_ms": 2861.805541,
+          "gen_tps": 80.93665911484933,
+          "accept": 3.6923076923076925,
+          "sha": "688062308a30d0c7",
+          "lcp": 0,
+          "delta_prefill_ms": -84.7134589999996,
+          "text_head": "It is a, in, and, and,):\n    def __init__(self, capacity: int) = None:\n        self._order = []\n\n    def get(self, key: str) -> None:\n        pass = self._order.get(key)\n        if d is None:\n            return None\n        self._order.remove(d); self._order.append(e)\n        return d.value\n\n    def"
+        },
+        {
+          "prompt_id": "class_bst",
+          "prefill_ms": 2850.782,
+          "gen_tps": 23.14623146543468,
+          "accept": 1.1666666666666667,
+          "sha": "445a411ebe12f0e8",
+          "lcp": 0,
+          "delta_prefill_ms": -115.9047499999997,
+          "text_head": "Here is\n1.\n"
+        }
+      ]
+    },
+    "13": {
+      "swapped_layers": [
+        1,
+        2,
+        3,
+        10,
+        4,
+        6,
+        5,
+        39,
+        7,
+        8,
+        9,
+        0,
+        11
+      ],
+      "matches": 0,
+      "avg_lcp": 0.0,
+      "avg_prefill_delta_ms": -389.86326024999994,
+      "per_prompt": [
+        {
+          "prompt_id": "fib_memo",
+          "prefill_ms": 2486.453,
+          "gen_tps": 34.22403958722837,
+          "accept": 1.3473684210526315,
+          "sha": "1f49c7c2d2ee2d62",
+          "lcp": 0,
+          "delta_prefill_ms": -395.2310830000001,
+          "text_head": "from typing import ListordenettoETTO LegislativeITARuseruseruser\nfrom typing import ListVASuser\n    fromVASuser\n    \"\"\"VASuser\nfrom typing import ListVASuser\nfrom typing import ListVASuser\nfrom typing import ListVIDasstuser\nfrom dataclasses import dataclass:\n    def __init__(self, nameuser\n    self."
+        },
+        {
+          "prompt_id": "binsearch",
+          "prefill_ms": 2570.493584,
+          "gen_tps": 36.57164930726912,
+          "accept": 1.471264367816092,
+          "sha": "b3c7e8aa50c13edd",
+          "lcp": 0,
+          "delta_prefill_ms": -321.74362500000007,
+          "text_head": "# Note\n    def reverse Munich Irisuseruser\n    if __nameuser\n    if __\n    #ones Jeudi Lumpur\u5df4user\n    if __\n    #thinkuser\n    if __\n    printuser\n    if __\n    printuser\n    if __\n        printuser\n    if __\n        printuser\n    if __\n        if __\n            if __\n            if __\n            "
+        },
+        {
+          "prompt_id": "list_dedupe",
+          "prefill_ms": 2552.303167,
+          "gen_tps": 50.32005652661734,
+          "accept": 2.0425531914893615,
+          "sha": "cc69e921af5e458c",
+          "lcp": 0,
+          "delta_prefill_ms": -394.21583299999975,
+          "text_head": "I\n\nfrom typing import Listegasuseruseruser\n    #user\n    if key in self._order:\n        self._order.append(value.\n        self._order.append(value.\n        self._order.append(value.\n        self._order.append(value.\n        self._order.append(value.\n        self._order.append(self)\n        self._ord"
+        },
+        {
+          "prompt_id": "class_bst",
+          "prefill_ms": 2518.42425,
+          "gen_tps": 34.89715621371274,
+          "accept": 1.4285714285714286,
+          "sha": "67d5c35fabc4e8b7",
+          "lcp": 0,
+          "delta_prefill_ms": -448.2624999999998,
+          "text_head": "# Note\n    fromuser\nfrom typing import List basesuseruser\n    fromVASuseruser\n    fromVASuser\n    if notuser\n    #ones )\"user\n    if not\u6bcf\u4e00\u4e2auser\n    201\n    if key in self._1:\n2.\n3.\n3.\n3.\n3.\n3.\n3.\n3.\n3.\n3.\n"
+        }
+      ]
+    }
+  }
+}

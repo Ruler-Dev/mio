@@ -1,0 +1,42 @@
+[
+  {
+    "layer_idx": 1,
+    "linear_r2": 0.9934899542228365,
+    "mlp_r2_train": 0.995246370126205,
+    "mlp_r2_test": 0.9934740816423382,
+    "delta_r2": -1.5872580498288436e-05,
+    "bottleneck": 512,
+    "epochs": 10,
+    "path": "experiments/distill_linear/mlps2/layer1_mlp.safetensors"
+  },
+  {
+    "layer_idx": 2,
+    "linear_r2": 0.9910890586657364,
+    "mlp_r2_train": 0.9937463380519312,
+    "mlp_r2_test": 0.9910577025522234,
+    "delta_r2": -3.1356113513014705e-05,
+    "bottleneck": 512,
+    "epochs": 10,
+    "path": "experiments/distill_linear/mlps2/layer2_mlp.safetensors"
+  },
+  {
+    "layer_idx": 3,
+    "linear_r2": 0.9799346504612413,
+    "mlp_r2_train": 0.9841425113634829,
+    "mlp_r2_test": 0.9798533399384787,
+    "delta_r2": -8.131052276261208e-05,
+    "bottleneck": 512,
+    "epochs": 10,
+    "path": "experiments/distill_linear/mlps2/layer3_mlp.safetensors"
+  },
+  {
+    "layer_idx": 10,
+    "linear_r2": 0.9785837686564937,
+    "mlp_r2_train": 0.975986705246453,
+    "mlp_r2_test": 0.9784707869347828,
+    "delta_r2": -0.00011298172171081422,
+    "bottleneck": 512,
+    "epochs": 10,
+    "path": "experiments/distill_linear/mlps2/layer10_mlp.safetensors"
+  }
+]

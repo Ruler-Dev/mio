@@ -43,3 +43,4 @@ Thumbs.db
 # Any local-only user data dir
 user_data/
 .claude/
+experiments/distill_linear/harvest/

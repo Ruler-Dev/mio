@@ -1,0 +1,149 @@
+{
+  "r2_threshold": 0.9,
+  "selected_layers": [
+    {
+      "idx": 1,
+      "kind": "GDN",
+      "r2": 0.9934899542228365
+    },
+    {
+      "idx": 2,
+      "kind": "GDN",
+      "r2": 0.9910890586657364
+    },
+    {
+      "idx": 3,
+      "kind": "attn",
+      "r2": 0.9799346504612413
+    },
+    {
+      "idx": 10,
+      "kind": "GDN",
+      "r2": 0.9785837686564937
+    },
+    {
+      "idx": 4,
+      "kind": "GDN",
+      "r2": 0.9725363175030552
+    },
+    {
+      "idx": 6,
+      "kind": "GDN",
+      "r2": 0.9694138180730567
+    },
+    {
+      "idx": 5,
+      "kind": "GDN",
+      "r2": 0.960129192028247
+    },
+    {
+      "idx": 39,
+      "kind": "attn",
+      "r2": 0.9566881895955329
+    },
+    {
+      "idx": 7,
+      "kind": "attn",
+      "r2": 0.9483639746568489
+    },
+    {
+      "idx": 8,
+      "kind": "GDN",
+      "r2": 0.9318531624056664
+    },
+    {
+      "idx": 9,
+      "kind": "GDN",
+      "r2": 0.9254778451890583
+    },
+    {
+      "idx": 0,
+      "kind": "GDN",
+      "r2": 0.9168338527270582
+    },
+    {
+      "idx": 11,
+      "kind": "attn",
+      "r2": 0.9099319901786359
+    }
+  ],
+  "baselines": {
+    "fib_memo": {
+      "text": "```python\ndef fib(n: int) -> int:\n    \"\"\"\n    Compute the n-th Fibonacci number using memoization.\n\n    The Fibonacci sequence is defined as:\n        F(0) = 0\n        F(1) = 1\n        F(n) = F(n-1) + F(n-2) for n >= 2\n\n    Args:\n        n: A non-negative integer representing the position in the Fibonacci sequence.\n\n    Returns:\n        The n-th Fibonacci number.\n\n    Raises:\n        ValueError: If",
+      "prompt_tokens": 4281,
+      "prefill_ms": 2840.251583,
+      "gen_tps": 189.0425592224335,
+      "accept": 9.846153846153847,
+      "sha": "432f3d5200b571bc"
+    },
+    "binsearch": {
+      "text": "```python\ndef binary_search(arr, target):\n    \"\"\"\n    Perform binary search on a sorted list.\n    \n    Args:\n        arr: A sorted list of comparable elements.\n        target: The element to search for.\n        \n    Returns:\n        The index of target in arr if found, otherwise -1.\n    \"\"\"\n    left, right = 0, len(arr) - 1\n    \n    while left <= right:\n        mid = (left + right) // 2\n        if",
+      "prompt_tokens": 4292,
+      "prefill_ms": 2896.7122919999997,
+      "gen_tps": 146.75639693598012,
+      "accept": 8.0,
+      "sha": "294688e935bee100"
+    },
+    "list_dedupe": {
+      "text": "**Approach:**\nUse a `set` to track seen items for O(1) lookup efficiency. Iterate through the input list, appending items to the result only if they haven't been encountered before, thereby preserving the original order of first occurrences.\n\n**Code:**\n\n```python\ndef dedupe(items: list) -> list:\n    seen = set()\n    result = []\n    for item in items:\n        # Use a hashable representation;",
+      "prompt_tokens": 4285,
+      "prefill_ms": 2910.647833,
+      "gen_tps": 76.62622698108812,
+      "accept": 3.6923076923076925,
+      "sha": "4852de14af5d6ad4"
+    },
+    "class_bst": {
+      "text": "```python\nclass BinarySearchTree:\n    def __init__(self, value=None):\n        self.value = value\n        self.left = None\n        self.right = None\n\n    def insert(self, value: int) -> None:\n        if self.value is None:\n            self.value = value\n            return\n        if value < self.value:\n            if self.left is None:\n                self.left = BinarySearchTree(value)\n           ",
+      "prompt_tokens": 4279,
+      "prefill_ms": 3001.126583,
+      "gen_tps": 172.17572305946268,
+      "accept": 8.727272727272727,
+      "sha": "20f214da8a3225d0"
+    }
+  },
+  "swap_results": [
+    {
+      "prompt_id": "fib_memo",
+      "prefill_ms": 2230.655,
+      "gen_tps": 34.87125718327489,
+      "accept": 1.3473684210526315,
+      "sha": "1f49c7c2d2ee2d62",
+      "lcp": 0,
+      "text_head": "from typing import ListordenettoETTO LegislativeITARuseruseruser\nfrom typing import ListVASuser\n    fromVASuser\n    \"\"\"VASuser\nfrom typing import ListVASuser\nfrom typing import ListVASuser\nfrom typing import ListVIDasstuser\nfrom dataclasses import dataclass:\n    def __init__(self, nameuser\n    self._typeuser\n    if __nameuser\n    fromVASuser\n    fromRAINTuser\n    1\n        \"\"\"VASuser\nuser\n1.\n2.\n  ",
+      "delta_prefill_ms": -609.596583
+    },
+    {
+      "prompt_id": "binsearch",
+      "prefill_ms": 2126.2690000000002,
+      "gen_tps": 38.12043000427277,
+      "accept": 1.471264367816092,
+      "sha": "b3c7e8aa50c13edd",
+      "lcp": 0,
+      "text_head": "# Note\n    def reverse Munich Irisuseruser\n    if __nameuser\n    if __\n    #ones Jeudi Lumpur\u5df4user\n    if __\n    #thinkuser\n    if __\n    printuser\n    if __\n    printuser\n    if __\n        printuser\n    if __\n        printuser\n    if __\n        if __\n            if __\n            if __\n            if __\n            if __\n            if __\n            if __\n            if __\n            if __\n    ",
+      "delta_prefill_ms": -770.4432919999995
+    },
+    {
+      "prompt_id": "list_dedupe",
+      "prefill_ms": 2158.6747089999994,
+      "gen_tps": 52.59642576289549,
+      "accept": 2.0425531914893615,
+      "sha": "cc69e921af5e458c",
+      "lcp": 0,
+      "text_head": "I\n\nfrom typing import Listegasuseruseruser\n    #user\n    if key in self._order:\n        self._order.append(value.\n        self._order.append(value.\n        self._order.append(value.\n        self._order.append(value.\n        self._order.append(value.\n        self._order.append(self)\n        self._order.append(self)\n        self._order.append(self)\n        self._order.append(self)\n",
+      "delta_prefill_ms": -751.9731240000006
+    },
+    {
+      "prompt_id": "class_bst",
+      "prefill_ms": 2168.178834,
+      "gen_tps": 36.564822294686884,
+      "accept": 1.4285714285714286,
+      "sha": "67d5c35fabc4e8b7",
+      "lcp": 0,
+      "text_head": "# Note\n    fromuser\nfrom typing import List basesuseruser\n    fromVASuseruser\n    fromVASuser\n    if notuser\n    #ones )\"user\n    if not\u6bcf\u4e00\u4e2auser\n    201\n    if key in self._1:\n2.\n3.\n3.\n3.\n3.\n3.\n3.\n3.\n3.\n3.\n",
+      "delta_prefill_ms": -832.9477490000004
+    }
+  ],
+  "matches": 0,
+  "avg_lcp": 0.0,
+  "avg_prefill_delta_ms": -741.2401870000001
+}
