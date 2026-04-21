@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Mio is a fast local MLX-based inference server and interactive coding agent for Apple Silicon Macs. It combines four acceleration technologies: PARO (INT4 weight quantization), DFlash speculative decoding (4.1x speedup), PolarQuant KV-cache compression (Hadamard rotation + 4-bit, zero speed overhead), and the Caveman Ultra system prompt (75% fewer output tokens).
+Mio is a fast local MLX-based inference server and interactive coding agent for Apple Silicon Macs. It combines five acceleration technologies: PARO (INT4 weight quantization), DFlash speculative decoding (4.1x speedup), PolarQuant KV-cache compression (Hadamard rotation + 4-bit, zero speed overhead), DDTree speculative decoding (opt-in tree-attention verify — +10-15% over DFlash on code, hybrid_gdn models only), and the Caveman Ultra system prompt (75% fewer output tokens).
 
 Default configuration (`large-moe`) runs **Qwen3.6-35B-A3B MoE** at ~204 tok/s on M4 Max with 128K context.
 
@@ -82,6 +82,7 @@ User Input → CLI (main.py) → Agent / Server / Chat
 - **`mio/polarquant/`** — KV-cache quantization (preferred). Hadamard rotation + `mx.quantize`/`mx.quantized_matmul`. Zero speed overhead with DFlash — no forced `mx.eval()`, no normalization, no QJL.
 - **`mio/turboquant/`** — Legacy KV-cache quantization. `patch.py` hot-patches MLX attention layers; `attention_v2.py`/`attention_v3.py` are successive optimizations. Slower than PolarQuant due to forced `mx.eval()`.
 - **`mio/paroquant/`** — PARO quantization loader. `modules.py` defines `RotateQuantizedLinear`; `kernels/rotation.py` is the Metal rotation kernel.
+- **`mio/ddtree/`** — Diffusion Draft Tree speculative decoding (ported from humanrouter/ddtree-mlx). Extends DFlash by verifying a tree of candidate paths in one target forward with tree-attention masks + parent-indexed GatedDelta Metal kernels. Opt-in via `TierConfig.ddtree_budget > 0` or `MIO_DDTREE_BUDGET` env var. Hybrid_gdn models only (Qwen3.5-27B, Qwen3.5/3.6-35B-A3B). Incompatible with PolarQuant/TurboQuant/BMP/prefix-cache — when enabled, the engine swaps PQ/TQ for mlx_lm `QuantizedKVCache` (8-bit) and forces `DDTREE_EXACT_COMMIT=1` (sequential commit, quantized-safe). Gain: +10-15% over DFlash on code/structured output; ~0% on creative prose (draft acceptance too low for the tree to add value).
 
 ### Generation Flow
 

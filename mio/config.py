@@ -18,6 +18,14 @@ class TierConfig:
     tq_bits: int = 16  # 16 = TQ off (baseline KVCache). {2, 3, 4} enable TurboQuant.
     pq_bits: int = 4   # 4 = PolarQuant 4-bit (default, ~3.8x KV compression, zero speed loss). 16 = off.
     bmp_paths: int = 1  # 1 = vanilla DFlash. K>=2 enables BMP-DFlash K-path verify.
+    # DDTree (Diffusion Draft Tree) node budget. 0 = off (vanilla DFlash).
+    # >0 = verify N candidate tree nodes per cycle via tree attention + parent-
+    # indexed GatedDelta Metal kernels. Hybrid_gdn models only (Qwen3.5-27B,
+    # Qwen3.5/3.6-35B-A3B). Incompatible with PolarQuant/TurboQuant — when
+    # enabled, the engine automatically swaps PQ/TQ for mlx_lm QuantizedKVCache
+    # (8-bit) so some KV compression is retained. Default 0 (opt-in) because
+    # the gain is content-dependent (+10-15% on code, ~0% on creative prose).
+    ddtree_budget: int = 0
     tq_group_size: int = 64
     tq_use_rotation: bool = True
     tq_use_normalization: bool = True

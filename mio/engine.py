@@ -184,6 +184,41 @@ class MioEngine:
         bits = getattr(self.tier_config, "pq_bits", 16)
         return bits if bits in (2, 3, 4) else None
 
+    def _resolved_ddtree_budget(self) -> int:
+        """Return DDTree tree-node budget or 0 (off).
+
+        DDTree only runs when: a draft model is loaded, target family is
+        hybrid_gdn, BMP is off, and the tier (or MIO_DDTREE_BUDGET env) sets a
+        positive budget. The engine forces DDTREE_EXACT_COMMIT=1 before calling
+        the runtime so the commit path is compatible with QuantizedKVCache.
+        """
+        import os as _os
+        if self._draft_model is None:
+            return 0
+        if self._target_meta.get("target_family") != "hybrid_gdn":
+            return 0
+        if int(getattr(self.tier_config, "bmp_paths", 1) or 1) >= 2:
+            return 0
+        env = _os.environ.get("MIO_DDTREE_BUDGET")
+        if env:
+            try:
+                return max(0, int(env))
+            except ValueError:
+                pass
+        return max(0, int(getattr(self.tier_config, "ddtree_budget", 0) or 0))
+
+    @staticmethod
+    def _prepare_ddtree_env() -> None:
+        """Force exact-commit mode so DDTree works with any KV cache type.
+
+        tree_aware_path_commit writes per-position into cache.keys — fine for
+        plain KVCache, broken for QuantizedKVCache (keys is a 3-tuple of
+        quantized arrays). EXACT_COMMIT skips that path and uses a sequential
+        forward instead, which update_and_fetch handles correctly for both.
+        """
+        import os as _os
+        _os.environ.setdefault("DDTREE_EXACT_COMMIT", "1")
+
     # --- Prefix cache ---
     #
     # The cache is populated opportunistically: after each generate(), we look
@@ -453,8 +488,11 @@ class MioEngine:
             generation_tps=gen_tokens / max(decode_us / 1e6, 1e-9) if decode_us > 0 else 0,
             end_to_end_tps=gen_tokens / max(elapsed_us / 1e6, 1e-9) if elapsed_us > 0 else 0,
             acceptance_ratio=result.get("acceptance_ratio", 0),
-            avg_acceptance_length=result.get("tokens_per_cycle", 0)
-                or result.get("acceptance_ratio", 0) * 16,
+            avg_acceptance_length=(
+                result.get("tokens_per_cycle", 0)
+                or result.get("avg_acceptance", 0)  # DDTree's key name
+                or result.get("acceptance_ratio", 0) * 16
+            ),
             peak_memory_gb=result.get("peak_memory_gb", 0) or 0,
             total_time_s=elapsed_us / 1e6,
             cycles=result.get("cycles_completed", 0),
@@ -485,13 +523,31 @@ class MioEngine:
         tq_bits = self._resolved_tq_bits()
         pq_bits = self._resolved_pq_bits()
         bmp_paths = int(getattr(self.tier_config, "bmp_paths", 1) or 1)
+        ddtree_budget = self._resolved_ddtree_budget()
 
         if self._draft_model is not None and bmp_paths >= 2:
             # TQ4/PQ + BMP is untested; fall back to vanilla DFlash.
             if tq_bits is not None or pq_bits is not None:
                 bmp_paths = 1
 
-        if self._draft_model is not None and bmp_paths >= 2:
+        if ddtree_budget > 0:
+            # DDTree owns its own cache policy: PQ/TQ off, 8-bit KV on for some
+            # compression, sequential-forward commit for quantized compatibility.
+            self._prepare_ddtree_env()
+            from mio.ddtree.runtime import generate_ddtree_once
+            result = generate_ddtree_once(
+                target_model=self._target_model,
+                draft_model=self._draft_model,
+                tokenizer=self._tokenizer,
+                prompt_tokens=prompt_tokens,
+                max_new_tokens=max_tokens,
+                tree_budget=ddtree_budget,
+                stop_token_ids=stop_ids,
+                suppress_token_ids=suppress_ids,
+                quantize_kv_cache=True,
+            )
+            result.setdefault("prompt_token_count", len(prompt_tokens))
+        elif self._draft_model is not None and bmp_paths >= 2:
             from mio.dflash.bmp_runtime import generate_bmp_dflash_once
             result = generate_bmp_dflash_once(
                 target_model=self._target_model,
@@ -579,13 +635,30 @@ class MioEngine:
 
         tq_bits = self._resolved_tq_bits()
         pq_bits = self._resolved_pq_bits()
+        ddtree_budget = self._resolved_ddtree_budget()
 
-        # Prefix cache lookup — same machinery as generate().
+        # Prefix cache lookup — same machinery as generate(). Skip when DDTree
+        # is driving: tree_aware verify mutates caches beyond what a dict
+        # snapshot models.
         warm_state = None
-        if self._prefix_cache_enabled():
+        if ddtree_budget == 0 and self._prefix_cache_enabled():
             warm_state = self._prefix_cache_lookup(prompt_tokens)
 
-        if self._draft_model is not None:
+        if ddtree_budget > 0:
+            self._prepare_ddtree_env()
+            from mio.ddtree.runtime import stream_ddtree_generate
+            stream = stream_ddtree_generate(
+                target_model=self._target_model,
+                draft_model=self._draft_model,
+                tokenizer=self._tokenizer,
+                prompt_tokens=prompt_tokens,
+                max_new_tokens=max_tokens,
+                tree_budget=ddtree_budget,
+                stop_token_ids=stop_ids,
+                suppress_token_ids=suppress_ids,
+                quantize_kv_cache=True,
+            )
+        elif self._draft_model is not None:
             from mio.dflash.runtime import stream_dflash_generate
             stream = stream_dflash_generate(
                 target_model=self._target_model,
