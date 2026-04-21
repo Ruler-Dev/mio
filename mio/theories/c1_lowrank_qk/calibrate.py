@@ -48,10 +48,15 @@ class CalibReport:
 
 
 def _install_capture(target_model: Any, storage: dict) -> Any:
-    """Hook attention layers' q_proj / k_proj forward to capture outputs.
+    """Wrap the attention class's __call__ to capture Q/K inputs.
 
-    Stores per (layer_idx) the concatenated Q (1, L, n_heads * d_head)
-    and K (1, L, n_kv_heads * d_head) for the most recent forward.
+    Python dispatches `attn(x, ...)` through `type(attn).__call__`, so
+    instance-level `attn.q_proj.__call__ = ...` has no effect. Instead
+    we patch the attention class itself, reading Q and K from
+    attn.q_proj(x) and attn.k_proj(x) before delegating to the original
+    forward. Extra compute: two linear projections run twice per layer
+    per sample — acceptable for a one-shot calibration.
+
     Returns cleanup callable.
     """
     import mlx.core as mx
@@ -61,34 +66,34 @@ def _install_capture(target_model: Any, storage: dict) -> Any:
         (i, l) for i, l in enumerate(text.layers)
         if not bool(getattr(l, "is_linear", False))
     ]
+    id_to_slot: dict[int, int] = {id(l.self_attn): i for i, l in attn_layers}
+    distinct: dict[type, Any] = {}
+    for _, l in attn_layers:
+        cls = type(l.self_attn)
+        if cls not in distinct:
+            distinct[cls] = cls.__call__
 
-    originals: dict[int, tuple[Any, Any]] = {}
+    def _build_wrapper(original_call):
+        def wrapper(self, x, mask=None, cache=None):
+            slot_id = id_to_slot.get(id(self), None)
+            if slot_id is not None:
+                # Capture the full Q, K projection outputs (before
+                # q_norm / k_norm / RoPE) — that's the representation
+                # C1 operates on.
+                q_out = self.q_proj(x)
+                k_out = self.k_proj(x)
+                mx.eval(q_out, k_out)
+                storage.setdefault(slot_id, {})["Q"] = q_out
+                storage[slot_id]["K"] = k_out
+            return original_call(self, x, mask=mask, cache=cache)
+        return wrapper
 
-    def make_hooked(orig_fn, slot: dict, key: str):
-        def call(x):
-            y = orig_fn(x)
-            mx.eval(y)
-            # Copy out reference; mx arrays are immutable so this is cheap.
-            slot[key] = y
-            return y
-        return call
-
-    # attn.q_proj and attn.k_proj are nn.Linear instances; replacing their
-    # __call__ cleanly requires patching the linear's method.
-    for (i, layer) in attn_layers:
-        attn = layer.self_attn
-        qp = attn.q_proj
-        kp = attn.k_proj
-        slot = storage.setdefault(i, {})
-        originals[i] = (qp.__call__, kp.__call__)
-        qp.__call__ = make_hooked(qp.__call__, slot, "Q")
-        kp.__call__ = make_hooked(kp.__call__, slot, "K")
+    for cls, orig in distinct.items():
+        cls.__call__ = _build_wrapper(orig)
 
     def cleanup() -> None:
-        for (i, layer) in attn_layers:
-            orig_q, orig_k = originals[i]
-            layer.self_attn.q_proj.__call__ = orig_q
-            layer.self_attn.k_proj.__call__ = orig_k
+        for cls, orig in distinct.items():
+            cls.__call__ = orig
 
     return cleanup
 
@@ -138,40 +143,73 @@ def _calibration_prompt(target_tokens: int, tokenizer) -> str:
 # --- SVD + rank analysis -----------------------------------------------------
 
 
-def _analyze_rank(activations: dict[int, dict[str, Any]], d_head: int) -> list[HeadRank]:
-    """Run SVD per head. Report rank at 95/98/99% Frobenius energy retention."""
-    import mlx.core as mx
+def _analyze_rank(
+    activations: dict[int, dict[str, Any]],
+    d_head: int,
+    n_q_heads: int,
+    n_kv_heads: int,
+) -> tuple[list[HeadRank], list[HeadRank]]:
+    """Run SVD per (layer, head) on Q and K separately.
+
+    q_proj outputs (L, n_q_heads * d_head * 2) — queries and gate
+    interleaved per head; we take only the queries half for Q rank.
+    k_proj outputs (L, n_kv_heads * d_head).
+
+    Returns (q_ranks, k_ranks).
+    """
     import numpy as np
 
-    results: list[HeadRank] = []
-    layers = sorted(activations.keys())
-    for i in layers:
+    q_results: list[HeadRank] = []
+    k_results: list[HeadRank] = []
+
+    import mlx.core as mx
+    for i in sorted(activations.keys()):
         slot = activations[i]
-        Q = slot.get("Q")  # (1, L, n_heads * d_head)
-        K = slot.get("K")
+        Q = slot.get("Q")  # (1, L, n_q_heads * d_head * 2)
+        K = slot.get("K")  # (1, L, n_kv_heads * d_head)
         if Q is None or K is None:
             continue
-        _, L, qdim = Q.shape
-        n_heads = qdim // d_head
-        Q_np = np.asarray(Q[0], dtype=np.float32).reshape(L, n_heads, d_head)
-        for h in range(n_heads):
-            Qh = Q_np[:, h, :]  # (L, d_head)
-            # SVD
-            s = np.linalg.svd(Qh, compute_uv=False)
-            # Cumulative Frobenius² energy.
-            energy = (s ** 2)
+
+        # Cast in MLX (bfloat16 has no numpy dtype) before crossing to numpy.
+        Q_f32 = Q[0].astype(mx.float32)
+        K_f32 = K[0].astype(mx.float32)
+        mx.eval(Q_f32, K_f32)
+        Q_np = np.array(Q_f32, copy=False)
+        K_np = np.array(K_f32, copy=False)
+        L = Q_np.shape[0]
+
+        # Q: reshape to (L, n_q_heads, d_head*2), take first d_head (queries).
+        Q_np = Q_np.reshape(L, n_q_heads, d_head * 2)[..., :d_head]
+        K_np = K_np.reshape(L, n_kv_heads, d_head)
+
+        for h in range(n_q_heads):
+            s = np.linalg.svd(Q_np[:, h, :], compute_uv=False)
+            energy = s ** 2
             total = energy.sum()
             if total <= 0:
                 continue
             cum = np.cumsum(energy) / total
-            r95 = int(np.searchsorted(cum, 0.95)) + 1
-            r98 = int(np.searchsorted(cum, 0.98)) + 1
-            r99 = int(np.searchsorted(cum, 0.99)) + 1
-            results.append(HeadRank(
+            q_results.append(HeadRank(
                 layer=i, head=h, d_head=d_head,
-                rank_95=r95, rank_98=r98, rank_99=r99,
+                rank_95=int(np.searchsorted(cum, 0.95)) + 1,
+                rank_98=int(np.searchsorted(cum, 0.98)) + 1,
+                rank_99=int(np.searchsorted(cum, 0.99)) + 1,
             ))
-    return results
+        for h in range(n_kv_heads):
+            s = np.linalg.svd(K_np[:, h, :], compute_uv=False)
+            energy = s ** 2
+            total = energy.sum()
+            if total <= 0:
+                continue
+            cum = np.cumsum(energy) / total
+            k_results.append(HeadRank(
+                layer=i, head=h, d_head=d_head,
+                rank_95=int(np.searchsorted(cum, 0.95)) + 1,
+                rank_98=int(np.searchsorted(cum, 0.98)) + 1,
+                rank_99=int(np.searchsorted(cum, 0.99)) + 1,
+            ))
+
+    return q_results, k_results
 
 
 # --- main --------------------------------------------------------------------
@@ -211,6 +249,7 @@ def main() -> None:
         )
         d_head = int(attn_layer.self_attn.head_dim)
         n_heads = int(attn_layer.self_attn.num_attention_heads)
+        n_kv_heads = int(attn_layer.self_attn.num_key_value_heads)
 
         for s in range(args.samples):
             # Vary prompt slightly per sample so activations aren't identical.
@@ -236,44 +275,50 @@ def main() -> None:
         cleanup()
 
     print(f"[c1] captured {len(storage)} attention layers", flush=True)
-    head_ranks = _analyze_rank(storage, d_head=d_head)
-    print(f"[c1] SVD complete; {len(head_ranks)} (layer, head) pairs", flush=True)
-
-    # Summarize.
-    report = CalibReport(
-        sample_count=args.samples,
-        seq_len=args.ctx,
-        num_attention_layers=len(storage),
-        num_heads_per_layer=n_heads,
-        head_ranks=head_ranks,
+    q_ranks, k_ranks = _analyze_rank(
+        storage, d_head=d_head, n_q_heads=n_heads, n_kv_heads=n_kv_heads,
+    )
+    print(
+        f"[c1] SVD complete; Q={len(q_ranks)} heads, K={len(k_ranks)} heads",
+        flush=True,
     )
 
     # Distributions.
     import statistics as st
-    r95s = [h.rank_95 for h in head_ranks]
-    r98s = [h.rank_98 for h in head_ranks]
-    r99s = [h.rank_99 for h in head_ranks]
-    print(f"\n-- Rank distribution across {len(head_ranks)} heads --")
-    for name, data in (("95%", r95s), ("98%", r98s), ("99%", r99s)):
-        if data:
-            print(
-                f"  energy@{name}: min={min(data)} median={int(st.median(data))} "
-                f"p90={sorted(data)[int(len(data)*0.9)]} max={max(data)}"
-                f"   d_head={d_head}  saving@median_98={d_head/max(int(st.median(r98s)),1):.1f}x",
-            )
+    def _dist(label: str, data: list[HeadRank]) -> None:
+        if not data:
+            print(f"  {label}: (empty)")
+            return
+        r95 = [h.rank_95 for h in data]
+        r98 = [h.rank_98 for h in data]
+        r99 = [h.rank_99 for h in data]
+        def stats(xs):
+            return f"min={min(xs)} median={int(st.median(xs))} p90={sorted(xs)[int(len(xs)*0.9)]} max={max(xs)}"
+        print(
+            f"  {label}  @95%: {stats(r95)}  @98%: {stats(r98)}  @99%: {stats(r99)}"
+            f"   savings(median@98%)={d_head/max(int(st.median(r98)),1):.1f}x"
+        )
+    print(f"\n-- Rank distribution (d_head={d_head}, {args.samples} sample, ctx~{args.ctx}) --")
+    _dist("Q", q_ranks)
+    _dist("K", k_ranks)
 
-    # Write JSON
     out_obj = {
         "tier": args.tier,
         "ctx": args.ctx,
         "samples": args.samples,
         "num_attention_layers": len(storage),
         "n_heads": n_heads,
+        "n_kv_heads": n_kv_heads,
         "d_head": d_head,
-        "head_ranks": [
+        "q_ranks": [
             {"layer": h.layer, "head": h.head, "r95": h.rank_95,
              "r98": h.rank_98, "r99": h.rank_99}
-            for h in head_ranks
+            for h in q_ranks
+        ],
+        "k_ranks": [
+            {"layer": h.layer, "head": h.head, "r95": h.rank_95,
+             "r98": h.rank_98, "r99": h.rank_99}
+            for h in k_ranks
         ],
     }
     Path(args.out).write_text(json.dumps(out_obj, indent=2))
