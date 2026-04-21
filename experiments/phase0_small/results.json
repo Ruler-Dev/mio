@@ -1,0 +1,1732 @@
+{
+  "git_sha": "bfa2738e588f",
+  "hardware": "Mac16,5",
+  "tier": "small",
+  "target_model": "/Users/ruler/Documents/pi-mio/models/Qwen3.5-4B-4bit",
+  "draft_model": "/Users/ruler/Documents/pi-mio/spd/Qwen3.5-4B-DFlash",
+  "pq_bits": 4,
+  "tq_bits": 16,
+  "samples": [
+    {
+      "ctx": 512,
+      "actual_tokens": 673,
+      "cold": true,
+      "total_ms": 603.6,
+      "linear_ms": 468.7,
+      "attention_ms": 131.4,
+      "linear_share": 0.777,
+      "attention_share": 0.218,
+      "per_layer": [
+        {
+          "idx": 0,
+          "linear": true,
+          "ms": 82.72
+        },
+        {
+          "idx": 1,
+          "linear": true,
+          "ms": 16.74
+        },
+        {
+          "idx": 2,
+          "linear": true,
+          "ms": 16.77
+        },
+        {
+          "idx": 3,
+          "linear": false,
+          "ms": 16.97
+        },
+        {
+          "idx": 4,
+          "linear": true,
+          "ms": 17.45
+        },
+        {
+          "idx": 5,
+          "linear": true,
+          "ms": 17.05
+        },
+        {
+          "idx": 6,
+          "linear": true,
+          "ms": 16.63
+        },
+        {
+          "idx": 7,
+          "linear": false,
+          "ms": 15.97
+        },
+        {
+          "idx": 8,
+          "linear": true,
+          "ms": 16.81
+        },
+        {
+          "idx": 9,
+          "linear": true,
+          "ms": 16.69
+        },
+        {
+          "idx": 10,
+          "linear": true,
+          "ms": 16.65
+        },
+        {
+          "idx": 11,
+          "linear": false,
+          "ms": 16.34
+        },
+        {
+          "idx": 12,
+          "linear": true,
+          "ms": 16.61
+        },
+        {
+          "idx": 13,
+          "linear": true,
+          "ms": 18.13
+        },
+        {
+          "idx": 14,
+          "linear": true,
+          "ms": 16.74
+        },
+        {
+          "idx": 15,
+          "linear": false,
+          "ms": 16.48
+        },
+        {
+          "idx": 16,
+          "linear": true,
+          "ms": 16.49
+        },
+        {
+          "idx": 17,
+          "linear": true,
+          "ms": 16.81
+        },
+        {
+          "idx": 18,
+          "linear": true,
+          "ms": 16.59
+        },
+        {
+          "idx": 19,
+          "linear": false,
+          "ms": 16.56
+        },
+        {
+          "idx": 20,
+          "linear": true,
+          "ms": 16.87
+        },
+        {
+          "idx": 21,
+          "linear": true,
+          "ms": 16.72
+        },
+        {
+          "idx": 22,
+          "linear": true,
+          "ms": 16.72
+        },
+        {
+          "idx": 23,
+          "linear": false,
+          "ms": 17.15
+        },
+        {
+          "idx": 24,
+          "linear": true,
+          "ms": 16.59
+        },
+        {
+          "idx": 25,
+          "linear": true,
+          "ms": 16.62
+        },
+        {
+          "idx": 26,
+          "linear": true,
+          "ms": 16.7
+        },
+        {
+          "idx": 27,
+          "linear": false,
+          "ms": 15.79
+        },
+        {
+          "idx": 28,
+          "linear": true,
+          "ms": 16.47
+        },
+        {
+          "idx": 29,
+          "linear": true,
+          "ms": 16.72
+        },
+        {
+          "idx": 30,
+          "linear": true,
+          "ms": 16.47
+        },
+        {
+          "idx": 31,
+          "linear": false,
+          "ms": 16.17
+        }
+      ]
+    },
+    {
+      "ctx": 512,
+      "actual_tokens": 673,
+      "cold": false,
+      "total_ms": 444.5,
+      "linear_ms": 334.7,
+      "attention_ms": 108.4,
+      "linear_share": 0.753,
+      "attention_share": 0.244,
+      "per_layer": [
+        {
+          "idx": 0,
+          "linear": true,
+          "ms": 14.44
+        },
+        {
+          "idx": 1,
+          "linear": true,
+          "ms": 13.9
+        },
+        {
+          "idx": 2,
+          "linear": true,
+          "ms": 13.9
+        },
+        {
+          "idx": 3,
+          "linear": false,
+          "ms": 13.38
+        },
+        {
+          "idx": 4,
+          "linear": true,
+          "ms": 14.4
+        },
+        {
+          "idx": 5,
+          "linear": true,
+          "ms": 13.91
+        },
+        {
+          "idx": 6,
+          "linear": true,
+          "ms": 13.87
+        },
+        {
+          "idx": 7,
+          "linear": false,
+          "ms": 13.44
+        },
+        {
+          "idx": 8,
+          "linear": true,
+          "ms": 14.07
+        },
+        {
+          "idx": 9,
+          "linear": true,
+          "ms": 13.89
+        },
+        {
+          "idx": 10,
+          "linear": true,
+          "ms": 13.86
+        },
+        {
+          "idx": 11,
+          "linear": false,
+          "ms": 13.55
+        },
+        {
+          "idx": 12,
+          "linear": true,
+          "ms": 14.02
+        },
+        {
+          "idx": 13,
+          "linear": true,
+          "ms": 13.97
+        },
+        {
+          "idx": 14,
+          "linear": true,
+          "ms": 13.86
+        },
+        {
+          "idx": 15,
+          "linear": false,
+          "ms": 13.44
+        },
+        {
+          "idx": 16,
+          "linear": true,
+          "ms": 13.99
+        },
+        {
+          "idx": 17,
+          "linear": true,
+          "ms": 13.87
+        },
+        {
+          "idx": 18,
+          "linear": true,
+          "ms": 13.83
+        },
+        {
+          "idx": 19,
+          "linear": false,
+          "ms": 13.78
+        },
+        {
+          "idx": 20,
+          "linear": true,
+          "ms": 13.9
+        },
+        {
+          "idx": 21,
+          "linear": true,
+          "ms": 13.86
+        },
+        {
+          "idx": 22,
+          "linear": true,
+          "ms": 13.83
+        },
+        {
+          "idx": 23,
+          "linear": false,
+          "ms": 13.7
+        },
+        {
+          "idx": 24,
+          "linear": true,
+          "ms": 13.81
+        },
+        {
+          "idx": 25,
+          "linear": true,
+          "ms": 13.82
+        },
+        {
+          "idx": 26,
+          "linear": true,
+          "ms": 14.06
+        },
+        {
+          "idx": 27,
+          "linear": false,
+          "ms": 13.57
+        },
+        {
+          "idx": 28,
+          "linear": true,
+          "ms": 13.84
+        },
+        {
+          "idx": 29,
+          "linear": true,
+          "ms": 13.8
+        },
+        {
+          "idx": 30,
+          "linear": true,
+          "ms": 13.95
+        },
+        {
+          "idx": 31,
+          "linear": false,
+          "ms": 13.54
+        }
+      ]
+    },
+    {
+      "ctx": 1024,
+      "actual_tokens": 1206,
+      "cold": true,
+      "total_ms": 770.9,
+      "linear_ms": 578.3,
+      "attention_ms": 190.5,
+      "linear_share": 0.75,
+      "attention_share": 0.247,
+      "per_layer": [
+        {
+          "idx": 0,
+          "linear": true,
+          "ms": 25.15
+        },
+        {
+          "idx": 1,
+          "linear": true,
+          "ms": 24.27
+        },
+        {
+          "idx": 2,
+          "linear": true,
+          "ms": 23.92
+        },
+        {
+          "idx": 3,
+          "linear": false,
+          "ms": 24.55
+        },
+        {
+          "idx": 4,
+          "linear": true,
+          "ms": 23.91
+        },
+        {
+          "idx": 5,
+          "linear": true,
+          "ms": 24.39
+        },
+        {
+          "idx": 6,
+          "linear": true,
+          "ms": 24.03
+        },
+        {
+          "idx": 7,
+          "linear": false,
+          "ms": 23.67
+        },
+        {
+          "idx": 8,
+          "linear": true,
+          "ms": 24.06
+        },
+        {
+          "idx": 9,
+          "linear": true,
+          "ms": 24.1
+        },
+        {
+          "idx": 10,
+          "linear": true,
+          "ms": 24.26
+        },
+        {
+          "idx": 11,
+          "linear": false,
+          "ms": 23.73
+        },
+        {
+          "idx": 12,
+          "linear": true,
+          "ms": 24.16
+        },
+        {
+          "idx": 13,
+          "linear": true,
+          "ms": 23.97
+        },
+        {
+          "idx": 14,
+          "linear": true,
+          "ms": 24.18
+        },
+        {
+          "idx": 15,
+          "linear": false,
+          "ms": 23.78
+        },
+        {
+          "idx": 16,
+          "linear": true,
+          "ms": 24.2
+        },
+        {
+          "idx": 17,
+          "linear": true,
+          "ms": 23.95
+        },
+        {
+          "idx": 18,
+          "linear": true,
+          "ms": 24.11
+        },
+        {
+          "idx": 19,
+          "linear": false,
+          "ms": 23.56
+        },
+        {
+          "idx": 20,
+          "linear": true,
+          "ms": 23.88
+        },
+        {
+          "idx": 21,
+          "linear": true,
+          "ms": 23.97
+        },
+        {
+          "idx": 22,
+          "linear": true,
+          "ms": 23.89
+        },
+        {
+          "idx": 23,
+          "linear": false,
+          "ms": 23.57
+        },
+        {
+          "idx": 24,
+          "linear": true,
+          "ms": 24.01
+        },
+        {
+          "idx": 25,
+          "linear": true,
+          "ms": 23.99
+        },
+        {
+          "idx": 26,
+          "linear": true,
+          "ms": 24.0
+        },
+        {
+          "idx": 27,
+          "linear": false,
+          "ms": 23.94
+        },
+        {
+          "idx": 28,
+          "linear": true,
+          "ms": 24.01
+        },
+        {
+          "idx": 29,
+          "linear": true,
+          "ms": 23.89
+        },
+        {
+          "idx": 30,
+          "linear": true,
+          "ms": 23.94
+        },
+        {
+          "idx": 31,
+          "linear": false,
+          "ms": 23.73
+        }
+      ]
+    },
+    {
+      "ctx": 1024,
+      "actual_tokens": 1206,
+      "cold": false,
+      "total_ms": 762.3,
+      "linear_ms": 571.6,
+      "attention_ms": 189.1,
+      "linear_share": 0.75,
+      "attention_share": 0.248,
+      "per_layer": [
+        {
+          "idx": 0,
+          "linear": true,
+          "ms": 24.09
+        },
+        {
+          "idx": 1,
+          "linear": true,
+          "ms": 23.76
+        },
+        {
+          "idx": 2,
+          "linear": true,
+          "ms": 23.72
+        },
+        {
+          "idx": 3,
+          "linear": false,
+          "ms": 23.71
+        },
+        {
+          "idx": 4,
+          "linear": true,
+          "ms": 23.87
+        },
+        {
+          "idx": 5,
+          "linear": true,
+          "ms": 23.73
+        },
+        {
+          "idx": 6,
+          "linear": true,
+          "ms": 23.72
+        },
+        {
+          "idx": 7,
+          "linear": false,
+          "ms": 23.45
+        },
+        {
+          "idx": 8,
+          "linear": true,
+          "ms": 24.0
+        },
+        {
+          "idx": 9,
+          "linear": true,
+          "ms": 23.68
+        },
+        {
+          "idx": 10,
+          "linear": true,
+          "ms": 23.69
+        },
+        {
+          "idx": 11,
+          "linear": false,
+          "ms": 23.43
+        },
+        {
+          "idx": 12,
+          "linear": true,
+          "ms": 23.64
+        },
+        {
+          "idx": 13,
+          "linear": true,
+          "ms": 23.66
+        },
+        {
+          "idx": 14,
+          "linear": true,
+          "ms": 23.8
+        },
+        {
+          "idx": 15,
+          "linear": false,
+          "ms": 23.63
+        },
+        {
+          "idx": 16,
+          "linear": true,
+          "ms": 23.73
+        },
+        {
+          "idx": 17,
+          "linear": true,
+          "ms": 23.67
+        },
+        {
+          "idx": 18,
+          "linear": true,
+          "ms": 23.66
+        },
+        {
+          "idx": 19,
+          "linear": false,
+          "ms": 23.46
+        },
+        {
+          "idx": 20,
+          "linear": true,
+          "ms": 23.72
+        },
+        {
+          "idx": 21,
+          "linear": true,
+          "ms": 23.88
+        },
+        {
+          "idx": 22,
+          "linear": true,
+          "ms": 23.93
+        },
+        {
+          "idx": 23,
+          "linear": false,
+          "ms": 24.01
+        },
+        {
+          "idx": 24,
+          "linear": true,
+          "ms": 24.02
+        },
+        {
+          "idx": 25,
+          "linear": true,
+          "ms": 23.9
+        },
+        {
+          "idx": 26,
+          "linear": true,
+          "ms": 24.02
+        },
+        {
+          "idx": 27,
+          "linear": false,
+          "ms": 23.82
+        },
+        {
+          "idx": 28,
+          "linear": true,
+          "ms": 24.05
+        },
+        {
+          "idx": 29,
+          "linear": true,
+          "ms": 23.74
+        },
+        {
+          "idx": 30,
+          "linear": true,
+          "ms": 23.98
+        },
+        {
+          "idx": 31,
+          "linear": false,
+          "ms": 23.55
+        }
+      ]
+    },
+    {
+      "ctx": 2048,
+      "actual_tokens": 2212,
+      "cold": true,
+      "total_ms": 1667.8,
+      "linear_ms": 1075.4,
+      "attention_ms": 372.6,
+      "linear_share": 0.645,
+      "attention_share": 0.223,
+      "per_layer": [
+        {
+          "idx": 0,
+          "linear": true,
+          "ms": 47.08
+        },
+        {
+          "idx": 1,
+          "linear": true,
+          "ms": 45.27
+        },
+        {
+          "idx": 2,
+          "linear": true,
+          "ms": 45.29
+        },
+        {
+          "idx": 3,
+          "linear": false,
+          "ms": 47.16
+        },
+        {
+          "idx": 4,
+          "linear": true,
+          "ms": 44.8
+        },
+        {
+          "idx": 5,
+          "linear": true,
+          "ms": 45.16
+        },
+        {
+          "idx": 6,
+          "linear": true,
+          "ms": 45.14
+        },
+        {
+          "idx": 7,
+          "linear": false,
+          "ms": 46.77
+        },
+        {
+          "idx": 8,
+          "linear": true,
+          "ms": 45.07
+        },
+        {
+          "idx": 9,
+          "linear": true,
+          "ms": 44.5
+        },
+        {
+          "idx": 10,
+          "linear": true,
+          "ms": 44.77
+        },
+        {
+          "idx": 11,
+          "linear": false,
+          "ms": 46.53
+        },
+        {
+          "idx": 12,
+          "linear": true,
+          "ms": 44.85
+        },
+        {
+          "idx": 13,
+          "linear": true,
+          "ms": 44.24
+        },
+        {
+          "idx": 14,
+          "linear": true,
+          "ms": 44.25
+        },
+        {
+          "idx": 15,
+          "linear": false,
+          "ms": 46.8
+        },
+        {
+          "idx": 16,
+          "linear": true,
+          "ms": 44.29
+        },
+        {
+          "idx": 17,
+          "linear": true,
+          "ms": 44.63
+        },
+        {
+          "idx": 18,
+          "linear": true,
+          "ms": 44.75
+        },
+        {
+          "idx": 19,
+          "linear": false,
+          "ms": 46.7
+        },
+        {
+          "idx": 20,
+          "linear": true,
+          "ms": 44.88
+        },
+        {
+          "idx": 21,
+          "linear": true,
+          "ms": 44.79
+        },
+        {
+          "idx": 22,
+          "linear": true,
+          "ms": 44.47
+        },
+        {
+          "idx": 23,
+          "linear": false,
+          "ms": 46.26
+        },
+        {
+          "idx": 24,
+          "linear": true,
+          "ms": 44.77
+        },
+        {
+          "idx": 25,
+          "linear": true,
+          "ms": 44.45
+        },
+        {
+          "idx": 26,
+          "linear": true,
+          "ms": 44.55
+        },
+        {
+          "idx": 27,
+          "linear": false,
+          "ms": 46.23
+        },
+        {
+          "idx": 28,
+          "linear": true,
+          "ms": 44.36
+        },
+        {
+          "idx": 29,
+          "linear": true,
+          "ms": 44.3
+        },
+        {
+          "idx": 30,
+          "linear": true,
+          "ms": 44.74
+        },
+        {
+          "idx": 31,
+          "linear": false,
+          "ms": 46.18
+        }
+      ]
+    },
+    {
+      "ctx": 2048,
+      "actual_tokens": 2212,
+      "cold": false,
+      "total_ms": 1646.7,
+      "linear_ms": 1065.6,
+      "attention_ms": 371.6,
+      "linear_share": 0.647,
+      "attention_share": 0.226,
+      "per_layer": [
+        {
+          "idx": 0,
+          "linear": true,
+          "ms": 45.25
+        },
+        {
+          "idx": 1,
+          "linear": true,
+          "ms": 45.25
+        },
+        {
+          "idx": 2,
+          "linear": true,
+          "ms": 44.97
+        },
+        {
+          "idx": 3,
+          "linear": false,
+          "ms": 46.74
+        },
+        {
+          "idx": 4,
+          "linear": true,
+          "ms": 44.34
+        },
+        {
+          "idx": 5,
+          "linear": true,
+          "ms": 44.8
+        },
+        {
+          "idx": 6,
+          "linear": true,
+          "ms": 44.58
+        },
+        {
+          "idx": 7,
+          "linear": false,
+          "ms": 46.88
+        },
+        {
+          "idx": 8,
+          "linear": true,
+          "ms": 44.7
+        },
+        {
+          "idx": 9,
+          "linear": true,
+          "ms": 44.28
+        },
+        {
+          "idx": 10,
+          "linear": true,
+          "ms": 45.35
+        },
+        {
+          "idx": 11,
+          "linear": false,
+          "ms": 46.5
+        },
+        {
+          "idx": 12,
+          "linear": true,
+          "ms": 44.36
+        },
+        {
+          "idx": 13,
+          "linear": true,
+          "ms": 44.07
+        },
+        {
+          "idx": 14,
+          "linear": true,
+          "ms": 43.95
+        },
+        {
+          "idx": 15,
+          "linear": false,
+          "ms": 45.96
+        },
+        {
+          "idx": 16,
+          "linear": true,
+          "ms": 44.31
+        },
+        {
+          "idx": 17,
+          "linear": true,
+          "ms": 43.79
+        },
+        {
+          "idx": 18,
+          "linear": true,
+          "ms": 43.92
+        },
+        {
+          "idx": 19,
+          "linear": false,
+          "ms": 46.41
+        },
+        {
+          "idx": 20,
+          "linear": true,
+          "ms": 43.91
+        },
+        {
+          "idx": 21,
+          "linear": true,
+          "ms": 43.87
+        },
+        {
+          "idx": 22,
+          "linear": true,
+          "ms": 44.08
+        },
+        {
+          "idx": 23,
+          "linear": false,
+          "ms": 46.82
+        },
+        {
+          "idx": 24,
+          "linear": true,
+          "ms": 44.17
+        },
+        {
+          "idx": 25,
+          "linear": true,
+          "ms": 44.16
+        },
+        {
+          "idx": 26,
+          "linear": true,
+          "ms": 43.79
+        },
+        {
+          "idx": 27,
+          "linear": false,
+          "ms": 46.09
+        },
+        {
+          "idx": 28,
+          "linear": true,
+          "ms": 44.32
+        },
+        {
+          "idx": 29,
+          "linear": true,
+          "ms": 44.46
+        },
+        {
+          "idx": 30,
+          "linear": true,
+          "ms": 44.93
+        },
+        {
+          "idx": 31,
+          "linear": false,
+          "ms": 46.16
+        }
+      ]
+    },
+    {
+      "ctx": 4096,
+      "actual_tokens": 4097,
+      "cold": true,
+      "total_ms": 3127.1,
+      "linear_ms": 1964.0,
+      "attention_ms": 731.5,
+      "linear_share": 0.628,
+      "attention_share": 0.234,
+      "per_layer": [
+        {
+          "idx": 0,
+          "linear": true,
+          "ms": 82.19
+        },
+        {
+          "idx": 1,
+          "linear": true,
+          "ms": 86.27
+        },
+        {
+          "idx": 2,
+          "linear": true,
+          "ms": 81.61
+        },
+        {
+          "idx": 3,
+          "linear": false,
+          "ms": 93.74
+        },
+        {
+          "idx": 4,
+          "linear": true,
+          "ms": 81.72
+        },
+        {
+          "idx": 5,
+          "linear": true,
+          "ms": 81.41
+        },
+        {
+          "idx": 6,
+          "linear": true,
+          "ms": 81.18
+        },
+        {
+          "idx": 7,
+          "linear": false,
+          "ms": 91.41
+        },
+        {
+          "idx": 8,
+          "linear": true,
+          "ms": 81.27
+        },
+        {
+          "idx": 9,
+          "linear": true,
+          "ms": 81.42
+        },
+        {
+          "idx": 10,
+          "linear": true,
+          "ms": 81.04
+        },
+        {
+          "idx": 11,
+          "linear": false,
+          "ms": 91.15
+        },
+        {
+          "idx": 12,
+          "linear": true,
+          "ms": 81.47
+        },
+        {
+          "idx": 13,
+          "linear": true,
+          "ms": 82.75
+        },
+        {
+          "idx": 14,
+          "linear": true,
+          "ms": 80.43
+        },
+        {
+          "idx": 15,
+          "linear": false,
+          "ms": 90.72
+        },
+        {
+          "idx": 16,
+          "linear": true,
+          "ms": 80.97
+        },
+        {
+          "idx": 17,
+          "linear": true,
+          "ms": 80.58
+        },
+        {
+          "idx": 18,
+          "linear": true,
+          "ms": 80.54
+        },
+        {
+          "idx": 19,
+          "linear": false,
+          "ms": 91.28
+        },
+        {
+          "idx": 20,
+          "linear": true,
+          "ms": 80.54
+        },
+        {
+          "idx": 21,
+          "linear": true,
+          "ms": 80.12
+        },
+        {
+          "idx": 22,
+          "linear": true,
+          "ms": 80.86
+        },
+        {
+          "idx": 23,
+          "linear": false,
+          "ms": 90.22
+        },
+        {
+          "idx": 24,
+          "linear": true,
+          "ms": 80.35
+        },
+        {
+          "idx": 25,
+          "linear": true,
+          "ms": 86.76
+        },
+        {
+          "idx": 26,
+          "linear": true,
+          "ms": 88.3
+        },
+        {
+          "idx": 27,
+          "linear": false,
+          "ms": 90.81
+        },
+        {
+          "idx": 28,
+          "linear": true,
+          "ms": 81.12
+        },
+        {
+          "idx": 29,
+          "linear": true,
+          "ms": 80.43
+        },
+        {
+          "idx": 30,
+          "linear": true,
+          "ms": 80.69
+        },
+        {
+          "idx": 31,
+          "linear": false,
+          "ms": 92.15
+        }
+      ]
+    },
+    {
+      "ctx": 4096,
+      "actual_tokens": 4097,
+      "cold": false,
+      "total_ms": 3107.4,
+      "linear_ms": 1954.8,
+      "attention_ms": 730.4,
+      "linear_share": 0.629,
+      "attention_share": 0.235,
+      "per_layer": [
+        {
+          "idx": 0,
+          "linear": true,
+          "ms": 82.95
+        },
+        {
+          "idx": 1,
+          "linear": true,
+          "ms": 81.04
+        },
+        {
+          "idx": 2,
+          "linear": true,
+          "ms": 81.49
+        },
+        {
+          "idx": 3,
+          "linear": false,
+          "ms": 91.72
+        },
+        {
+          "idx": 4,
+          "linear": true,
+          "ms": 81.46
+        },
+        {
+          "idx": 5,
+          "linear": true,
+          "ms": 81.5
+        },
+        {
+          "idx": 6,
+          "linear": true,
+          "ms": 81.82
+        },
+        {
+          "idx": 7,
+          "linear": false,
+          "ms": 91.01
+        },
+        {
+          "idx": 8,
+          "linear": true,
+          "ms": 81.47
+        },
+        {
+          "idx": 9,
+          "linear": true,
+          "ms": 80.94
+        },
+        {
+          "idx": 10,
+          "linear": true,
+          "ms": 81.65
+        },
+        {
+          "idx": 11,
+          "linear": false,
+          "ms": 90.9
+        },
+        {
+          "idx": 12,
+          "linear": true,
+          "ms": 80.77
+        },
+        {
+          "idx": 13,
+          "linear": true,
+          "ms": 80.92
+        },
+        {
+          "idx": 14,
+          "linear": true,
+          "ms": 81.29
+        },
+        {
+          "idx": 15,
+          "linear": false,
+          "ms": 91.47
+        },
+        {
+          "idx": 16,
+          "linear": true,
+          "ms": 81.41
+        },
+        {
+          "idx": 17,
+          "linear": true,
+          "ms": 80.99
+        },
+        {
+          "idx": 18,
+          "linear": true,
+          "ms": 81.1
+        },
+        {
+          "idx": 19,
+          "linear": false,
+          "ms": 91.43
+        },
+        {
+          "idx": 20,
+          "linear": true,
+          "ms": 80.88
+        },
+        {
+          "idx": 21,
+          "linear": true,
+          "ms": 80.62
+        },
+        {
+          "idx": 22,
+          "linear": true,
+          "ms": 80.83
+        },
+        {
+          "idx": 23,
+          "linear": false,
+          "ms": 91.57
+        },
+        {
+          "idx": 24,
+          "linear": true,
+          "ms": 81.9
+        },
+        {
+          "idx": 25,
+          "linear": true,
+          "ms": 80.92
+        },
+        {
+          "idx": 26,
+          "linear": true,
+          "ms": 81.3
+        },
+        {
+          "idx": 27,
+          "linear": false,
+          "ms": 90.95
+        },
+        {
+          "idx": 28,
+          "linear": true,
+          "ms": 81.11
+        },
+        {
+          "idx": 29,
+          "linear": true,
+          "ms": 84.2
+        },
+        {
+          "idx": 30,
+          "linear": true,
+          "ms": 82.18
+        },
+        {
+          "idx": 31,
+          "linear": false,
+          "ms": 91.33
+        }
+      ]
+    },
+    {
+      "ctx": 8192,
+      "actual_tokens": 8286,
+      "cold": true,
+      "total_ms": 6613.5,
+      "linear_ms": 4012.9,
+      "attention_ms": 1719.0,
+      "linear_share": 0.607,
+      "attention_share": 0.26,
+      "per_layer": [
+        {
+          "idx": 0,
+          "linear": true,
+          "ms": 168.33
+        },
+        {
+          "idx": 1,
+          "linear": true,
+          "ms": 167.54
+        },
+        {
+          "idx": 2,
+          "linear": true,
+          "ms": 167.54
+        },
+        {
+          "idx": 3,
+          "linear": false,
+          "ms": 214.29
+        },
+        {
+          "idx": 4,
+          "linear": true,
+          "ms": 166.12
+        },
+        {
+          "idx": 5,
+          "linear": true,
+          "ms": 166.6
+        },
+        {
+          "idx": 6,
+          "linear": true,
+          "ms": 166.17
+        },
+        {
+          "idx": 7,
+          "linear": false,
+          "ms": 214.46
+        },
+        {
+          "idx": 8,
+          "linear": true,
+          "ms": 167.81
+        },
+        {
+          "idx": 9,
+          "linear": true,
+          "ms": 167.53
+        },
+        {
+          "idx": 10,
+          "linear": true,
+          "ms": 166.44
+        },
+        {
+          "idx": 11,
+          "linear": false,
+          "ms": 213.61
+        },
+        {
+          "idx": 12,
+          "linear": true,
+          "ms": 166.2
+        },
+        {
+          "idx": 13,
+          "linear": true,
+          "ms": 167.03
+        },
+        {
+          "idx": 14,
+          "linear": true,
+          "ms": 165.84
+        },
+        {
+          "idx": 15,
+          "linear": false,
+          "ms": 213.18
+        },
+        {
+          "idx": 16,
+          "linear": true,
+          "ms": 166.92
+        },
+        {
+          "idx": 17,
+          "linear": true,
+          "ms": 166.16
+        },
+        {
+          "idx": 18,
+          "linear": true,
+          "ms": 165.99
+        },
+        {
+          "idx": 19,
+          "linear": false,
+          "ms": 214.44
+        },
+        {
+          "idx": 20,
+          "linear": true,
+          "ms": 166.48
+        },
+        {
+          "idx": 21,
+          "linear": true,
+          "ms": 166.69
+        },
+        {
+          "idx": 22,
+          "linear": true,
+          "ms": 166.86
+        },
+        {
+          "idx": 23,
+          "linear": false,
+          "ms": 214.9
+        },
+        {
+          "idx": 24,
+          "linear": true,
+          "ms": 168.78
+        },
+        {
+          "idx": 25,
+          "linear": true,
+          "ms": 166.14
+        },
+        {
+          "idx": 26,
+          "linear": true,
+          "ms": 170.37
+        },
+        {
+          "idx": 27,
+          "linear": false,
+          "ms": 214.4
+        },
+        {
+          "idx": 28,
+          "linear": true,
+          "ms": 167.32
+        },
+        {
+          "idx": 29,
+          "linear": true,
+          "ms": 168.2
+        },
+        {
+          "idx": 30,
+          "linear": true,
+          "ms": 169.89
+        },
+        {
+          "idx": 31,
+          "linear": false,
+          "ms": 219.72
+        }
+      ]
+    },
+    {
+      "ctx": 8192,
+      "actual_tokens": 8286,
+      "cold": false,
+      "total_ms": 6706.5,
+      "linear_ms": 4077.8,
+      "attention_ms": 1749.3,
+      "linear_share": 0.608,
+      "attention_share": 0.261,
+      "per_layer": [
+        {
+          "idx": 0,
+          "linear": true,
+          "ms": 171.02
+        },
+        {
+          "idx": 1,
+          "linear": true,
+          "ms": 169.52
+        },
+        {
+          "idx": 2,
+          "linear": true,
+          "ms": 170.18
+        },
+        {
+          "idx": 3,
+          "linear": false,
+          "ms": 221.23
+        },
+        {
+          "idx": 4,
+          "linear": true,
+          "ms": 169.53
+        },
+        {
+          "idx": 5,
+          "linear": true,
+          "ms": 169.69
+        },
+        {
+          "idx": 6,
+          "linear": true,
+          "ms": 170.33
+        },
+        {
+          "idx": 7,
+          "linear": false,
+          "ms": 217.44
+        },
+        {
+          "idx": 8,
+          "linear": true,
+          "ms": 169.24
+        },
+        {
+          "idx": 9,
+          "linear": true,
+          "ms": 169.4
+        },
+        {
+          "idx": 10,
+          "linear": true,
+          "ms": 169.29
+        },
+        {
+          "idx": 11,
+          "linear": false,
+          "ms": 217.67
+        },
+        {
+          "idx": 12,
+          "linear": true,
+          "ms": 169.9
+        },
+        {
+          "idx": 13,
+          "linear": true,
+          "ms": 169.62
+        },
+        {
+          "idx": 14,
+          "linear": true,
+          "ms": 169.86
+        },
+        {
+          "idx": 15,
+          "linear": false,
+          "ms": 218.07
+        },
+        {
+          "idx": 16,
+          "linear": true,
+          "ms": 169.45
+        },
+        {
+          "idx": 17,
+          "linear": true,
+          "ms": 170.03
+        },
+        {
+          "idx": 18,
+          "linear": true,
+          "ms": 169.67
+        },
+        {
+          "idx": 19,
+          "linear": false,
+          "ms": 218.75
+        },
+        {
+          "idx": 20,
+          "linear": true,
+          "ms": 169.73
+        },
+        {
+          "idx": 21,
+          "linear": true,
+          "ms": 169.26
+        },
+        {
+          "idx": 22,
+          "linear": true,
+          "ms": 168.37
+        },
+        {
+          "idx": 23,
+          "linear": false,
+          "ms": 218.5
+        },
+        {
+          "idx": 24,
+          "linear": true,
+          "ms": 168.9
+        },
+        {
+          "idx": 25,
+          "linear": true,
+          "ms": 173.86
+        },
+        {
+          "idx": 26,
+          "linear": true,
+          "ms": 170.85
+        },
+        {
+          "idx": 27,
+          "linear": false,
+          "ms": 217.97
+        },
+        {
+          "idx": 28,
+          "linear": true,
+          "ms": 170.11
+        },
+        {
+          "idx": 29,
+          "linear": true,
+          "ms": 169.87
+        },
+        {
+          "idx": 30,
+          "linear": true,
+          "ms": 170.09
+        },
+        {
+          "idx": 31,
+          "linear": false,
+          "ms": 219.64
+        }
+      ]
+    }
+  ],
+  "timestamp_epoch": 1776775339
+}

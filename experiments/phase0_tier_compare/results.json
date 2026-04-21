@@ -1,0 +1,96 @@
+{
+  "tiers": [
+    "small",
+    "large-moe"
+  ],
+  "ctx": [
+    512,
+    1024,
+    2048,
+    4096,
+    8192
+  ],
+  "gen_tokens": 128,
+  "rows": [
+    {
+      "tier": "small",
+      "ctx": 512,
+      "prefill_ms": 378.739583,
+      "gen_tps": 161.43949346849408,
+      "accept": 7.75,
+      "gen_tokens": 124
+    },
+    {
+      "tier": "small",
+      "ctx": 1024,
+      "prefill_ms": 696.3439579999999,
+      "gen_tps": 138.2844043583022,
+      "accept": 6.888888888888889,
+      "gen_tokens": 124
+    },
+    {
+      "tier": "small",
+      "ctx": 2048,
+      "prefill_ms": 1583.700166,
+      "gen_tps": 131.0952922639131,
+      "accept": 6.526315789473684,
+      "gen_tokens": 124
+    },
+    {
+      "tier": "small",
+      "ctx": 4096,
+      "prefill_ms": 3287.547375,
+      "gen_tps": 113.56148944156446,
+      "accept": 5.904761904761905,
+      "gen_tokens": 124
+    },
+    {
+      "tier": "small",
+      "ctx": 8192,
+      "prefill_ms": 7109.436417000001,
+      "gen_tps": 105.43628570665746,
+      "accept": 5.904761904761905,
+      "gen_tokens": 124
+    },
+    {
+      "tier": "large-moe",
+      "ctx": 512,
+      "prefill_ms": 382.324292,
+      "gen_tps": 131.83683651044947,
+      "accept": 6.4,
+      "gen_tokens": 128
+    },
+    {
+      "tier": "large-moe",
+      "ctx": 1024,
+      "prefill_ms": 661.1552079999999,
+      "gen_tps": 149.52171309779408,
+      "accept": 7.111111111111111,
+      "gen_tokens": 128
+    },
+    {
+      "tier": "large-moe",
+      "ctx": 2048,
+      "prefill_ms": 1880.1245419999998,
+      "gen_tps": 134.58067622194167,
+      "accept": 6.75,
+      "gen_tokens": 108
+    },
+    {
+      "tier": "large-moe",
+      "ctx": 4096,
+      "prefill_ms": 3121.975667,
+      "gen_tps": 119.68138470848454,
+      "accept": 6.294117647058823,
+      "gen_tokens": 107
+    },
+    {
+      "tier": "large-moe",
+      "ctx": 8192,
+      "prefill_ms": 5925.574375,
+      "gen_tps": 108.76662798215446,
+      "accept": 6.352941176470588,
+      "gen_tokens": 108
+    }
+  ]
+}
