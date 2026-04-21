@@ -63,3 +63,56 @@ These are upper bounds assuming:
 - Investigate RoPE composition — can we rank-reduce the *rotated* Q/K instead?
 - If ranks stabilize, prototype low-rank attention in MLX (no custom kernel yet — just two consecutive matmuls) and measure quality on GSM8K or HumanEval.
 - If quality holds, write a fused Metal kernel to unlock the 3× speed.
+
+## Follow-up run: 3-sample calibration (bug-fixed)
+
+Initial pass had a bug: slot storage overwrote on each sample, so "3 samples" only measured the last. After fix, concatenating activations across samples:
+
+| | 1 sample (buggy) | 3 samples (concat) | 10 samples at ctx=2K |
+|---|---:|---:|---:|
+| Q median r@98% | 69 | **118** | **117** (stable) |
+| K median r@98% | 82 | **144** | **141** (stable) |
+| Q savings | 3.7× | **2.2×** | 2.2× |
+| K savings | 3.1× | **1.8×** | 1.8× |
+
+Rank **stabilized at 3 samples**. Going to 10 samples × 2K doesn't change it. The effective rank of Q/K activations on this model is ~45-55% of d_head. The 1-sample number was a single-prompt artifact.
+
+Updated projected prefill speedup at K 1.8×:
+
+| ctx | projected speedup |
+|---:|---:|
+| 4K | 10% |
+| 16K | 16% |
+| 32K | 19% |
+
+Still substantial in theory, but the RoPE interaction remains unresolved: pre-RoPE activation rank doesn't automatically transfer to post-RoPE attention compute savings, because RoPE rotations are position-dependent.
+
+## Follow-up: W_Q / W_K weight-matrix SVD — decisive negative
+
+The MLA-style ("DeepSeek V2/V3") approach factors the weight matrix directly: W_Q = W_Q_small @ W_Q_up with rank r. This composes cleanly with RoPE because the rank reduction happens in the d_model → r projection, BEFORE rotation.
+
+If W_Q has low rank, the low-rank factorization is a free speedup. If not, C1 is dead.
+
+Result — SVD on actual dequantized W_Q / W_K per-head on all 10 attention layers:
+
+| | median r@98% | savings |
+|---|---:|---:|
+| W_Q per-head (queries only, skip gate) | 221 / 256 | **1.16×** |
+| W_K per-head | 218 / 256 | **1.17×** |
+
+**C1 is dead on Qwen3.6-35B-A3B.** Weight matrices have essentially no low-rank structure. The activation rank from the earlier SVD was misleading — it measured the rank of `x @ W_Q` on specific prompts, which is bounded by min(rank(x), rank(W_Q)) and in practice dominated by the prompt distribution's coverage of the weight-matrix column space.
+
+### Why C1 works in papers and not here
+
+- DeepSeek-V2/V3 ship with MLA built in at training time. Their attention weight matrices are **structurally** low-rank (trained to be, via architectural constraint).
+- Qwen3.6 trained with standard full-rank attention. Post-hoc rank reduction of dense weights doesn't exist.
+- The plan's C1 hypothesis (r_98 ∈ [4, 32] on Llama-8B d_head=128) was likely also optimistic for the same reason — unless tested directly on Llama-8B weights, this is untested.
+
+### What would actually work
+
+For C1-style attention compute reduction on a full-rank-weights model, you'd need:
+- Attention-pattern-exploiting methods (Linformer, Performer, Reformer) — change softmax semantics, require retraining or aggressive calibration.
+- Block-sparse attention (C3 / C4 in the plan) — static mask, no weight factorization needed.
+- OR retrain/distill into an MLA-style architecture — weeks of training.
+
+None of these are cheap. **C1 as described in the plan does not apply to this model.**

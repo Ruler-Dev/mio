@@ -77,14 +77,16 @@ def _install_capture(target_model: Any, storage: dict) -> Any:
         def wrapper(self, x, mask=None, cache=None):
             slot_id = id_to_slot.get(id(self), None)
             if slot_id is not None:
-                # Capture the full Q, K projection outputs (before
-                # q_norm / k_norm / RoPE) — that's the representation
-                # C1 operates on.
-                q_out = self.q_proj(x)
-                k_out = self.k_proj(x)
+                # Capture q_proj/k_proj outputs pre-RoPE/pre-norm. Keep a
+                # float32 copy on CPU so we can concatenate across samples
+                # without holding the bf16 MLX arrays in GPU memory.
+                q_out = self.q_proj(x).astype(mx.float32)
+                k_out = self.k_proj(x).astype(mx.float32)
                 mx.eval(q_out, k_out)
-                storage.setdefault(slot_id, {})["Q"] = q_out
-                storage[slot_id]["K"] = k_out
+                import numpy as _np
+                slot = storage.setdefault(slot_id, {"Q_list": [], "K_list": []})
+                slot["Q_list"].append(_np.array(q_out[0], copy=True))
+                slot["K_list"].append(_np.array(k_out[0], copy=True))
             return original_call(self, x, mask=mask, cache=cache)
         return wrapper
 
@@ -162,20 +164,16 @@ def _analyze_rank(
     q_results: list[HeadRank] = []
     k_results: list[HeadRank] = []
 
-    import mlx.core as mx
     for i in sorted(activations.keys()):
         slot = activations[i]
-        Q = slot.get("Q")  # (1, L, n_q_heads * d_head * 2)
-        K = slot.get("K")  # (1, L, n_kv_heads * d_head)
-        if Q is None or K is None:
+        q_list = slot.get("Q_list", [])
+        k_list = slot.get("K_list", [])
+        if not q_list or not k_list:
             continue
 
-        # Cast in MLX (bfloat16 has no numpy dtype) before crossing to numpy.
-        Q_f32 = Q[0].astype(mx.float32)
-        K_f32 = K[0].astype(mx.float32)
-        mx.eval(Q_f32, K_f32)
-        Q_np = np.array(Q_f32, copy=False)
-        K_np = np.array(K_f32, copy=False)
+        # Concatenate across samples along the L axis.
+        Q_np = np.concatenate(q_list, axis=0)
+        K_np = np.concatenate(k_list, axis=0)
         L = Q_np.shape[0]
 
         # Q: reshape to (L, n_q_heads, d_head*2), take first d_head (queries).
