@@ -1,0 +1,22 @@
+{
+  "n_calibrations": 8,
+  "min_similarity": 0.9,
+  "n_early_layers": 10,
+  "hits_correct": 8,
+  "hits_wrong": 0,
+  "hits_missed": 0,
+  "false_positives_on_novel": 4,
+  "avg_sim_on_correct_hits": 0.9699840769171715,
+  "avg_sim_on_novel": 0.9433706700801849,
+  "rank_of_correct": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "model_id": "large-moe|/Users/ruler/Documents/pi-mio/models/Qwen3.6-35B-A3B-UD-Q4_K_XL-mlx"
+}
