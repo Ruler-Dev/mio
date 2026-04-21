@@ -141,3 +141,53 @@ Shipping Path C as a mio feature requires:
 2. Does it hold at larger context sizes where attention becomes quadratic?
 3. Does it compose with frozen-KV (C3) cleanly, or do the two machineries collide?
 4. What's the chunk-detection cost in the hot path — how cheap can we make the "is there a known chunk in this prompt" check?
+
+## Phase 4 production bench — measured (2026-04-21)
+
+With the shipped production pipeline (`mio/kv_splice/{store,ingest,detect,splice}.py`), single 39-token
+chunk, 5 spliced layers ([3,7,11,15,19]), large-moe tier, DFlash on.
+
+### 15K context — chunk position sweep
+
+| prompt | tokens | chunk site | fresh_ms | splice_ms | Δ | lcp | SHA |
+|---|---:|---:|---:|---:|---:|---:|:---:|
+| chunk_at_4K_of_15K | 15092 | 4008–4047 | 11358 | 11697 | **−3.0%** | 1.000 | MATCH |
+| chunk_at_8K_of_15K | 15092 | 8013–8052 | 11529 | 12124 | **−5.2%** | 1.000 | MATCH |
+| chunk_at_12K_of_15K | 15092 | 12018–12057 | 12202 | 12627 | **−3.5%** | 1.000 | MATCH |
+
+**Quality: perfect** — byte-exact match in all three positions, confirming the [3,7,11,15,19] splice set is
+end-to-end sound at mid- and deep-context positions, not just at the tiny 450-token test used in Phase 3.
+
+**Speed: splice is 3–5% slower than fresh.** The cause is chunk-to-context ratio:
+
+- Chunk is 39 tokens (0.26% of 15K context).
+- Compute savings: k_proj/v_proj on 39 tokens × 5 layers — negligible.
+- Overhead: each spliced layer call issues `mx.concatenate([pre, spliced, post], axis=2)` across the
+  full sequence tensor `(B, n_kv, 15092, d_h)`. Five layers × two projections = 10 concats of ~15K-long
+  tensors per prefill. That cost dominates the savings.
+
+### What this means
+
+The Phase 3 projection of +12 to +22% speedup **assumes the chunk is large relative to context, or that
+many chunks repeat**. A single 39-token chunk in 15K context cannot realize that projection — there is
+simply not enough saved attention compute to amortize the splice-hook plumbing.
+
+**For Path C to produce a positive result, either:**
+
+1. Chunks must be large (500+ tokens), e.g. retrieved document blocks, tool-definition blocks, shared
+   system preambles.
+2. Multiple chunks in one prompt (aggregate coverage ≥ several % of context).
+3. The splice machinery must be rewritten to avoid full-sequence concat — e.g. write splice values
+   directly into an output buffer at the target positions without rematerializing pre/post slices.
+
+### Action items (Phase 4.5 → 4.6)
+
+- **Bench with realistic chunk sizes**: 512-token tool def, 1K-token doc chunk, shared system-prompt
+  boilerplate. At 1K chunk / 8K ctx the math starts flipping positive.
+- **Remove the concat overhead**: switch to in-place overlay via `mx.where(mask, spliced_full, y)` or
+  scatter-style write. Eliminates the ~15K tensor copy per layer call.
+- **Ship behind `MIO_KV_SPLICE=1`** only once measured speedup exceeds noise on a representative
+  workload. Quality gate already passing.
+
+**Do not merge** until we have a measured win on a realistic scenario. Byte-exact quality alone is not
+enough — the plumbing cost must be paid back.
