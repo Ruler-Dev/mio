@@ -207,6 +207,49 @@ class MioEngine:
                 pass
         return max(0, int(getattr(self.tier_config, "ddtree_budget", 0) or 0))
 
+    # --- frozen KV prefix cache (experimental, opt-in via MIO_FROZEN_KV=1) ---
+    #
+    # Disk-backed snapshot of the KV cache produced by prefilling a fixed
+    # system-prompt prefix. Unlike the in-memory prefix_cache (which is
+    # bypassed when PQ/TQ are active), this cache persists across processes
+    # and cache-type-independent via the frozen_kv serializer.
+    #
+    # Wiring strategy: these helpers are called from generate() / generate_stream()
+    # but only when the env var is set, so the production path is untouched
+    # by default. Integration into the warm_state pipeline requires that
+    # frozen_kv.bundle_freeze / bundle_try_load exist; see mio.frozen_kv.
+
+    def _frozen_kv_enabled(self) -> bool:
+        import os as _os
+        return _os.environ.get("MIO_FROZEN_KV", "").lower() in ("1", "true", "yes")
+
+    def _frozen_kv_prefix_len(self) -> int:
+        import os as _os
+        try:
+            return max(1, int(_os.environ.get("MIO_FROZEN_KV_PREFIX", "4096")))
+        except ValueError:
+            return 4096
+
+    def _frozen_kv_base_dir(self):
+        import os as _os
+        from pathlib import Path
+        override = _os.environ.get("MIO_FROZEN_KV_DIR")
+        if override:
+            return Path(override)
+        return Path.home() / ".mio" / "frozen-kv"
+
+    def _frozen_kv_model_id(self) -> str:
+        return f"{self.tier_config.name}|{self.tier_config.target_model}"
+
+    def _frozen_kv_config(self) -> dict:
+        tc = self.tier_config
+        return {
+            "model_id": self._frozen_kv_model_id(),
+            "pq_bits": int(getattr(tc, "pq_bits", 16)),
+            "tq_bits": int(getattr(tc, "tq_bits", 16)),
+            "ctx_window": int(tc.context_window),
+        }
+
     @staticmethod
     def _prepare_ddtree_env() -> None:
         """Force exact-commit mode so DDTree works with any KV cache type.
