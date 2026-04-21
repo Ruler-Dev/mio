@@ -340,6 +340,91 @@ def common_prefix_fingerprints(
     return results
 
 
+def scan_best_prefix_match(
+    prompt_tokens: list[int],
+    *,
+    model_id: str,
+    pq_bits: int,
+    tq_bits: int,
+    ctx_window: int,
+    base_dir: Optional[Path] = None,
+    min_match: int = 64,
+) -> Optional[tuple[Path, int, dict[str, str]]]:
+    """Find the bundle snapshot whose stored tokens share the longest prefix
+    with `prompt_tokens`.
+
+    Walks the frozen-KV directory, loads metadata only (cheap), and scores
+    each by common-prefix-length of `stored_tokens` vs `prompt_tokens`.
+    Returns (file_path, match_length, metadata) for the best match, or
+    None if no snapshot exceeds `min_match` tokens of overlap.
+
+    Config mismatches (model_id/pq/tq/ctx_window/version) are filtered
+    out before scoring.
+    """
+    import os as _os
+    trace = _os.environ.get("MIO_FROZEN_KV_DEBUG", "") in ("1", "true")
+    base = Path(base_dir) if base_dir is not None else DEFAULT_DIR
+    if not base.exists():
+        if trace:
+            print(f"[frozen_kv] scan: dir missing {base}", flush=True)
+        return None
+    best: tuple[Path, int, dict[str, str]] | None = None
+    candidates = list(base.iterdir())
+    if trace:
+        print(f"[frozen_kv] scan: {len(candidates)} files in {base}", flush=True)
+    for path in candidates:
+        if not path.name.startswith("bundle-") or path.suffix != ".safetensors":
+            continue
+        try:
+            _, metadata = mx.load(str(path), return_metadata=True)
+        except Exception as exc:
+            if trace:
+                print(f"[frozen_kv] scan: load fail {path.name}: {exc}", flush=True)
+            continue
+        if not isinstance(metadata, dict):
+            continue
+        if metadata.get("mio_frozen_kv_version") != str(FROZEN_KV_VERSION):
+            continue
+        if metadata.get("bundle_format_version") != "1":
+            continue
+        if metadata.get("model_id") != model_id:
+            continue
+        if metadata.get("pq_bits") != str(int(pq_bits)):
+            continue
+        if metadata.get("tq_bits") != str(int(tq_bits)):
+            continue
+        if metadata.get("ctx_window") != str(int(ctx_window)):
+            continue
+        try:
+            stored_tokens = json.loads(metadata.get("stored_tokens", "[]"))
+        except Exception:
+            continue
+        if not isinstance(stored_tokens, list) or not stored_tokens:
+            continue
+        match = 0
+        for a, b in zip(prompt_tokens, stored_tokens):
+            if a != b:
+                break
+            match += 1
+        if trace:
+            print(
+                f"[frozen_kv] scan: {path.name[:16]} match={match}/{len(stored_tokens)} "
+                f"prompt_len={len(prompt_tokens)} min_match={min_match}",
+                flush=True,
+            )
+        if match < min_match:
+            continue
+        # Ranking: prefer (a) larger match, then (b) smaller stored_len —
+        # i.e., a snapshot that exactly covers what we need, so no
+        # trimming is required on load. On hybrid models with recurrent
+        # caches, trimming is often impossible.
+        score = (match, -len(stored_tokens))
+        best_score = (best[1], -len(json.loads(best[2].get("stored_tokens", "[]")))) if best else None
+        if best is None or score > best_score:
+            best = (path, match, dict(metadata))
+    return best
+
+
 def bundle_freeze(
     *,
     target_cache: list[Any],
@@ -353,6 +438,7 @@ def bundle_freeze(
     tq_bits: int,
     ctx_window: int,
     base_dir: Optional[Path] = None,
+    stored_tokens: Optional[list[int]] = None,
 ) -> Path:
     """Freeze the full warm_state envelope to disk.
 
@@ -425,6 +511,11 @@ def bundle_freeze(
         "draft_layer_count": str(len(draft_cache)),
         "draft_info": json.dumps(draft_info),
         "has_target_hidden": str(bool(target_hidden is not None)),
+        # Store the exact token sequence this cache represents so
+        # scan_best_prefix_match can score prefix overlap on load.
+        "stored_tokens": json.dumps(
+            list(stored_tokens) if stored_tokens is not None else list(prompt_tokens)
+        ),
     }
 
     tmp_stem = target.with_name(f".{target.stem}.tmp")
@@ -557,6 +648,131 @@ def bundle_try_load(
         "draft_cache": draft_template,
         "target_hidden": target_hidden,
         "offset": int(metadata.get("offset", prefix_len)),
+    }
+
+
+def bundle_scan_and_load(
+    *,
+    target_template: list[Any],
+    draft_template: list[Any],
+    prompt_tokens: list[int],
+    model_id: str,
+    pq_bits: int,
+    tq_bits: int,
+    ctx_window: int,
+    base_dir: Optional[Path] = None,
+    min_match: int = 64,
+) -> Optional[dict]:
+    """Find the best prefix match in base_dir, load it, truncate to the
+    match length, and return a warm_state dict.
+
+    This is the "radix-style" loader: any stored snapshot whose
+    `stored_tokens` share >= min_match tokens with the prompt is a
+    candidate; the longest match wins.
+
+    After loading, the returned warm_state reflects the match length —
+    caches beyond that point (tokens that differ from the current prompt)
+    are trimmed away for attention-style caches. Linear/recurrent caches
+    are trimmed as best-effort via trim_prompt_cache; when that's
+    impossible on a given cache type, the match is rejected.
+    """
+    hit = scan_best_prefix_match(
+        prompt_tokens,
+        model_id=model_id,
+        pq_bits=pq_bits,
+        tq_bits=tq_bits,
+        ctx_window=ctx_window,
+        base_dir=base_dir,
+        min_match=min_match,
+    )
+    if hit is None:
+        return None
+    path, match_len, metadata = hit
+    # Load arrays side.
+    try:
+        arrays, _ = mx.load(str(path), return_metadata=True)
+    except Exception:
+        return None
+    try:
+        target_classes = json.loads(metadata.get("target_classes", "[]"))
+    except Exception:
+        return None
+    if target_classes != [type(c).__name__ for c in target_template]:
+        return None
+    try:
+        target_meta_states = json.loads(metadata.get("target_meta_states", "[]"))
+    except Exception:
+        return None
+
+    # Unflatten target state.
+    target_arrays = {
+        k[len("target/"):]: v for k, v in arrays.items() if k.startswith("target/")
+    }
+    try:
+        target_state_list = tree_unflatten(list(target_arrays.items()))
+        if len(target_state_list) != len(target_template):
+            return None
+        for cache, state, meta in zip(
+            target_template, target_state_list, target_meta_states, strict=True
+        ):
+            _install_state(cache, state, meta)
+    except Exception:
+        return None
+
+    # Draft state install.
+    try:
+        draft_info = json.loads(metadata.get("draft_info", "[]"))
+        for i, (dc, info) in enumerate(
+            zip(draft_template, draft_info, strict=True)
+        ):
+            dc.sink_size = int(info["sink_size"])
+            dc.window_size = int(info["window_size"])
+            dc.offset = int(info["offset"])
+            if info.get("has_state"):
+                dc.keys = arrays.get(f"draft/layer{i}/keys")
+                dc.values = arrays.get(f"draft/layer{i}/values")
+            else:
+                dc.keys = None
+                dc.values = None
+    except Exception:
+        return None
+
+    has_hidden = metadata.get("has_target_hidden", "False") == "True"
+    target_hidden = arrays.get("target_hidden") if has_hidden else None
+
+    # Trim caches down to match_len. For attention-style caches this is a
+    # simple offset/KV slice via trim_prompt_cache. For recurrent caches
+    # without trim support, we reject the snapshot if match_len is short
+    # of the stored length (can't cleanly roll back recurrent state).
+    from mlx_lm.models.cache import trim_prompt_cache, can_trim_prompt_cache
+    try:
+        stored_tokens = json.loads(metadata.get("stored_tokens", "[]"))
+    except Exception:
+        return None
+    stored_len = len(stored_tokens)
+    if match_len < stored_len:
+        # Need to trim. can_trim returns True only if ALL caches are trimmable.
+        if not can_trim_prompt_cache(target_template):
+            return None
+        trim_prompt_cache(target_template, stored_len - match_len)
+        # Also trim draft caches (attention only; window-cache, offsets OK).
+        for dc in draft_template:
+            if dc.keys is not None and dc.values is not None:
+                cur = int(dc.keys.shape[2])
+                new = min(cur, max(0, int(dc.offset) - (stored_len - match_len)))
+                if new < cur:
+                    dc.keys = dc.keys[:, :, :new, :]
+                    dc.values = dc.values[:, :, :new, :]
+                    dc.offset = new
+        if target_hidden is not None and target_hidden.shape[1] > match_len:
+            target_hidden = target_hidden[:, :match_len, :]
+
+    return {
+        "target_cache": target_template,
+        "draft_cache": draft_template,
+        "target_hidden": target_hidden,
+        "offset": match_len,
+        "_source_path": str(path),
     }
 
 

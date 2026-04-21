@@ -232,18 +232,25 @@ def _attention_forward_with_tree(
         )
         _profile_eval(profile_timings, "attention_exact_prefix_tree_ns", output)
     else:
-        # SDPA with tree attention mask — mask must cover full KV length
-        kv_len = keys.shape[2]
+        # SDPA with tree attention mask — mask must cover full KV length.
+        # Under QuantizedKVCache, update_and_fetch returns
+        # (quantized_values, scales, biases) tuples instead of arrays, so
+        # pull the sequence length off the first element.
+        keys_head = keys[0] if isinstance(keys, tuple) else keys
+        kv_len = keys_head.shape[2]
         mask_kv_len = mask.shape[-1]
         if mask_kv_len != kv_len:
             raise ValueError(
                 f"tree attention mask width {mask_kv_len} does not match KV length {kv_len}"
             )
 
+        # The split path slices keys/values as arrays; it can't handle the
+        # QuantizedKVCache tuple form. Route around it under quantized.
         should_split = (
             cache is not None
             and cached_prefix_len >= _HYBRID_SDPA_EXACT_KV_THRESHOLD
             and isinstance(mask, mx.array)
+            and not isinstance(keys, tuple)
         )
         if should_split:
             output = _split_sdpa_output(

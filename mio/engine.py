@@ -278,27 +278,107 @@ class MioEngine:
         ]
         return target_cache, draft_cache
 
-    def _frozen_kv_lookup(self, prompt_tokens: list[int]) -> dict | None:
-        """Try to load a frozen warm_state for prompt_tokens. None on miss."""
+    def warm_and_freeze(self, messages: list[dict]) -> Path | None:
+        """One-shot: prefill the prompt via prefill_only, freeze post-prefill
+        state to disk. Returns the snapshot path, or None if frozen KV is
+        disabled or the engine isn't ready.
+
+        Correctness: final_state from prefill_only has cache exactly at
+        offset=prompt_len. No decode mutations, no rollback tape residue.
+        Ideal for capturing a reusable system-prompt / long-context prefix.
+        """
+        if not self._loaded or self._draft_model is None:
+            return None
         if not self._frozen_kv_enabled():
+            return None
+        prompt_tokens = self._apply_chat_template(messages)
+        if len(prompt_tokens) < 2:
+            return None
+        # Freeze at prompt_len - 1 tokens. The runtime's warm-prefill path
+        # clamps warm_offset to prompt_len - 1 and always runs at least one
+        # prefill token (it samples the first bonus logit from that pass).
+        # Freezing one token short of full prompt means the runtime's
+        # minimum prefill fills the last-token slot exactly once, not twice.
+        freeze_len = len(prompt_tokens) - 1
+        freeze_tokens = prompt_tokens[:freeze_len]
+        from mio.dflash.runtime import generate_dflash_once
+        tq_bits = self._resolved_tq_bits()
+        pq_bits = self._resolved_pq_bits()
+        result = generate_dflash_once(
+            target_model=self._target_model,
+            tokenizer=self._tokenizer,
+            draft_model=self._draft_model,
+            prompt="",
+            max_new_tokens=0,
+            prompt_tokens_override=freeze_tokens,
+            tq_bits=tq_bits,
+            pq_bits=pq_bits,
+            return_final_state=True,
+            prefill_only=True,
+        )
+        final = result.get("final_state")
+        if not isinstance(final, dict):
+            return None
+        from mio.frozen_kv import bundle_freeze
+        try:
+            path = bundle_freeze(
+                target_cache=final["target_cache"],
+                draft_cache=final["draft_cache"],
+                target_hidden=final.get("target_hidden"),
+                offset=freeze_len,
+                prompt_tokens=prompt_tokens,
+                prefix_len=freeze_len,
+                # Store the full prompt tokens so scan_best_prefix_match can
+                # score this snapshot against any prompt sharing that prefix.
+                stored_tokens=list(prompt_tokens),
+                base_dir=self._frozen_kv_base_dir(),
+                **self._frozen_kv_config(),
+            )
+            return path
+        except Exception:
+            return None
+
+    def _frozen_kv_lookup(self, prompt_tokens: list[int]) -> dict | None:
+        """Try to load a frozen warm_state for prompt_tokens. None on miss.
+
+        v1 scope: exact-prompt match only. Fingerprint hashes the full
+        prompt; cache is frozen at offset=prompt_len. Two different prompts
+        do not share a frozen snapshot, even if they share a long common
+        prefix. Shared-prefix reuse on hybrid models requires a dedicated
+        prefix-only prefill pass — future work.
+        """
+        import os as _os
+        trace = _os.environ.get("MIO_FROZEN_KV_DEBUG", "") in ("1", "true")
+        if not self._frozen_kv_enabled():
+            if trace:
+                print("[frozen_kv] lookup: disabled", flush=True)
             return None
         tpls = self._frozen_kv_build_templates()
         if tpls is None:
+            if trace:
+                print("[frozen_kv] lookup: no templates (model/draft missing)", flush=True)
             return None
         target_tpl, draft_tpl = tpls
-        prefix_len = self._frozen_kv_prefix_len()
-        if prefix_len >= len(prompt_tokens):
+        if len(prompt_tokens) < 2:
             return None
-        from mio.frozen_kv import bundle_try_load
+        from mio.frozen_kv import bundle_scan_and_load
         cfg = self._frozen_kv_config()
-        return bundle_try_load(
+        min_match = self._frozen_kv_prefix_len()  # min shared prefix to bother
+        result = bundle_scan_and_load(
             target_template=target_tpl,
             draft_template=draft_tpl,
             prompt_tokens=prompt_tokens,
-            prefix_len=prefix_len,
             base_dir=self._frozen_kv_base_dir(),
+            min_match=min_match,
             **cfg,
         )
+        if trace:
+            print(
+                f"[frozen_kv] lookup: {'HIT' if result else 'miss'} "
+                f"prompt_len={len(prompt_tokens)} dir={self._frozen_kv_base_dir()}",
+                flush=True,
+            )
+        return result
 
     def _frozen_kv_store(
         self,
@@ -311,38 +391,49 @@ class MioEngine:
         summary missing final_state, prompt shorter than prefix_len, or on
         any I/O error.
         """
+        import os as _os
+        trace = _os.environ.get("MIO_FROZEN_KV_DEBUG", "") in ("1", "true")
         if not self._frozen_kv_enabled():
             return
         if not isinstance(summary, dict):
+            if trace:
+                print("[frozen_kv] store: summary not dict", flush=True)
             return
         final = summary.get("final_state")
         if not isinstance(final, dict):
+            if trace:
+                print("[frozen_kv] store: missing final_state", flush=True)
             return
         target_cache = final.get("target_cache")
         draft_cache = final.get("draft_cache")
         if target_cache is None or draft_cache is None:
             return
-        prefix_len = self._frozen_kv_prefix_len()
-        if prefix_len >= len(prompt_tokens):
+        if len(prompt_tokens) < 2:
             return
-        # Only freeze when the cache is at least prefix_len deep; otherwise
-        # we'd be serializing tokens we don't actually have.
-        first = target_cache[0] if target_cache else None
-        if first is None or int(getattr(first, "offset", 0) or 0) < prefix_len:
-            return
+        # Store key = prompt + generated tokens, matching the in-memory
+        # prefix cache's contract. On lookup, scan_best_prefix_match finds
+        # the longest shared prefix — so freezing (P + gen_A) lets a later
+        # request for just P reuse the first |P| tokens of that cache.
+        gen_ids = list(summary.get("generated_token_ids") or [])
+        stored_tokens = list(prompt_tokens) + gen_ids
         try:
             from mio.frozen_kv import bundle_freeze
-            bundle_freeze(
+            path = bundle_freeze(
                 target_cache=target_cache,
                 draft_cache=draft_cache,
                 target_hidden=final.get("target_hidden"),
-                offset=prefix_len,
+                offset=len(stored_tokens),
                 prompt_tokens=prompt_tokens,
-                prefix_len=prefix_len,
+                prefix_len=len(prompt_tokens),
+                stored_tokens=stored_tokens,
                 base_dir=self._frozen_kv_base_dir(),
                 **self._frozen_kv_config(),
             )
-        except Exception:
+            if trace:
+                print(f"[frozen_kv] store: wrote {path}", flush=True)
+        except Exception as exc:
+            if trace:
+                print(f"[frozen_kv] store: exception {exc!r}", flush=True)
             # Never fail a generate() call because the freeze misbehaved.
             pass
 
@@ -725,8 +816,13 @@ class MioEngine:
             )
             if self._prefix_cache_enabled():
                 self._prefix_cache_store(prompt_tokens, result)
-            if cold_prefill:
-                self._frozen_kv_store(prompt_tokens, result)
+            # Note: automatic post-generate freeze is disabled. The cache
+            # at this point is post-decode (offset > prompt_len with
+            # rollback-tape residue on recurrent layers), which produces
+            # snapshots that a later warm-load can't correctly truncate
+            # on hybrid models. Frozen KV snapshots are created via the
+            # explicit `MioEngine.warm_and_freeze(messages)` entry point,
+            # which does a clean prefill_only pass.
         else:
             from mio.dflash.runtime import generate_baseline_once
             result = generate_baseline_once(
@@ -878,6 +974,7 @@ class MioEngine:
                 self._last_metrics = metrics
                 if self._prefix_cache_enabled():
                     self._prefix_cache_store(prompt_tokens, event)
-                if stream_cold_prefill:
-                    self._frozen_kv_store(prompt_tokens, event)
+                # Automatic post-generate freeze is disabled on the
+                # streaming path for the same reason as the non-streaming
+                # path — use warm_and_freeze() for clean snapshots.
                 yield "", metrics
