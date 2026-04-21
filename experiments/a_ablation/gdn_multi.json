@@ -1,0 +1,305 @@
+{
+  "n_gdn_layers": 30,
+  "sampled_gdn": [
+    0,
+    6,
+    12,
+    18,
+    24
+  ],
+  "ctx_target": 4096,
+  "layer_scores": [
+    {
+      "gdn_idx": 24,
+      "matches": 1,
+      "near": 1,
+      "total": 4,
+      "avg_lcp": 0.526875,
+      "avg_delta_ms": 200.75880200000017
+    },
+    {
+      "gdn_idx": 0,
+      "matches": 0,
+      "near": 0,
+      "total": 4,
+      "avg_lcp": 0.0,
+      "avg_delta_ms": 68.18916724999985
+    },
+    {
+      "gdn_idx": 6,
+      "matches": 0,
+      "near": 0,
+      "total": 4,
+      "avg_lcp": 0.189375,
+      "avg_delta_ms": 182.49181275
+    },
+    {
+      "gdn_idx": 12,
+      "matches": 0,
+      "near": 0,
+      "total": 4,
+      "avg_lcp": 0.093125,
+      "avg_delta_ms": 205.3137185000004
+    },
+    {
+      "gdn_idx": 18,
+      "matches": 0,
+      "near": 0,
+      "total": 4,
+      "avg_lcp": 0.363125,
+      "avg_delta_ms": 209.74526075000006
+    }
+  ],
+  "per_layer_results": {
+    "0": [
+      {
+        "prompt_id": "fib_memo",
+        "skip_idx": 0,
+        "prompt_tokens": 4281,
+        "prefill_ms": 2932.2912089999995,
+        "gen_tps": 12.431445858564718,
+        "accept": 1.0,
+        "sha": "e3b0c44298fc1c14",
+        "lcp": 0,
+        "text_head": "",
+        "delta_ms": 98.21150099999977
+      },
+      {
+        "prompt_id": "binsearch",
+        "skip_idx": 0,
+        "prompt_tokens": 4292,
+        "prefill_ms": 2963.038959,
+        "gen_tps": 12.203449912883224,
+        "accept": 1.0,
+        "sha": "e3b0c44298fc1c14",
+        "lcp": 0,
+        "text_head": "",
+        "delta_ms": 109.09520900000007
+      },
+      {
+        "prompt_id": "list_dedupe",
+        "skip_idx": 0,
+        "prompt_tokens": 4285,
+        "prefill_ms": 2959.097792,
+        "gen_tps": 12.400306805103114,
+        "accept": 1.0,
+        "sha": "e3b0c44298fc1c14",
+        "lcp": 0,
+        "text_head": "",
+        "delta_ms": 31.146041999999852
+      },
+      {
+        "prompt_id": "class_bst",
+        "skip_idx": 0,
+        "prompt_tokens": 4279,
+        "prefill_ms": 2969.8406669999995,
+        "gen_tps": 12.4045111583398,
+        "accept": 1.0,
+        "sha": "e3b0c44298fc1c14",
+        "lcp": 0,
+        "text_head": "",
+        "delta_ms": 34.30391699999973
+      }
+    ],
+    "6": [
+      {
+        "prompt_id": "fib_memo",
+        "skip_idx": 6,
+        "prompt_tokens": 4281,
+        "prefill_ms": 3018.0032089999995,
+        "gen_tps": 166.73545242421935,
+        "accept": 8.533333333333333,
+        "sha": "a32c05ee52ce3131",
+        "lcp": 150,
+        "text_head": "```python\ndef fib(n: int) -> int:\n    \"\"\"\n    Compute the n-th Fibonacci number using memoization.\n\n    The Fibonacci sequence is defined as:\n        fib(0) = 0\n        fib(1) = 1\n        fib(n) = fib(n-1) + fib(n-2) for n >= 2\n\n    Args:\n        n: A non-negative integer representing the position in the Fibonacci sequence.\n\n    Returns:\n        The n-th Fibonacci number.\n\n    Raises:\n        Valu",
+        "delta_ms": 183.92350099999976
+      },
+      {
+        "prompt_id": "binsearch",
+        "skip_idx": 6,
+        "prompt_tokens": 4292,
+        "prefill_ms": 3097.11325,
+        "gen_tps": 152.54430935664712,
+        "accept": 8.0,
+        "sha": "b480c25c76a1e4fb",
+        "lcp": 92,
+        "text_head": "```python\ndef binary_search(arr, target):\n    \"\"\"\n    Perform binary search on a sorted list to find the index of target.\n    \n    Args:\n        arr: A sorted list of comparable elements.\n        target: The element to search for.\n    \n    Returns:\n        The index of target in arr if found, otherwise -1.\n    \"\"\"\n    left, right = 0, len(arr) - 1\n    \n    while left <= right:\n        mid = (left ",
+        "delta_ms": 243.16949999999997
+      },
+      {
+        "prompt_id": "list_dedupe",
+        "skip_idx": 6,
+        "prompt_tokens": 4285,
+        "prefill_ms": 3070.53775,
+        "gen_tps": 70.73087153403438,
+        "accept": 3.4285714285714284,
+        "sha": "8e5bfe88bac65b8e",
+        "lcp": 61,
+        "text_head": "**Approach:**\nUse a `set` to track seen items for O(1) lookups while iterating through the list. This ensures that only the first occurrence of each item is kept, preserving the original order and achieving O(n) time complexity.\n\n```python\ndef dedupe(items: list) -> list:\n    seen = set()\n    result = []\n    for item in items:\n        # Use a tuple or hashable representation if items",
+        "delta_ms": 142.58599999999979
+      },
+      {
+        "prompt_id": "class_bst",
+        "skip_idx": 6,
+        "prompt_tokens": 4279,
+        "prefill_ms": 3095.8250000000003,
+        "gen_tps": 158.58596388869887,
+        "accept": 8.0,
+        "sha": "96eb498b120387bd",
+        "lcp": 0,
+        "text_head": "Here is a minimal implementation of a Binary Search Tree (BST) in Python, followed by a usage example.\n\n```python\nclass Node:\n    def __init__(self, value):\n        self.value = value\n        self.left = None\n        self.right = None\n\nclass BinarySearchTree:\n    def __init__(self):\n        self.root = None\n\n    def insert(self, value):\n        def _insert(node, val):\n            if node is None:\n",
+        "delta_ms": 160.28825000000052
+      }
+    ],
+    "12": [
+      {
+        "prompt_id": "fib_memo",
+        "skip_idx": 12,
+        "prompt_tokens": 4281,
+        "prefill_ms": 3091.97975,
+        "gen_tps": 165.7758015403156,
+        "accept": 8.0,
+        "sha": "511bbcabb895ec03",
+        "lcp": 104,
+        "text_head": "```python\ndef fib(n: int) -> int:\n    \"\"\"\n    Compute the n-th Fibonacci number using memoization.\n\n    Args:\n        n: A non-negative integer representing the position in the Fibonacci sequence.\n\n    Returns:\n        The n-th Fibonacci number.\n\n    Raises:\n        ValueError: If n is negative.\n\n    Examples:\n        >>> fib(0)\n        0\n        >>> fib(10)\n        55\n    \"\"\"\n    if n < 0:\n      ",
+        "delta_ms": 257.9000420000002
+      },
+      {
+        "prompt_id": "binsearch",
+        "skip_idx": 12,
+        "prompt_tokens": 4292,
+        "prefill_ms": 3081.791583,
+        "gen_tps": 146.04896190617734,
+        "accept": 7.529411764705882,
+        "sha": "26bf3f7c5f283245",
+        "lcp": 31,
+        "text_head": "```python\ndef binary_search(arr: list, target) -> int:\n    \"\"\"\n    Perform binary search on a sorted list.\n    \n    Args:\n        arr: A sorted list of comparable elements.\n        target: The element to search for.\n        \n    Returns:\n        The index of target in arr if found, otherwise -1.\n    \"\"\"\n    left, right = 0, len(arr) - 1\n    \n    while left <= right:\n        mid = (left + right) //",
+        "delta_ms": 227.84783300000026
+      },
+      {
+        "prompt_id": "list_dedupe",
+        "skip_idx": 12,
+        "prompt_tokens": 4285,
+        "prefill_ms": 3098.3812080000002,
+        "gen_tps": 76.38979948832588,
+        "accept": 3.84,
+        "sha": "9a50bd7804cf06e2",
+        "lcp": 14,
+        "text_head": "**Approach:**\nThe most efficient and Pythonic way to remove duplicates while preserving order is to use a `set` to track seen items. By iterating through the input list and appending items to a result list only if they haven't been seen before, we ensure that the first occurrence of each item is kept and subsequent duplicates are ignored. This approach runs in $O(N)$ time complexity.\n\n**Code:**\n\n`",
+        "delta_ms": 170.42945800000007
+      },
+      {
+        "prompt_id": "class_bst",
+        "skip_idx": 12,
+        "prompt_tokens": 4279,
+        "prefill_ms": 3100.614291000001,
+        "gen_tps": 144.29532740768087,
+        "accept": 7.384615384615385,
+        "sha": "babaf77344f9e61a",
+        "lcp": 0,
+        "text_head": "Here is a minimal implementation of a Binary Search Tree (BST) in Python.\n\n```python\nclass Node:\n    def __init__(self, value):\n        self.value = value\n        self.left = None\n        self.right = None\n\nclass BinarySearchTree:\n    def __init__(self):\n        self.root = None\n\n    def insert(self, value):\n        def _insert(node, val):\n            if node is None:\n                return Node(v",
+        "delta_ms": 165.07754100000102
+      }
+    ],
+    "18": [
+      {
+        "prompt_id": "fib_memo",
+        "skip_idx": 18,
+        "prompt_tokens": 4281,
+        "prefill_ms": 3080.692625,
+        "gen_tps": 165.2054961138488,
+        "accept": 8.533333333333333,
+        "sha": "916cfc3ede14e6fc",
+        "lcp": 104,
+        "text_head": "```python\ndef fib(n: int) -> int:\n    \"\"\"\n    Compute the n-th Fibonacci number using memoization.\n\n    Args:\n        n: A non-negative integer representing the position in the Fibonacci sequence.\n\n    Returns:\n        The n-th Fibonacci number.\n\n    Raises:\n        ValueError: If n is negative.\n        TypeError: If n is not an integer.\n\n    Examples:\n        >>> fib(0)\n        0\n        >>> fib(",
+        "delta_ms": 246.61291700000038
+      },
+      {
+        "prompt_id": "binsearch",
+        "skip_idx": 18,
+        "prompt_tokens": 4292,
+        "prefill_ms": 3089.9642089999998,
+        "gen_tps": 143.88345664629276,
+        "accept": 7.529411764705882,
+        "sha": "5a7842d3f98a7ea4",
+        "lcp": 247,
+        "text_head": "```python\ndef binary_search(arr, target):\n    \"\"\"\n    Perform binary search on a sorted list.\n    \n    Args:\n        arr: A sorted list of comparable elements.\n        target: The element to search for.\n        \n    Returns:\n        The index of the target in arr, or -1 if not found.\n    \"\"\"\n    left, right = 0, len(arr) - 1\n    \n    while left <= right:\n        mid = (left + right) // 2\n        i",
+        "delta_ms": 236.02045899999985
+      },
+      {
+        "prompt_id": "list_dedupe",
+        "skip_idx": 18,
+        "prompt_tokens": 4285,
+        "prefill_ms": 3101.28775,
+        "gen_tps": 70.55562059534954,
+        "accept": 3.4285714285714284,
+        "sha": "5d85688073695c91",
+        "lcp": 55,
+        "text_head": "**Approach:**\nUse a `set` to track seen items for O(1) average-time complexity lookups, while iterating through the input list to build a new list containing only the first occurrence of each item. This preserves the original order of first appearances.\n\n**Code:**\n\n```python\ndef dedupe(items):\n    seen = set()\n    result = []\n    for item in items:\n        # Use a tuple if items are not hash",
+        "delta_ms": 173.33599999999979
+      },
+      {
+        "prompt_id": "class_bst",
+        "skip_idx": 18,
+        "prompt_tokens": 4279,
+        "prefill_ms": 3118.548417,
+        "gen_tps": 190.03059418119227,
+        "accept": 9.6,
+        "sha": "d8478a0f49397df6",
+        "lcp": 175,
+        "text_head": "```python\nclass BinarySearchTree:\n    def __init__(self, value=None):\n        self.value = value\n        self.left = None\n        self.right = None\n\n    def insert(self, value):\n        if self.value is None:\n            self.value = value\n            return\n        if value < self.value:\n            if self.left is None:\n                self.left = BinarySearchTree(value)\n            else:\n      ",
+        "delta_ms": 183.01166700000022
+      }
+    ],
+    "24": [
+      {
+        "prompt_id": "fib_memo",
+        "skip_idx": 24,
+        "prompt_tokens": 4281,
+        "prefill_ms": 3103.948083,
+        "gen_tps": 154.2228907093487,
+        "accept": 8.0,
+        "sha": "432f3d5200b571bc",
+        "lcp": 400,
+        "text_head": "```python\ndef fib(n: int) -> int:\n    \"\"\"\n    Compute the n-th Fibonacci number using memoization.\n\n    The Fibonacci sequence is defined as:\n        F(0) = 0\n        F(1) = 1\n        F(n) = F(n-1) + F(n-2) for n >= 2\n\n    Args:\n        n: A non-negative integer representing the position in the Fibonacci sequence.\n\n    Returns:\n        The n-th Fibonacci number.\n\n    Raises:\n        ValueError: If",
+        "delta_ms": 269.86837500000047
+      },
+      {
+        "prompt_id": "binsearch",
+        "skip_idx": 24,
+        "prompt_tokens": 4292,
+        "prefill_ms": 3092.7545410000002,
+        "gen_tps": 138.23439656821668,
+        "accept": 7.111111111111111,
+        "sha": "251481391b9cea82",
+        "lcp": 207,
+        "text_head": "```python\ndef binary_search(arr, target):\n    \"\"\"\n    Perform binary search on a sorted list.\n    \n    Args:\n        arr: A sorted list of comparable elements.\n        target: The element to search for.\n    \n    Returns:\n        The index of target in arr, or -1 if not found.\n    \"\"\"\n    left, right = 0, len(arr) - 1\n    \n    while left <= right:\n        mid = (left + right) // 2\n        if arr[mi",
+        "delta_ms": 238.81079100000034
+      },
+      {
+        "prompt_id": "list_dedupe",
+        "skip_idx": 24,
+        "prompt_tokens": 4285,
+        "prefill_ms": 3084.5425419999997,
+        "gen_tps": 89.39416249286549,
+        "accept": 4.571428571428571,
+        "sha": "0c6bc5023baecf0d",
+        "lcp": 61,
+        "text_head": "**Approach:**\nUse a `set` to track seen items for O(1) lookups, iterating through the input list and appending items to the result only if they haven't been encountered before. This ensures O(n) time complexity while preserving the original order.\n\n```python\ndef dedupe(items: list) -> list:\n    seen = set()\n    result = []\n    for item in items:\n        if item not in seen:\n",
+        "delta_ms": 156.5907919999995
+      },
+      {
+        "prompt_id": "class_bst",
+        "skip_idx": 24,
+        "prompt_tokens": 4279,
+        "prefill_ms": 3073.302,
+        "gen_tps": 168.60988831308302,
+        "accept": 8.727272727272727,
+        "sha": "d8478a0f49397df6",
+        "lcp": 175,
+        "text_head": "```python\nclass BinarySearchTree:\n    def __init__(self, value=None):\n        self.value = value\n        self.left = None\n        self.right = None\n\n    def insert(self, value):\n        if self.value is None:\n            self.value = value\n            return\n        if value < self.value:\n            if self.left is None:\n                self.left = BinarySearchTree(value)\n            else:\n      ",
+        "delta_ms": 137.76525000000038
+      }
+    ]
+  }
+}

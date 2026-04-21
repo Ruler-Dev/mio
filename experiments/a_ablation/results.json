@@ -1,0 +1,129 @@
+{
+  "tier": "large-moe",
+  "baseline_sha": "dc151ddbee6b6060",
+  "baseline_text_head": "```python\ndef binary_search(arr, target):\n    \"\"\"Return index of target in sorted arr, or -1 if not found.\"\"\"\n    left, right = 0, len(arr) - 1\n    while left <= right:\n        mid = (left + right) // 2\n        if arr[mid] == target:\n            return mid\n        elif arr[mid] < target:\n            left = mid + 1\n        else:\n            right = mid - 1\n    return -1\n\nprint(binary_search([1, 3, ",
+  "n_attn_layers": 10,
+  "results": [
+    {
+      "ablated_layer_idx": null,
+      "prompt_tokens": 68,
+      "prefill_ms": 98.405458,
+      "gen_tokens": 128,
+      "gen_tps": 200.60840767921619,
+      "accept": 9.142857142857142,
+      "output_sha256": "dc151ddbee6b6060",
+      "output_text_head": "```python\ndef binary_search(arr, target):\n    \"\"\"Return index of target in sorted arr, or -1 if not found.\"\"\"\n    left, right = 0, len(arr) - 1\n    while left <= right:\n        mid = (left + right) // 2\n        if arr[mid] == target:\n            return mid\n        elif arr[mid] < target:\n            left = mid + 1\n        else:\n            right = mid - 1\n    return -1\n\nprint(binary_search([1, 3, ",
+      "lcp_with_baseline": 400
+    },
+    {
+      "ablated_layer_idx": 0,
+      "prompt_tokens": 68,
+      "prefill_ms": 97.34725,
+      "gen_tokens": 128,
+      "gen_tps": 224.46124929247185,
+      "accept": 9.846153846153847,
+      "output_sha256": "dc151ddbee6b6060",
+      "output_text_head": "```python\ndef binary_search(arr, target):\n    \"\"\"Return index of target in sorted arr, or -1 if not found.\"\"\"\n    left, right = 0, len(arr) - 1\n    while left <= right:\n        mid = (left + right) // 2\n        if arr[mid] == target:\n            return mid\n        elif arr[mid] < target:\n            left = mid + 1\n        else:\n            right = mid - 1\n    return -1\n\nprint(binary_search([1, 3, ",
+      "lcp_with_baseline": 400
+    },
+    {
+      "ablated_layer_idx": 1,
+      "prompt_tokens": 68,
+      "prefill_ms": 97.37650000000002,
+      "gen_tokens": 128,
+      "gen_tps": 194.74952244855888,
+      "accept": 8.533333333333333,
+      "output_sha256": "67c02fcdb4ac68ad",
+      "output_text_head": "```python\ndef binary_search(arr, target):\n    \"\"\"Return index of target in sorted list arr, or -1 if not found.\"\"\"\n    left, right = 0, len(arr) - 1\n    while left <= right:\n        mid = (left + right) // 2\n        if arr[mid] == target:\n            return mid\n        elif arr[mid] < target:\n            left = mid + 1\n        else:\n            right = mid - 1\n    return -1\n\nprint(binary_search([1",
+      "lcp_with_baseline": 82
+    },
+    {
+      "ablated_layer_idx": 2,
+      "prompt_tokens": 68,
+      "prefill_ms": 97.60104199999999,
+      "gen_tokens": 128,
+      "gen_tps": 195.80948607701617,
+      "accept": 8.533333333333333,
+      "output_sha256": "dc151ddbee6b6060",
+      "output_text_head": "```python\ndef binary_search(arr, target):\n    \"\"\"Return index of target in sorted arr, or -1 if not found.\"\"\"\n    left, right = 0, len(arr) - 1\n    while left <= right:\n        mid = (left + right) // 2\n        if arr[mid] == target:\n            return mid\n        elif arr[mid] < target:\n            left = mid + 1\n        else:\n            right = mid - 1\n    return -1\n\nprint(binary_search([1, 3, ",
+      "lcp_with_baseline": 400
+    },
+    {
+      "ablated_layer_idx": 3,
+      "prompt_tokens": 68,
+      "prefill_ms": 97.7315,
+      "gen_tokens": 128,
+      "gen_tps": 221.54392012503888,
+      "accept": 9.846153846153847,
+      "output_sha256": "464b74713d719318",
+      "output_text_head": "```python\ndef binary_search(arr, target):\n    \"\"\"Return index of target in sorted list arr, or -1 if not found.\"\"\"\n    left, right = 0, len(arr) - 1\n    while left <= right:\n        mid = (left + right) // 2\n        if arr[mid] == target:\n            return mid\n        elif arr[mid] < target:\n            left = mid + 1\n        else:\n            right = mid - 1\n    return -1\n\n# Test cases\nprint(bin",
+      "lcp_with_baseline": 82
+    },
+    {
+      "ablated_layer_idx": 4,
+      "prompt_tokens": 68,
+      "prefill_ms": 97.061375,
+      "gen_tokens": 128,
+      "gen_tps": 228.4926630741877,
+      "accept": 10.666666666666666,
+      "output_sha256": "d432cfa48fc9087b",
+      "output_text_head": "```python\ndef binary_search(arr, target):\n    \"\"\"\n    Perform binary search on a sorted list to find the index of target.\n    \n    Args:\n        arr: A sorted list of elements.\n        target: The element to search for.\n    \n    Returns:\n        The index of target if found, otherwise -1.\n    \"\"\"\n    left, right = 0, len(arr) - 1\n    while left <= right:\n        mid = (left + right) // 2\n        i",
+      "lcp_with_baseline": 49
+    },
+    {
+      "ablated_layer_idx": 5,
+      "prompt_tokens": 68,
+      "prefill_ms": 97.021625,
+      "gen_tokens": 128,
+      "gen_tps": 194.17870919510747,
+      "accept": 8.533333333333333,
+      "output_sha256": "dc151ddbee6b6060",
+      "output_text_head": "```python\ndef binary_search(arr, target):\n    \"\"\"Return index of target in sorted arr, or -1 if not found.\"\"\"\n    left, right = 0, len(arr) - 1\n    while left <= right:\n        mid = (left + right) // 2\n        if arr[mid] == target:\n            return mid\n        elif arr[mid] < target:\n            left = mid + 1\n        else:\n            right = mid - 1\n    return -1\n\nprint(binary_search([1, 3, ",
+      "lcp_with_baseline": 400
+    },
+    {
+      "ablated_layer_idx": 6,
+      "prompt_tokens": 68,
+      "prefill_ms": 97.613459,
+      "gen_tokens": 128,
+      "gen_tps": 194.18495729693856,
+      "accept": 8.533333333333333,
+      "output_sha256": "0720cc90c5a33cbd",
+      "output_text_head": "```python\ndef binary_search(arr, target):\n    \"\"\"Return index of target in sorted arr, or -1 if not found.\"\"\"\n    left, right = 0, len(arr) - 1\n    while left <= right:\n        mid = (left + right) // 2\n        if arr[mid] == target:\n            return mid\n        elif arr[mid] < target:\n            left = mid + 1\n        else:\n            right = mid - 1\n    return -1\n\n# Test cases\nprint(binary_s",
+      "lcp_with_baseline": 373
+    },
+    {
+      "ablated_layer_idx": 7,
+      "prompt_tokens": 68,
+      "prefill_ms": 97.479709,
+      "gen_tokens": 128,
+      "gen_tps": 193.38850568350776,
+      "accept": 8.533333333333333,
+      "output_sha256": "dc151ddbee6b6060",
+      "output_text_head": "```python\ndef binary_search(arr, target):\n    \"\"\"Return index of target in sorted arr, or -1 if not found.\"\"\"\n    left, right = 0, len(arr) - 1\n    while left <= right:\n        mid = (left + right) // 2\n        if arr[mid] == target:\n            return mid\n        elif arr[mid] < target:\n            left = mid + 1\n        else:\n            right = mid - 1\n    return -1\n\nprint(binary_search([1, 3, ",
+      "lcp_with_baseline": 400
+    },
+    {
+      "ablated_layer_idx": 8,
+      "prompt_tokens": 68,
+      "prefill_ms": 97.8,
+      "gen_tokens": 128,
+      "gen_tps": 174.90848904107546,
+      "accept": 8.0,
+      "output_sha256": "a803fd40f4117afb",
+      "output_text_head": "```python\ndef binary_search(arr, target):\n    \"\"\"Binary search for target in sorted list arr. Returns index or -1.\"\"\"\n    left, right = 0, len(arr) - 1\n    while left <= right:\n        mid = (left + right) // 2\n        if arr[mid] == target:\n            return mid\n        elif arr[mid] < target:\n            left = mid + 1\n        else:\n            right = mid - 1\n    return -1\n\nprint(binary_search",
+      "lcp_with_baseline": 49
+    },
+    {
+      "ablated_layer_idx": 9,
+      "prompt_tokens": 68,
+      "prefill_ms": 97.468834,
+      "gen_tokens": 128,
+      "gen_tps": 156.78805000563392,
+      "accept": 7.111111111111111,
+      "output_sha256": "59bd5d57819016b8",
+      "output_text_head": "```python\ndef binary_search(arr, target):\n    \"\"\"Binary search for target in sorted list arr. Returns index or -1.\"\"\"\n    low, high = 0, len(arr) - 1\n    while low <= high:\n        mid = (low + high) // 2\n        if arr[mid] == target:\n            return mid\n        elif arr[mid] < target:\n            low = mid + 1\n        else:\n            high = mid - 1\n    return -1\n\n# Test cases\nprint(binary_s",
+      "lcp_with_baseline": 49
+    }
+  ]
+}
