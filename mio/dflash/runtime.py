@@ -817,6 +817,28 @@ def _split_sdpa_output(
 _HYBRID_SDPA_EXACT_KV_THRESHOLD = 1024
 
 
+def _scalar_cache_offset(cache: Any) -> int | None:
+    """Return a scalar cache offset, or ``None`` for per-sequence batches.
+
+    MLX-LM's continuous ``BatchGenerator`` stores one offset per active
+    sequence. Mio's split-attention optimization is designed for a single
+    speculative stream, while the original MLX attention path already handles
+    vector offsets correctly. The hook therefore delegates batched caches back
+    to the original implementation instead of coercing an array to ``int``.
+    """
+
+    if cache is None:
+        return 0
+    offset = getattr(cache, "offset", 0)
+    size = getattr(offset, "size", 1)
+    try:
+        if int(size) != 1:
+            return None
+        return int(offset)
+    except (TypeError, ValueError):
+        return None
+
+
 def _install_split_full_attention_hook(attn: Any) -> None:
     cls = type(attn)
     if getattr(cls, "_dflash_split_full_attention_installed", False):
@@ -833,6 +855,10 @@ def _install_split_full_attention_hook(attn: Any) -> None:
         if not getattr(self, "_dflash_split_sdpa_enabled", False):
             return original_call(self, x, mask=mask, cache=cache)
         if not _attention_has_gated_q_proj(self):
+            return original_call(self, x, mask=mask, cache=cache)
+
+        cached_prefix_len = _scalar_cache_offset(cache)
+        if cached_prefix_len is None:
             return original_call(self, x, mask=mask, cache=cache)
 
         B, L, _ = x.shape
@@ -855,7 +881,6 @@ def _install_split_full_attention_hook(attn: Any) -> None:
             0, 2, 1, 3
         )
 
-        cached_prefix_len = int(getattr(cache, "offset", 0) or 0) if cache is not None else 0
         if cache is not None:
             queries = self.rope(queries, offset=cached_prefix_len)
             keys = self.rope(keys, offset=cached_prefix_len)

@@ -654,6 +654,99 @@ class MioEngine:
         self._last_metrics = metrics
         return text, metrics
 
+    def generate_batch(
+        self,
+        messages_batch: list[list[dict]],
+        *,
+        max_tokens: int | list[int] | None = None,
+        temperature: float | None = None,
+        prefill_batch_size: int = 8,
+        completion_batch_size: int = 32,
+        prefill_step_size: int = 2048,
+    ) -> list[tuple[str, GenerationMetrics]]:
+        """Generate multiple independent sessions with MLX continuous batching.
+
+        DFlash accelerates a single speculative stream.  For two or more
+        unrelated prompts, MLX-LM's ``BatchGenerator`` instead keeps separate
+        KV caches and continuously moves completed sequences out of the active
+        batch.  This method exposes that throughput-oriented path while keeping
+        the ordinary ``generate`` method latency-oriented.
+
+        Sampling is intentionally uniform within one call; ``mio.batch``
+        groups requests by temperature before invoking this method.
+        """
+
+        if not self._loaded:
+            raise RuntimeError("Engine not loaded.")
+        if not messages_batch:
+            return []
+        if len(messages_batch) == 1:
+            one_max = max_tokens[0] if isinstance(max_tokens, list) else max_tokens
+            return [
+                self.generate(
+                    messages_batch[0],
+                    max_tokens=one_max,
+                    temperature=temperature,
+                )
+            ]
+
+        import mlx_lm
+        from mlx_lm.sample_utils import make_sampler
+
+        prompts = [self._apply_chat_template(messages) for messages in messages_batch]
+        if max_tokens is None:
+            resolved_max: int | list[int] = self.tier_config.max_output_tokens
+        elif isinstance(max_tokens, list):
+            if len(max_tokens) != len(prompts):
+                raise ValueError("max_tokens list must match the number of prompts")
+            resolved_max = [
+                max(1, min(int(value or self.tier_config.max_output_tokens), 32768))
+                for value in max_tokens
+            ]
+        else:
+            resolved_max = max(1, min(int(max_tokens), 32768))
+
+        temp = self.tier_config.temperature if temperature is None else float(temperature)
+        sampler = make_sampler(
+            temp=max(0.0, temp),
+            top_p=float(self.tier_config.top_p),
+            top_k=int(self.tier_config.top_k),
+        )
+        response = mlx_lm.batch_generate(
+            self._target_model,
+            self._tokenizer,
+            prompts,
+            max_tokens=resolved_max,
+            sampler=sampler,
+            prefill_batch_size=max(1, int(prefill_batch_size)),
+            completion_batch_size=max(1, int(completion_batch_size)),
+            prefill_step_size=max(1, int(prefill_step_size)),
+        )
+        stats = response.stats
+        results: list[tuple[str, GenerationMetrics]] = []
+        for prompt, text in zip(prompts, response.texts, strict=True):
+            completion_tokens = len(self._tokenizer.encode(text, add_special_tokens=False))
+            metrics = GenerationMetrics(
+                prompt_tokens=len(prompt),
+                completion_tokens=completion_tokens,
+                total_tokens=len(prompt) + completion_tokens,
+                prompt_tps=float(stats.prompt_tps),
+                generation_tps=float(stats.generation_tps),
+                end_to_end_tps=(
+                    float(stats.generation_tokens)
+                    / max(float(stats.prompt_time) + float(stats.generation_time), 1e-9)
+                ),
+                peak_memory_gb=float(stats.peak_memory),
+                total_time_s=float(stats.prompt_time) + float(stats.generation_time),
+                fallback_ar=True,
+            )
+            results.append((text, metrics))
+        self._last_metrics = results[-1][1]
+        # Batched target-only generation owns independent caches; old speculative
+        # prefix snapshots cannot be reused safely after a different execution path.
+        self._prefix_cache_invalidate()
+        return results
+
     def generate_stream(
         self,
         messages: list[dict],

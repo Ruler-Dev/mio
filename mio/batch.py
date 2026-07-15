@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
 
 from mio.model_manager import ModelManager
 
@@ -28,6 +26,7 @@ class BatchResult:
     generation_tps: float
     time_s: float
     error: str | None = None
+    backend: str = "mlx-continuous"
 
 
 def process_batch(
@@ -35,39 +34,63 @@ def process_batch(
     manager: ModelManager,
     tier: str = "large",
 ) -> list[BatchResult]:
-    """Process a batch of requests sequentially.
+    """Process requests with shared weights and independent MLX KV caches.
 
-    TODO: Implement true continuous batching with shared model weights
-    and independent KV caches for concurrent processing.
-    For now, sequential processing still benefits from DFlash + TQ.
+    Requests are grouped by temperature because MLX applies one sampler to an
+    active batch. A one-request group takes Mio's latency-oriented DFlash path;
+    larger groups use :meth:`MioEngine.generate_batch` continuous batching.
     """
     engine = manager.get_engine(tier)
-    results: list[BatchResult] = []
+    if not requests:
+        return []
+    results: list[BatchResult | None] = [None] * len(requests)
+    groups: dict[float, list[tuple[int, BatchRequest]]] = {}
+    for index, request in enumerate(requests):
+        temperature = (
+            float(request.temperature)
+            if request.temperature is not None
+            else float(engine.tier_config.temperature)
+        )
+        groups.setdefault(temperature, []).append((index, request))
 
-    for i, req in enumerate(requests):
+    for temperature, group in groups.items():
         start = time.time()
         try:
-            text, metrics = engine.generate(
-                req.messages,
-                max_tokens=req.max_tokens,
-                temperature=req.temperature,
+            generated = engine.generate_batch(
+                [request.messages for _, request in group],
+                max_tokens=[
+                    request.max_tokens or engine.tier_config.max_output_tokens
+                    for _, request in group
+                ],
+                temperature=temperature,
             )
             elapsed = time.time() - start
-            results.append(BatchResult(
-                index=i,
-                text=text,
-                prompt_tokens=metrics.prompt_tokens,
-                completion_tokens=metrics.completion_tokens,
-                generation_tps=metrics.generation_tps,
-                time_s=elapsed,
-            ))
+            backend = "mlx-continuous" if len(group) > 1 else "dflash-latency"
+            for (index, _request), (text, metrics) in zip(group, generated, strict=True):
+                results[index] = BatchResult(
+                    index=index,
+                    text=text,
+                    prompt_tokens=metrics.prompt_tokens,
+                    completion_tokens=metrics.completion_tokens,
+                    generation_tps=metrics.generation_tps,
+                    time_s=elapsed,
+                    backend=backend,
+                )
         except Exception as e:
-            results.append(BatchResult(
-                index=i, text="", prompt_tokens=0, completion_tokens=0,
-                generation_tps=0, time_s=time.time() - start, error=str(e),
-            ))
+            elapsed = time.time() - start
+            for index, _request in group:
+                results[index] = BatchResult(
+                    index=index,
+                    text="",
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    generation_tps=0,
+                    time_s=elapsed,
+                    error=str(e),
+                    backend="error",
+                )
 
-    return results
+    return [result for result in results if result is not None]
 
 
 def load_batch_file(path: str) -> list[BatchRequest]:
@@ -113,6 +136,7 @@ def save_batch_results(results: list[BatchResult], path: str) -> None:
             }
             if r.error:
                 data["error"] = r.error
+            data["backend"] = r.backend
             f.write(json.dumps(data) + "\n")
 
 
@@ -138,40 +162,21 @@ def run_batch_cli(input_path: str, output_path: str, tier: str = "large") -> Non
 
     with Progress() as progress:
         task = progress.add_task("Batch inference", total=len(requests))
-        results = []
-        engine = manager.get_engine(tier)
-
-        for i, req in enumerate(requests):
-            start = time.time()
-            try:
-                text, metrics = engine.generate(
-                    req.messages, max_tokens=req.max_tokens, temperature=req.temperature,
-                )
-                results.append(BatchResult(
-                    index=i, text=text,
-                    prompt_tokens=metrics.prompt_tokens,
-                    completion_tokens=metrics.completion_tokens,
-                    generation_tps=metrics.generation_tps,
-                    time_s=time.time() - start,
-                ))
-            except Exception as e:
-                results.append(BatchResult(
-                    index=i, text="", prompt_tokens=0, completion_tokens=0,
-                    generation_tps=0, time_s=time.time() - start, error=str(e),
-                ))
-            progress.advance(task)
+        batch_started = time.time()
+        results = process_batch(requests, manager, tier=tier)
+        batch_wall_s = time.time() - batch_started
+        progress.advance(task, len(results))
 
     save_batch_results(results, output_path)
 
     # Summary
     ok = [r for r in results if not r.error]
     total_tokens = sum(r.completion_tokens for r in ok)
-    total_time = sum(r.time_s for r in ok)
-    avg_tps = total_tokens / max(total_time, 0.001)
+    avg_tps = total_tokens / max(batch_wall_s, 0.001)
 
     console.print(f"\n[green]Batch complete:[/green] {len(ok)}/{len(results)} succeeded")
     console.print(f"  Total tokens: {total_tokens}")
-    console.print(f"  Total time:   {total_time:.1f}s")
+    console.print(f"  Total time:   {batch_wall_s:.1f}s")
     console.print(f"  Avg tok/s:    {avg_tps:.1f}")
     console.print(f"  Output:       {output_path}")
 
