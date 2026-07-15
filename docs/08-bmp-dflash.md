@@ -1,5 +1,10 @@
 # BMP-DFlash: Batched Multi-Path Speculative Decoding on Qwen3.5
 
+> Historical experiment note. The measurements below predate the Qwen 3.6
+> 27B benchmark matrix and use different models/workloads. BMP remains opt-in;
+> none of these numbers should be combined with the current Qwen 3.6 results.
+> Revalidate parity and speed on the intended pair before enabling `--mpath`.
+
 Mio's BMP-DFlash is a hybrid-architecture-compatible adaptation of DDTree
 (Ringel & Romano, 2026). It extends vanilla DFlash speculative decoding by
 verifying **K parallel continuations** of every draft block in a single target
@@ -14,9 +19,9 @@ with SSM / linear-attention layers**, because SSM state is recurrent — you
 cannot branch it inside a single sequence forward without corrupting state
 across branches.
 
-mio's default targets are all **Qwen3.5 family** (gated-delta-net + full
-attention hybrids). So the paper's tree-attention mechanism is architecturally
-unavailable on the exact models we run.
+The targets used by this historical experiment were **Qwen3.5 family**
+(gated-delta-net + full-attention hybrids). The paper's tree-attention
+mechanism was therefore unavailable on those exact targets.
 
 BMP-DFlash sidesteps the problem by branching in the **batch dimension**
 instead of the sequence dimension. Attention, SSM, and FFN all process each
@@ -92,7 +97,7 @@ on your hardware.
 - code: K=2 regresses slightly (39.9 vs 43.9 vanilla).
 - K=3/4: worse than K=2 on every prompt — verifier overhead dominates.
 
-**Qwen3.5 family (default tiers, hybrid_gdn)**:
+**Qwen3.5 family (then-default tiers, hybrid_gdn)**:
 - Every tested (tier × prompt × K) regresses vs vanilla DFlash. DFlash
   acceptance on Qwen3.5 is already 0.77–0.88, leaving almost no headroom.
 
@@ -103,7 +108,7 @@ for full tables.
 Usage:
 ```bash
 # BMP K=2 on Qwen3-8B (after `mio pull qwen3-8b-4bit`)
-# Currently requires a custom tier config; the default tiers are Qwen3.5.
+# Historical setup required a custom tier config; its defaults were Qwen3.5.
 ```
 
 **Don't turn `--mpath 2+` on Qwen3.5 tiers for throughput.** The

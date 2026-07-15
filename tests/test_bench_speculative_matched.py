@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,6 +27,16 @@ def test_balanced_schedule_is_seeded_and_latin_balanced():
         block = schedule[start : start + len(benchmark.MODES)]
         for position in range(len(benchmark.MODES)):
             assert sorted(order[position] for order in block) == sorted(benchmark.MODES)
+
+
+def test_lookup_opt_in_uses_the_same_latin_balance_with_a_distinct_mode():
+    modes = (*benchmark.MODES, benchmark.DSPARK_LOOKUP_MODE)
+    schedule = benchmark._balanced_mode_schedule(modes, 8, seed=29)
+
+    for start in range(0, 8, len(modes)):
+        block = schedule[start : start + len(modes)]
+        for position in range(len(modes)):
+            assert sorted(order[position] for order in block) == sorted(modes)
 
 
 @pytest.mark.parametrize("blocks", [-1])
@@ -171,6 +183,62 @@ def test_native_event_collector_preserves_fallback_and_summary_metrics():
     assert result.fallback is True
     assert result.fallback_reason == "unsupported-context"
     assert result.diagnostics["phase_timings_us"]["prefill"] == 250.0
+
+
+def test_dspark_generators_share_objects_and_differ_only_by_lookup_flag():
+    target = object()
+    tokenizer = object()
+    drafter = object()
+    calls = []
+
+    def speculative_generate(*args, **kwargs):
+        calls.append((args, kwargs))
+        kwargs["on_text"]("first")
+        return SimpleNamespace(
+            token_ids=[7, 8],
+            seconds=0.25,
+            num_tokens=2,
+            num_rounds=1,
+            target_forwards=1,
+            mean_accept_len=2.0,
+            accept_lengths=[2],
+            lookup_rounds=int(kwargs["lookup_drafts"]),
+        )
+
+    pure = benchmark._build_dspark_generator(
+        speculative_generate_fn=speculative_generate,
+        target=target,
+        tokenizer=tokenizer,
+        drafter=drafter,
+        max_draft_tokens=2,
+        lookup_drafts=False,
+        mode_label="mlx-dspark",
+    )
+    lookup = benchmark._build_dspark_generator(
+        speculative_generate_fn=speculative_generate,
+        target=target,
+        tokenizer=tokenizer,
+        drafter=drafter,
+        max_draft_tokens=2,
+        lookup_drafts=True,
+        mode_label=benchmark.DSPARK_LOOKUP_MODE,
+    )
+
+    first_outputs = []
+    pure_result = pure([1, 2], 2, 71, lambda: first_outputs.append("pure"))
+    lookup_result = lookup([1, 2], 2, 71, lambda: first_outputs.append("lookup"))
+
+    assert first_outputs == ["pure", "lookup"]
+    assert [call[0] for call in calls] == [
+        (target, tokenizer, drafter),
+        (target, tokenizer, drafter),
+    ]
+    assert [call[1]["lookup_drafts"] for call in calls] == [False, True]
+    assert [call[1]["seed"] for call in calls] == [71, 71]
+    assert pure_result.diagnostics["candidate_mode"] == "mlx-dspark"
+    assert pure_result.diagnostics["lookup_drafts"] is False
+    assert lookup_result.diagnostics["candidate_mode"] == benchmark.DSPARK_LOOKUP_MODE
+    assert lookup_result.diagnostics["lookup_drafts"] is True
 
 
 def test_paired_bootstrap_is_seeded_and_clusters_repetitions_by_prompt():
@@ -563,6 +631,14 @@ def test_parser_exposes_matched_local_defaults_and_conservative_gate():
     assert args.max_p95_latency_regression == 0.0
     assert args.max_peak_memory_regression == 0.05
     assert args.dspark_lookup is False
+    assert benchmark._enabled_modes(args) == benchmark.MODES
+
+    lookup_args = benchmark._build_parser().parse_args(["--dspark-lookup"])
+    assert lookup_args.dspark_lookup is True
+    assert benchmark._enabled_modes(lookup_args) == (
+        *benchmark.MODES,
+        benchmark.DSPARK_LOOKUP_MODE,
+    )
 
 
 def test_main_writes_versioned_paired_artifact_without_loading_models(monkeypatch, tmp_path: Path):
@@ -613,8 +689,102 @@ def test_main_writes_versioned_paired_artifact_without_loading_models(monkeypatc
     assert payload["breakthrough"]["any_candidate"] is False
     assert payload["breakthrough"]["candidate_results"] == {candidate: False for candidate in benchmark.CANDIDATES}
     assert len(payload["runs"]) == len(benchmark.BUILTIN_CORPUS) * 3 * len(benchmark.MODES)
+    assert payload["configuration"]["enabled_modes"] == list(benchmark.MODES)
+    assert payload["configuration"]["dspark_lookup"] is False
+    assert payload["configuration"]["dspark_lookup_candidate_enabled"] is False
     assert all(
         len(analysis["pairs"]) == len(benchmark.BUILTIN_CORPUS) * 3
         for analysis in payload["paired_comparisons"].values()
     )
     assert all(sorted(order["modes"]) == sorted(benchmark.MODES) for order in payload["schedule"]["measurements"])
+
+
+def test_main_opt_in_gates_lookup_as_a_distinct_matched_candidate(monkeypatch, tmp_path: Path):
+    output = tmp_path / "matched-lookup.json"
+
+    def fake_load_runtime(args):
+        modes = benchmark._enabled_modes(args)
+
+        def make_generator(mode):
+            def generate(_prompt_ids, max_tokens, _seed, on_first_output):
+                on_first_output()
+                # Keep the fake decode interval positive on fast clocks so the
+                # strict timing gate is deterministic.
+                time.sleep(0.0001)
+                return benchmark.RawGeneration(
+                    token_ids=list(range(max_tokens)),
+                    diagnostics={
+                        "candidate_mode": mode,
+                        "lookup_drafts": mode == benchmark.DSPARK_LOOKUP_MODE,
+                    },
+                )
+
+            return generate
+
+        return benchmark.BenchmarkRuntime(
+            encode_prompt=lambda _prompt, _chat: [1, 2, 3],
+            generators={mode: make_generator(mode) for mode in modes},
+            reset_peak_memory=lambda: None,
+            get_peak_memory=lambda: 1024,
+            metadata={
+                "dspark_lookup_candidate_enabled": args.dspark_lookup,
+                "dspark_candidates_share_target_and_drafter": True,
+            },
+        )
+
+    monkeypatch.setattr(benchmark, "_load_runtime", fake_load_runtime)
+    monkeypatch.setattr(
+        benchmark,
+        "_provenance",
+        lambda _args, runtime: {"runtime": runtime.metadata},
+    )
+
+    exit_code = benchmark.main(
+        [
+            "--dspark-lookup",
+            "--warmup",
+            "0",
+            "--reps",
+            "3",
+            "--max-tokens",
+            "2",
+            "--bootstrap-samples",
+            "25",
+            "--output",
+            str(output),
+        ]
+    )
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    modes = (*benchmark.MODES, benchmark.DSPARK_LOOKUP_MODE)
+    candidates = modes[1:]
+    assert exit_code == 0
+    assert payload["configuration"]["enabled_modes"] == list(modes)
+    assert payload["configuration"]["dspark_lookup"] is True
+    assert payload["configuration"]["dspark_lookup_candidate_enabled"] is True
+    assert set(payload["paired_comparisons"]) == set(candidates)
+    assert set(payload["research_claim"]["workload_candidate_results"]) == set(candidates)
+    assert payload["research_claim"]["global_breakthrough_evaluable"] is False
+    assert payload["research_claim"]["global_breakthrough"] is False
+    assert payload["breakthrough"]["candidate_results"] == {candidate: False for candidate in candidates}
+    assert payload["breakthrough"]["any_candidate"] is False
+    assert (
+        payload["paired_comparisons"][benchmark.DSPARK_LOOKUP_MODE]["criterion"]
+        == payload["paired_comparisons"]["mlx-dspark"]["criterion"]
+    )
+    assert payload["paired_comparisons"][benchmark.DSPARK_LOOKUP_MODE]["expected_pairs"] == 12
+    assert len(payload["runs"]) == len(benchmark.BUILTIN_CORPUS) * 3 * len(modes)
+    assert all(sorted(order["modes"]) == sorted(modes) for order in payload["schedule"]["measurements"])
+    grouped = {}
+    for run in payload["runs"]:
+        grouped.setdefault((run["prompt_id"], run["repetition"]), []).append(run)
+    assert all({run["mode"] for run in block} == set(modes) for block in grouped.values())
+    assert all(len({run["call_seed"] for run in block}) == 1 for block in grouped.values())
+    assert payload["provenance"]["runtime"] == {
+        "dspark_lookup_candidate_enabled": True,
+        "dspark_candidates_share_target_and_drafter": True,
+    }
+    lookup_runs = [run for run in payload["runs"] if run["mode"] == benchmark.DSPARK_LOOKUP_MODE]
+    pure_runs = [run for run in payload["runs"] if run["mode"] == "mlx-dspark"]
+    assert all(run["diagnostics"]["lookup_drafts"] is True for run in lookup_runs)
+    assert all(run["diagnostics"]["lookup_drafts"] is False for run in pure_runs)

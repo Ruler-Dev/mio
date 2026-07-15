@@ -1,5 +1,9 @@
 # Prefill Speedups in Mio: Prefix Cache + LM-Head Slicing
 
+> Historical research note. These measurements use earlier tiers and do not
+> carry the current Qwen 3.6 artifact provenance. The mechanisms remain useful
+> hypotheses; rerun them with the Qwen 3.6 matrix before making current claims.
+
 **Technical note, mio project, 2026**
 
 ## Abstract
@@ -11,7 +15,7 @@ Two complementary optimizations to reduce prefill latency and time-to-first-toke
    prefill pass, keyed by token prefix. On subsequent calls that share a
    common prefix (system prompt, agent directives, multi-turn history),
    skip prefill for that range entirely. Measured **4.4–7.8× wall-clock
-   speedup** on warm hits across all four mio default tiers.
+   speedup** on warm hits across the four then-default Mio tiers.
 
 2. **LM-Head Slicing** — during prefill, only the last token's logits are
    used (to sample the first bonus token). Project only the final hidden

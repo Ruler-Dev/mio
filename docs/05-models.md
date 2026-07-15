@@ -1,73 +1,125 @@
-# Model Guide
+# Model registry and Qwen 3.6
 
-## Directory Structure
+## Storage
 
-```
-mio/
-  models/                          # PARO target models (z-lab, INT4)
-    Qwen3.5-4B-PARO/
-    Qwen3.5-9B-PARO/
-    Qwen3.5-27B-PARO/
-    Qwen3.5-35B-A3B-PARO/         # Default (large-moe tier)
-  spd/                             # DFlash speculative decoding drafts
-    Qwen3.5-4B-DFlash/
-    Qwen3.5-9B-DFlash/
-    Qwen3.5-27B-DFlash/
-    Qwen3.5-35B-A3B-DFlash/
+Mio keeps target and speculative checkpoints separate:
+
+```text
+models/
+└── Qwen3.6-27B-UD-Q4_K_XL-mlx/
+spd/
+├── Qwen3.6-27B-DSpark/
+└── Qwen3.6-27B-DFlash/
 ```
 
-## PARO Quantization
+Weights are local runtime data and are not versioned in Git.
 
-All target models use **PARO** (Pairwise Rotation Quantization, z-lab, ICLR 2026):
-- INT4 weight quantization with learned Givens rotations
-- 2.4% more accurate than AWQ on reasoning tasks
-- Custom Metal kernel for rotation at inference time
-- Same speed as standard INT4, just better quality
+## Tested Qwen 3.6 27B stack
 
-PARO is orthogonal to DFlash (speculative decoding) and TurboQuant (KV cache). All three stack.
+| Role | Repository | Local directory |
+|---|---|---|
+| target | `Brooooooklyn/Qwen3.6-27B-UD-Q4_K_XL-mlx` | `models/Qwen3.6-27B-UD-Q4_K_XL-mlx` |
+| preferred drafter | `Avesed/Qwen3.6-27B-DSpark` | `spd/Qwen3.6-27B-DSpark` |
+| fallback drafter | `z-lab/Qwen3.6-27B-DFlash` | `spd/Qwen3.6-27B-DFlash` |
 
-## Pulling Models
+Registry compatibility metadata observed by the benchmark:
+
+- hidden size: 5120;
+- target layers: 64;
+- vocabulary: 248,320;
+- DSpark block size: 7, with a Markov/confidence head;
+- DFlash block size: 16;
+- effective sliding window: 2048;
+- registered maximum context: 262,144 tokens.
+
+The target uses mixed 4-bit/BF16 weights. Both drafter checkpoints are
+separate and never replace target verification. Mio classifies checkpoint
+metadata, selects DSpark for the hybrid DFlash+Markov layout, and falls back
+only to a distinct pure DFlash checkpoint. Compatibility is validated before
+generation and the selected backend/reason is exposed in engine telemetry.
+
+## Download
 
 ```bash
-mio pull                         # List all available keys
-mio pull qwen3.5-35b-a3b        # Default model + DFlash draft
-mio pull qwen3.5-27b            # Dense 27B
-mio pull qwen3.5-9b             # 9B
-mio pull qwen3.5-4b             # 4B
+mio pull large
 ```
 
-## Default Tiers
+Or explicitly:
 
-| Tier | Target (models/) | Draft (spd/) | Context | Notes |
-|------|---|---|---|---|
-| **large-moe** (default) | `Qwen3.5-35B-A3B-PARO` | `Qwen3.5-35B-A3B-DFlash` | 128K | MoE: 35B total, 3B active, 204 tok/s |
-| large | `Qwen3.5-27B-PARO` | `Qwen3.5-27B-DFlash` | 32K | Dense 27B, 56 tok/s |
-| medium | `Qwen3.5-9B-PARO` | `Qwen3.5-9B-DFlash` | 16K | 108 tok/s |
-| small | `Qwen3.5-4B-PARO` | `Qwen3.5-4B-DFlash` | 8K | 187 tok/s |
+```bash
+hf download Brooooooklyn/Qwen3.6-27B-UD-Q4_K_XL-mlx \
+  --local-dir models/Qwen3.6-27B-UD-Q4_K_XL-mlx
+hf download Avesed/Qwen3.6-27B-DSpark \
+  --local-dir spd/Qwen3.6-27B-DSpark
+hf download z-lab/Qwen3.6-27B-DFlash \
+  --local-dir spd/Qwen3.6-27B-DFlash
+```
 
-## All Known Models
+Authenticate outside the repository. If a source requires an access token,
+use `hf auth login` or a scoped secret environment; never paste the token into
+committed commands or documentation.
 
-| Key | Target | Draft | Adapter | Status |
-|-----|--------|-------|---------|--------|
-| `qwen3.5-35b-a3b` | Qwen3.5-35B-A3B-PARO | Qwen3.5-35B-A3B-DFlash | qwen3_5 | Ready (default) |
-| `qwen3.5-27b` | Qwen3.5-27B-PARO | Qwen3.5-27B-DFlash | qwen3_5 | Ready |
-| `qwen3.5-9b` | Qwen3.5-9B-PARO | Qwen3.5-9B-DFlash | qwen3_5 | Ready |
-| `qwen3.5-4b` | Qwen3.5-4B-PARO | Qwen3.5-4B-DFlash | qwen3_5 | Ready |
-| `qwen3-4b-4bit` | Qwen3-4B-4bit | Qwen3-4B-DFlash-b16 | qwen3 | Available |
-| `qwen3-8b-4bit` | Qwen3-8B-4bit | Qwen3-8B-DFlash-b16 | qwen3 | Available |
-| `qwen3-coder-30b-4bit` | Qwen3-Coder-30B-A3B-4bit | Qwen3-Coder-30B-A3B-DFlash | qwen3 | Available |
-| `llama-3.1-8b-4bit` | Llama-3.1-8B-Instruct-4bit | LLaMA3.1-8B-DFlash | llama | Needs adapter |
-| `gpt-oss-20b` | GPT-OSS-20B | gpt-oss-20b-DFlash | gpt_oss | Needs adapter |
-| `kimi-k2.5` | Kimi-K2.5 | Kimi-K2.5-DFlash | kimi | Needs adapter |
+## Completeness and resolution
 
-"Ready" = downloaded + PARO + DFlash tested. "Available" = DFlash draft exists, download needed. "Needs adapter" = requires new MLX adapter.
+A local directory is considered complete only when:
 
-## How Model Loading Works
+1. `config.json` exists;
+2. if a SafeTensors index exists, every referenced shard exists and is
+   non-empty;
+3. otherwise, at least one non-empty `.safetensors` file exists.
 
-1. Mio reads `config.json` in the model directory
-2. If `quantization_config.quant_method == "paroquant"`, uses the PARO loader (applies `RotateQuantizedLinear` with Metal rotation kernel)
-3. If standard quantization, uses DFlash's `load_target_bundle()`
-4. DFlash draft is loaded separately via `load_draft_bundle()`
-5. TurboQuant monkey-patches the SDPA for KV cache compression
+This prevents an interrupted pull from poisoning automatic tier selection.
+When the complete local Qwen 3.6 27B target/DFlash pair exists, `large` selects
+that target generation. A complete DSpark checkpoint becomes the preferred
+drafter; DFlash remains the load-failure fallback. If the target or DFlash
+side is missing, resolution falls back to the registered Qwen 3.5 27B pair.
 
-All three layers are applied transparently -- you just pick a model and context settings.
+```bash
+python3 -m mio.model_check
+mio pull
+```
+
+## Tier behavior
+
+| Tier | Selection policy | Registered context |
+|---|---|---:|
+| `large-moe` | Qwen 3.6 35B-A3B local pair, Qwen 3.6 community pair, then Qwen 3.5 35B-A3B | 256K or 128K |
+| `large` | Qwen 3.6 27B UD-Q4_K_XL local pair, Qwen 3.6 community pair, then Qwen 3.5 27B | 256K or 32K |
+| `medium` | Qwen 3.5 9B UD-Q4_K_XL pair | 16K |
+| `small` | Qwen 3.5 4B 4-bit pair | 8K |
+
+The top-level persisted active tier defaults historically to `large-moe`.
+Use `--tier large` when the Qwen 3.6 27B pair is intended; do not infer the
+loaded architecture from the word "default".
+
+## Loading sequence
+
+1. Build a `TierConfig` from current registry defaults and persisted values.
+2. Resolve complete local paths or retain the Hugging Face reference.
+3. Load the target through the standard or PARO-specific MLX path.
+4. Classify the requested drafter metadata as DSpark, DFlash, or hybrid.
+5. Load DSpark when compatible; on load failure use only a validated, distinct
+   pure DFlash fallback unless strict mode is enabled.
+6. Validate architecture/shape metadata and bind the selected drafter.
+7. Apply an explicit capability policy for sampling, tool EOS, caches, BMP,
+   and DDTree; unsupported combinations must be observable rather than silent.
+8. Dispatch to the selected drafter; retain target AR as the
+   control/fallback.
+
+A missing/unreadable optional draft may fall back to target AR. A draft that
+loads but declares an incompatible target must fail before generation rather
+than silently producing untrusted output.
+
+## Other registry entries
+
+The registry includes Qwen 3, Qwen 3.5, Qwen 3.6, PARO variants, and entries
+whose adapters are not implemented. `mio pull` lists the authoritative key
+set. Presence in `KNOWN_MODELS` does not mean a pair has been downloaded,
+tested on this machine, or supported by the active adapter set.
+
+## Current evidence
+
+The versioned Qwen 3.6 result verifies exact greedy token parity for 32 output
+tokens over two DFlash repetitions. It is not a full model-quality validation.
+Required follow-up includes longer parity corpora, tool-call transcripts,
+multiple prompt lengths, context-boundary tests, and independent reruns.

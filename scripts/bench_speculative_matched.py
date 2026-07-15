@@ -1,11 +1,13 @@
 """Matched, reproducible Mio R&D harness for speculative decoding.
 
-The benchmark loads one Qwen3 target and compares three greedy, lossless paths:
-plain autoregressive decoding, mlx-dspark, and the native dflash-mlx runtime.
-Every measured repetition is paired by prompt and uses a seeded Latin-rotation
-execution order.  Candidate output is always truncated to ``max_tokens`` before
-parity and throughput calculations, because some upstream speculative loops may
-commit a final block that crosses the requested boundary.
+The benchmark loads one Qwen3 target and compares three greedy, lossless paths
+by default: plain autoregressive decoding, mlx-dspark, and the native
+dflash-mlx runtime.  An explicit opt-in adds a separately labelled
+mlx-dspark+n-gram-lookup candidate backed by the same target and drafter. Every
+measured repetition is paired by prompt and uses a seeded Latin-rotation
+execution order. Candidate output is always truncated to ``max_tokens`` before
+parity and throughput calculations, because some upstream speculative loops
+may commit a final block that crosses the requested boundary.
 
 This script is deliberately separate from product inference.  It records raw
 evidence and applies conservative single-workload candidate gates; it never
@@ -37,6 +39,7 @@ SCHEMA_VERSION = 2
 CORPUS_VERSION = 1
 MODES = ("baseline", "mlx-dspark", "dflash-mlx")
 CANDIDATES = MODES[1:]
+DSPARK_LOOKUP_MODE = "mlx-dspark-lookup"
 P95_PROBABILITY = 0.95
 
 GLOBAL_BREAKTHROUGH_MISSING_EVIDENCE = (
@@ -112,6 +115,14 @@ class BenchmarkRuntime:
     reset_peak_memory: Callable[[], None]
     get_peak_memory: Callable[[], int]
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+def _enabled_modes(args: argparse.Namespace) -> tuple[str, ...]:
+    """Return the default matrix plus the explicitly requested lookup arm."""
+
+    if bool(args.dspark_lookup):
+        return (*MODES, DSPARK_LOOKUP_MODE)
+    return MODES
 
 
 def _balanced_mode_schedule(
@@ -482,14 +493,16 @@ def _pair_runs(
     *,
     prompt_count: int,
     repetitions: int,
+    candidates: Sequence[str] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     by_key = {(str(run["prompt_id"]), int(run["repetition"]), str(run["mode"])): run for run in runs}
     prompt_ids = list(dict.fromkeys(str(run["prompt_id"]) for run in runs))
-    paired: dict[str, list[dict[str, Any]]] = {candidate: [] for candidate in CANDIDATES}
+    candidate_names = tuple(CANDIDATES if candidates is None else candidates)
+    paired: dict[str, list[dict[str, Any]]] = {candidate: [] for candidate in candidate_names}
     for prompt_id in prompt_ids[:prompt_count]:
         for repetition in range(1, repetitions + 1):
             baseline = by_key.get((prompt_id, repetition, "baseline"))
-            for candidate in CANDIDATES:
+            for candidate in candidate_names:
                 contender = by_key.get((prompt_id, repetition, candidate))
                 baseline_ok = bool(
                     baseline and baseline.get("status") == "ok" and baseline.get("exact_normalized_length")
@@ -874,6 +887,56 @@ def _collect_native_events(
     )
 
 
+def _build_dspark_generator(
+    *,
+    speculative_generate_fn: Callable[..., Any],
+    target: Any,
+    tokenizer: Any,
+    drafter: Any,
+    max_draft_tokens: int,
+    lookup_drafts: bool,
+    mode_label: str,
+) -> Generator:
+    """Build one distinctly labelled DSpark arm over shared model objects."""
+
+    def generate(
+        prompt_ids: list[int],
+        max_tokens: int,
+        seed: int,
+        on_first_output: Callable[[], None],
+    ) -> RawGeneration:
+        result = speculative_generate_fn(
+            target,
+            tokenizer,
+            drafter,
+            prompt_ids=prompt_ids,
+            max_new_tokens=max_tokens,
+            max_draft_tokens=(max_draft_tokens if max_draft_tokens > 0 else None),
+            lookup_drafts=lookup_drafts,
+            temperature=0.0,
+            seed=seed,
+            apply_chat_template=False,
+            on_text=lambda _text: on_first_output(),
+        )
+        return RawGeneration(
+            token_ids=[int(token) for token in result.token_ids],
+            diagnostics={
+                "engine": "mlx_dspark.speculative_generate",
+                "candidate_mode": mode_label,
+                "lookup_drafts": lookup_drafts,
+                "engine_elapsed_seconds": float(result.seconds),
+                "engine_generation_tokens": int(result.num_tokens),
+                "rounds": int(result.num_rounds),
+                "target_forwards": int(result.target_forwards),
+                "mean_accept_length": float(result.mean_accept_len),
+                "accept_lengths": [int(value) for value in result.accept_lengths],
+                "lookup_rounds": int(result.lookup_rounds),
+            },
+        )
+
+    return generate
+
+
 def _load_runtime(args: argparse.Namespace) -> BenchmarkRuntime:
     """Load the one shared target and both draft models (deferred from import)."""
 
@@ -938,38 +1001,24 @@ def _load_runtime(args: argparse.Namespace) -> BenchmarkRuntime:
         result.diagnostics["engine"] = "dflash_mlx.stream_baseline_generate"
         return result
 
-    def dspark_generator(
-        prompt_ids: list[int],
-        max_tokens: int,
-        seed: int,
-        on_first_output: Callable[[], None],
-    ) -> RawGeneration:
-        result = speculative_generate(
-            dspark_target,
-            bundle.tokenizer,
-            dspark_draft,
-            prompt_ids=prompt_ids,
-            max_new_tokens=max_tokens,
-            max_draft_tokens=(args.dspark_max_draft_tokens if args.dspark_max_draft_tokens > 0 else None),
-            lookup_drafts=args.dspark_lookup,
-            temperature=0.0,
-            seed=seed,
-            apply_chat_template=False,
-            on_text=lambda _text: on_first_output(),
-        )
-        return RawGeneration(
-            token_ids=[int(token) for token in result.token_ids],
-            diagnostics={
-                "engine": "mlx_dspark.speculative_generate",
-                "engine_elapsed_seconds": float(result.seconds),
-                "engine_generation_tokens": int(result.num_tokens),
-                "rounds": int(result.num_rounds),
-                "target_forwards": int(result.target_forwards),
-                "mean_accept_length": float(result.mean_accept_len),
-                "accept_lengths": [int(value) for value in result.accept_lengths],
-                "lookup_rounds": int(result.lookup_rounds),
-            },
-        )
+    dspark_generator = _build_dspark_generator(
+        speculative_generate_fn=speculative_generate,
+        target=dspark_target,
+        tokenizer=bundle.tokenizer,
+        drafter=dspark_draft,
+        max_draft_tokens=args.dspark_max_draft_tokens,
+        lookup_drafts=False,
+        mode_label="mlx-dspark",
+    )
+    dspark_lookup_generator = _build_dspark_generator(
+        speculative_generate_fn=speculative_generate,
+        target=dspark_target,
+        tokenizer=bundle.tokenizer,
+        drafter=dspark_draft,
+        max_draft_tokens=args.dspark_max_draft_tokens,
+        lookup_drafts=True,
+        mode_label=DSPARK_LOOKUP_MODE,
+    )
 
     def dflash_generator(
         prompt_ids: list[int],
@@ -1007,13 +1056,16 @@ def _load_runtime(args: argparse.Namespace) -> BenchmarkRuntime:
         "block_size": int(getattr(dspark_config, "block_size", 0)),
         "target_layer_ids": [int(value) for value in getattr(dspark_config, "target_layer_ids", ())],
     }
+    generators = {
+        "baseline": baseline_generator,
+        "mlx-dspark": dspark_generator,
+        "dflash-mlx": dflash_generator,
+    }
+    if args.dspark_lookup:
+        generators[DSPARK_LOOKUP_MODE] = dspark_lookup_generator
     return BenchmarkRuntime(
         encode_prompt=lambda prompt, use_chat: list(encode_prompt(bundle.tokenizer, prompt, use_chat=use_chat)),
-        generators={
-            "baseline": baseline_generator,
-            "mlx-dspark": dspark_generator,
-            "dflash-mlx": dflash_generator,
-        },
+        generators=generators,
         reset_peak_memory=mx.reset_peak_memory,
         get_peak_memory=mx.get_peak_memory,
         metadata={
@@ -1023,6 +1075,8 @@ def _load_runtime(args: argparse.Namespace) -> BenchmarkRuntime:
             "dflash_effective_draft_quant": bundle.effective_draft_quant,
             "dspark_draft_quantized": dspark_quantized,
             "dspark_config": config_summary,
+            "dspark_lookup_candidate_enabled": bool(args.dspark_lookup),
+            "dspark_candidates_share_target_and_drafter": True,
         },
     )
 
@@ -1049,7 +1103,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--confidence", type=float, default=0.95)
     parser.add_argument("--chat-template", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--dspark-max-draft-tokens", type=int, default=2, help="0 uses the full block")
-    parser.add_argument("--dspark-lookup", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--dspark-lookup",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "add a separate mlx-dspark-lookup candidate; mlx-dspark remains pure "
+            "and both candidates reuse the same target and drafter"
+        ),
+    )
     parser.add_argument("--dspark-draft-bits", type=int, choices=(0, 2, 4, 8), default=4)
     parser.add_argument("--dspark-draft-group-size", type=int, choices=(32, 64, 128), default=64)
     parser.add_argument("--dflash-draft-quant", default="w4:gs64")
@@ -1129,6 +1191,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     _validate_args(parser, args)
     prompts = _load_corpus(args.corpus_file)
+    modes = _enabled_modes(args)
+    candidates = modes[1:]
 
     print(
         f"[load] target={args.model} dspark={args.dspark_draft} dflash={args.dflash_draft}",
@@ -1140,7 +1204,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     encoded = {prompt.id: runtime.encode_prompt(prompt.prompt, args.chat_template) for prompt in prompts}
 
     warmup_jobs = [(prompt, round_index) for prompt in prompts for round_index in range(1, args.warmup + 1)]
-    warmup_order = _balanced_mode_schedule(MODES, len(warmup_jobs), seed=args.seed ^ 0x5A17)
+    warmup_order = _balanced_mode_schedule(modes, len(warmup_jobs), seed=args.seed ^ 0x5A17)
     warmup_failures: list[dict[str, Any]] = []
     for block_index, ((prompt, round_index), order) in enumerate(zip(warmup_jobs, warmup_order), start=1):
         print(
@@ -1169,7 +1233,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
 
     measured_jobs = [(prompt, repetition) for prompt in prompts for repetition in range(1, args.reps + 1)]
-    execution_order = _balanced_mode_schedule(MODES, len(measured_jobs), seed=args.seed)
+    execution_order = _balanced_mode_schedule(modes, len(measured_jobs), seed=args.seed)
     runs: list[dict[str, Any]] = []
     execution_index = 0
     for block_index, ((prompt, repetition), order) in enumerate(zip(measured_jobs, execution_order), start=1):
@@ -1207,7 +1271,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             runs.append(run)
 
-    paired = _pair_runs(runs, prompt_count=len(prompts), repetitions=args.reps)
+    paired = _pair_runs(
+        runs,
+        prompt_count=len(prompts),
+        repetitions=args.reps,
+        candidates=candidates,
+    )
     deterministic = _baseline_determinism(runs, prompts)
     execution_failures = [run["run_id"] for run in runs if run.get("status") != "ok"]
     fallback_runs = [run["run_id"] for run in runs if run.get("fallback")]
@@ -1249,7 +1318,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             baseline_deterministic=all(deterministic.values()),
             strict_passed=strict_passed,
         )
-        for candidate in CANDIDATES
+        for candidate in candidates
     }
 
     payload = {
@@ -1267,6 +1336,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "chat_template": args.chat_template,
             "dspark_max_draft_tokens": args.dspark_max_draft_tokens,
             "dspark_lookup": args.dspark_lookup,
+            "dspark_lookup_candidate_enabled": args.dspark_lookup,
+            "enabled_modes": list(modes),
             "dspark_draft_bits": args.dspark_draft_bits,
             "dspark_draft_group_size": args.dspark_draft_group_size,
             "dflash_draft_quant": args.dflash_draft_quant,
@@ -1352,10 +1423,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         },
         "method_notes": {
             "matched_target": "All modes share the exact same loaded target model instance.",
-            "greedy": "temperature=0 for baseline and both speculative candidates.",
+            "greedy": "temperature=0 for baseline and every speculative candidate.",
             "ttft": (
                 "External call start to first token event for native dflash-mlx paths; "
-                "external call start to first text callback for mlx-dspark. This is a TTFT/prefill proxy."
+                "external call start to first text callback for both mlx-dspark modes. "
+                "This is a TTFT/prefill proxy."
+            ),
+            "dspark_lookup": (
+                "When enabled, mlx-dspark and mlx-dspark-lookup share the exact target, "
+                "tokenizer, drafter, prompt, call seed, and generation settings; only "
+                "lookup_drafts differs. Each remains an independently gated candidate."
             ),
             "decode": "(normalized output tokens - 1) / (wall time - TTFT proxy).",
             "tail_latency": (

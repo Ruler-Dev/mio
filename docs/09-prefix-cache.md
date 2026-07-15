@@ -1,5 +1,10 @@
 # Prefix Cache: Skip Re-Prefilling Shared Prompt Prefixes
 
+> Historical experiment note. The mechanism remains part of Mio, but the
+> speed tables below were not produced by the current Qwen 3.6 matrix and do
+> not carry its complete provenance fields. Treat them as engineering
+> observations pending a clean Qwen 3.6 rerun.
+
 Mio's prefix cache automatically detects when consecutive prompts share a
 long common prefix (system prompt, conversation history, agent directives)
 and skips re-prefilling that portion on hit. Implementation is in
@@ -175,8 +180,10 @@ Call `engine._prefix_cache_invalidate()` to drop all entries. You should do
 this when:
 
 - Switching model (tier change).
-- Changing sampler (temperature, stops) — currently the cache ignores
-  sampler state because mio is greedy-only.
+- Changing sampler on the vendored DFlash path. Positive-temperature DFlash
+  generation takes the target-only path and does not publish speculative
+  snapshots. DSpark owns a separate exact upstream prefix cache for both its
+  greedy and sampled requests. Textual stops trim exposed output.
 - Before benchmarks that measure cold-start TTFT.
 
 ## Future work

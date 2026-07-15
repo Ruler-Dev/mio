@@ -10,6 +10,7 @@ For each prompt × keep_ratio:
 
 from __future__ import annotations
 
+import argparse
 import sys
 import time
 from pathlib import Path
@@ -34,6 +35,8 @@ PROMPTS = [
     SYS + "\n\nUser: Write the JavaScript reverse-string one-liner.\nAssistant:",
     SYS + "\n\nUser: Briefly describe how garbage collection works.\nAssistant:",
 ]
+
+DEFAULT_TARGET = "models/Qwen3-8B-4bit"
 
 
 def dense_generate(model, tok, prompt: str, max_new: int) -> tuple[str, float, float]:
@@ -82,8 +85,11 @@ def prefix_match_len(a: str, b: str) -> int:
     return i
 
 
-def main():
-    target_path = "/Users/ruler/Documents/mio/models/Qwen3-8B-4bit"
+def main(argv: list[str] | None = None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--model", default=DEFAULT_TARGET, help="target model path or Hugging Face id")
+    args = parser.parse_args(argv)
+    target_path = args.model
     print(f"Loading {target_path}...", flush=True)
     model, tok = load(target_path)
     mx.eval(model.parameters())

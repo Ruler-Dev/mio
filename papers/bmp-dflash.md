@@ -1,5 +1,9 @@
 # BMP-DFlash: Batched Multi-Path Speculative Decoding for Hybrid SSM/Attention Models
 
+> Historical research note. These Qwen 3/3.5 experiments predate Mio's current
+> Qwen 3.6 benchmark schema. The paper is retained as negative/positive prior
+> work, not as evidence for the present Qwen 3.6 path.
+
 **Technical note, mio project, 2026**
 
 ## Abstract
@@ -8,7 +12,7 @@ DDTree (Ringel & Romano, 2026) constructs a draft tree from a single block-
 diffusion drafter forward pass and verifies the tree in one target forward
 using tree attention. Its reported 1.30×–1.50× speedup over vanilla DFlash on
 Qwen3-4B/8B/30B is premised on the target model being a pure-attention
-transformer. The Qwen3.5 family that mio targets is a hybrid of gated
+transformer. The Qwen3.5 family targeted by this experiment is a hybrid of gated
 delta-net (recurrent SSM) and full attention layers; tree attention cannot
 express the "one sequence, ancestor-only mask" pattern through SSM layers
 because the SSM is a strict recurrence. We propose **BMP-DFlash** (Batched
@@ -174,7 +178,7 @@ gives the largest wall-clock improvement when it does improve.
 
 ## 5. Empirical results
 
-All runs on M4 Max 128 GB, MLX, mio default Qwen3.5 tiers, T=0 greedy,
+All runs on M4 Max 128 GB, MLX, Mio's then-default Qwen3.5 tiers, T=0 greedy,
 block_tokens=16, 128 decoded tokens. Numbers from `scripts/bench_bmp.py`
 logged to `/tmp/bmp_bench.log`.
 

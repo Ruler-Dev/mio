@@ -33,14 +33,18 @@ digest, and execution policy for every skill.
 | `mattpocock/skills` | active skills; excludes `deprecated`, `in-progress`, and `personal` | 26 |
 | `Ruler-Dev/Anthropic-Cybersecurity-Skills` | all skills | 817 |
 | `Ruler-Dev/Claude-Code-Game-Studios` | all `.claude/skills` | 72 |
+| **Expected managed snapshot** | | **916** |
 
 Install or atomically update the complete bundle:
 
 ```bash
-python scripts/install_mio_skills.py
+python3 scripts/install_mio_skills.py
 ```
 
-Existing unmanaged directories under `~/.mio/skills` are preserved. Use
+The 916 figure is validated against the pinned reviewed revisions; it is not a
+hard-coded count of every skill Mio may discover at runtime. Existing
+unmanaged directories under `~/.mio/skills` are preserved and can increase the
+live catalog total. Use
 `--replace-all` only when intentionally rebuilding the directory from the
 reviewed sources. `--source SOURCE_ID` updates a subset while preserving the
 other managed sources.
@@ -96,3 +100,23 @@ Every managed source is validated before publication:
 Installations are built in a staging directory under `MIO_HOME`, protected by
 an inter-process lock, and published as a complete snapshot with rollback.
 The manifest itself is written with `fsync` plus atomic rename.
+
+## Verify the installed catalog
+
+```bash
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+manifest = Path.home() / ".mio" / "skills" / ".mio-skills.json"
+data = json.loads(manifest.read_text(encoding="utf-8"))
+print("managed skills:", len(data["skills"]))
+for source in data["sources"]:
+    print(source["source_id"], source["revision"], source["installed"])
+PY
+```
+
+The expected managed count for these exact source revisions is 916. Treat a
+different managed count as an integrity/update signal, not as proof that the
+live catalog is incomplete: additional unmanaged directories are preserved by
+default, are discoverable, and do not change the managed manifest count.

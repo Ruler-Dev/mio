@@ -1,18 +1,77 @@
 # Mio benchmark artifacts
 
-`scripts/bench_qwen36_matrix.py` compares greedy autoregressive inference with
-DFlash, PolarQuant, and TurboQuant on the same loaded target/draft pair. It
-stores raw repetitions, environment metadata, output-token hashes, parity, and
-median performance in `benchmarks/results/`.
+This directory contains published historical measurements and preliminary R&D
+artifacts. The canonical methods, formulas, result status, and claim boundary are in
+[`docs/16-benchmarks.md`](../docs/16-benchmarks.md).
+
+## Qwen 3.6 matrix harness
+
+`scripts/bench_qwen36_matrix.py` compares:
+
+- `baseline`: exact target autoregressive decoding;
+- `dflash`: exact unquantized DFlash;
+- `pq4`: DFlash with PolarQuant 4-bit target KV cache;
+- `tq4`: DFlash with TurboQuant 4-bit target KV cache.
+
+Schema v2 runs seeded randomized Latin-rotation mode blocks, persists warm-up
+and execution order, verifies baseline determinism and every mode marked
+`exact`, and stores paired candidate/baseline throughput ratios. It also
+records normalized phase timings, cache commit mode, rebuilt target tokens,
+and exact-acceptance corrections.
 
 Example:
 
 ```bash
-python scripts/bench_qwen36_matrix.py \
-  --tier large --prompt-tokens 512 --max-tokens 64 \
-  --warmup 1 --reps 3
+python3 scripts/bench_qwen36_matrix.py \
+  --tier large \
+  --prompt-tokens 512 \
+  --max-tokens 64 \
+  --warmup 1 \
+  --reps 8 \
+  --seed 20260715 \
+  --modes baseline,dflash,pq4,tq4
 ```
 
-Unquantized DFlash is required to match the greedy baseline token-for-token.
-Quantized KV modes report parity but are not rejected automatically because
-lossy cache quantization can legitimately change later logits.
+Exact modes fail strict parity when their token IDs differ from the paired
+target AR result. Lossy cache modes record parity without being classified as
+exact; their divergence must still be reported.
+
+## Published schema-v1 artifacts
+
+- `results/qwen36-core-256.json`: historical target AR versus DFlash at commit
+  `d49dec26`; exact token parity and 1.74x median decode throughput for that
+  implementation and two-repetition short workload.
+- `results/qwen36-cache-256.json`: historical cache ablation; PQ4 diverged,
+  while TQ4 preserved tokens but was slower end to end.
+
+Both files record the full clean commit
+`d49dec26dbd6053526027e013d5580e9cf5c10f4`. They predate the current exact
+verification path and schema-v2 paired protocol. Do not use their 1.74x ratio
+as a claim about the current exact engine.
+
+## Current research status
+
+The exercised Qwen 3.6 27B exact path preserved all 64 target tokens but
+decoded at approximately 11.6-11.9 tok/s versus 18.7-19.8 tok/s for target AR.
+Verification consumed about 5.06 seconds of a roughly 5.65-second request.
+The opt-in `MIO_DFLASH_QMV_STAGING=1` Metal ablation remained exact but slowed
+the measured T16 kernels by 9.3-13.3% and T5 kernels by about 12-20%.
+
+The current matched Qwen 3.6 27B study uses four prompts and 12 pairs. DSpark
+cap 2/cap 3 and upstream DFlash preserve 12/12 paired outputs, but each
+regresses TTFT; cap 4/full DSpark preserve only 9/12. Upstream DFlash's direct
+decode/E2E gains do not describe Mio's vendored runtime. The Qwen3-4B v0.4.1
+reruns also fail strict parity (DSpark 0.75, DFlash 0.50). None is a
+breakthrough claim.
+
+## Review policy
+
+Do not overwrite a published artifact with a rerun. Write a new file, review
+its provenance, and update the docs in the same checkpoint. Never commit
+credentials, absolute home paths, secret-bearing prompts, or terminal-only
+numbers without raw repetitions.
+
+A breakthrough claim additionally requires 100% parity, zero fallbacks, at
+least +5% point estimates for both TTFT/prefill and decode, paired-bootstrap
+lower bounds above 1.0, no material memory or tail-latency regression, a
+held-out corpus, and independent 4B and 27B replication.

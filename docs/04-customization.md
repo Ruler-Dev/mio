@@ -1,108 +1,142 @@
-# Customization Guide
+# Configuration and prompt policies
 
-## Changing Context and TQ On the Fly
+## Configuration precedence
 
-Inside the agent, type `/context`:
+For server settings and tiers, Mio applies:
 
-```
-Current: 131,072 tokens, TQ 4-bit
+1. current registry defaults;
+2. persisted `~/.mio/config.json` values;
+3. one-shot CLI overrides.
 
-Select context window:
-  [1]    8K
-  [2]   16K
-  [3]   32K
-  [4]   64K
-  [5]  128K  <-- current
-  [6]  256K
-Context [5]: 6
-
-Select TurboQuant cache:
-  [1] TQ 4-bit     (3.6x compression) <-- current
-  [2] TQ 3-bit     (4.7x compression)
-  [3] TQ 2-bit     (5.5x compression)
-  [4] OFF          (no compression)
-TQ mode [1]: 1
-
-Reloading model with new context/TQ settings...
-Context set: 256K, TQ 4-bit
-Engine ready: large-moe
-```
-
-The model reloads automatically. Press Enter to keep current values.
-
-## Switching Tiers
-
-```
-> /tier large-moe       # 35B-A3B MoE (204 tok/s, default)
-> /tier large            # 27B dense (56 tok/s)
-> /tier medium           # 9B (108 tok/s)
-> /tier small            # 4B (187 tok/s)
-```
-
-Switching tiers unloads the old model and loads the new one. You'll see the loading messages.
-
-## Caveman Mode
-
-Control output verbosity:
-
-```
-> /caveman ultra        # Default: 75% fewer tokens
-> /caveman full         # 60% fewer tokens
-> /caveman lite         # 35% fewer tokens
-> /caveman off          # Standard verbose output
-```
-
-No reload needed -- takes effect immediately on next response.
-
-## `mio configure` -- Full Wizard
-
-For more detailed configuration (model selection, DFlash draft, TQ parameters, context with VRAM estimates):
+Missing fields inherit current defaults. Unknown fields are ignored. Malformed
+custom tiers do not prevent every Mio command from starting.
 
 ```bash
 mio configure
 ```
 
-5 steps:
-1. **Select target model** from `models/` -- shows weight sizes
-2. **Select DFlash draft** from `spd/` -- auto-matched
-3. **Select TQ cache bits** (4/3/2/OFF) -- shows compression + KV estimates
-4. **Select context window** (8K-265K) -- shows VRAM + "Fits 48GB?" column
-5. **Assign to tier** (large-moe/large/medium/small)
+The wizard persists active tiers, tandem mode, host/port, and each tier's
+model, context, sampling, cache, and speculative settings.
 
-## Adding Custom Models
+## Tier fields
 
-### From the registry
+Important `TierConfig` fields:
+
+| Field | Current dataclass default | Meaning |
+|---|---:|---|
+| `context_window` | model-specific | maximum prompt/context budget exposed by the tier |
+| `max_output_tokens` | model-specific | configured output cap |
+| `temperature` | `0.0` | exact greedy speculation; positive values use exact DSpark sampling or target-only fallback for greedy-only backends |
+| `top_p` | `0.95` | nucleus probability |
+| `top_k` | `20` | top-k filter |
+| `pq_bits` | `4` | PolarQuant selected; `16` disables it |
+| `tq_bits` | `16` | TurboQuant off; `2`, `3`, or `4` enables it |
+| `bmp_paths` | `1` | vanilla DFlash; values above one request BMP |
+| `ddtree_budget` | `0` | DDTree off |
+
+PQ and TQ are mutually exclusive. A legacy persisted file containing active
+values for both is normalized in favor of the explicitly configured TQ mode.
+
+The DFlash and DDTree verifiers use exact greedy acceptance. Mio therefore
+keeps an omitted/zero API temperature on those accelerated paths. DSpark can
+perform exact speculative sampling with the requested `top_p`, `top_k`, and
+`seed`; when the selected backend is greedy-only, Mio reports an explicit
+MLX-LM target-only fallback rather than applying a biased sampler. Textual `stop` values are removed from
+both complete and streamed output, including matches split across chunks.
+They currently filter exposed text rather than cancelling the underlying
+backend iterator, so they may not reduce generation compute.
+
+## One-shot context/cache overrides
 
 ```bash
-mio pull qwen3-8b-4bit     # If it's in KNOWN_MODELS
+mio --tier large --context 32k
+mio chat --tier large --context 64k --tq4
+mio serve --tier large --context 128k --mpath 2
 ```
 
-### Manual
+`--context` accepts suffix forms such as `32k` or a raw integer. Mio clamps
+the one-shot output limit to at most one quarter of that context and 8192
+tokens. Large advertised model contexts can still exceed the machine's usable
+memory.
+
+## Prompt policies
+
+Prompt policy is independent from model execution and cache selection.
+`mio chat` and `mio serve` support:
+
+| Mode | Levels | Behavior |
+|---|---|---|
+| `none` | none | do not inject a Mio policy |
+| `caveman` | `lite`, `full`, `ultra` | request increasingly concise prose |
+| `ponytail` | `lite`, `full`, `ultra` | request the smallest sufficient engineering change |
+
+Examples:
 
 ```bash
-# Place PARO model in models/
-huggingface-cli download z-lab/Qwen3.5-9B-PARO
-cp -rL ~/.cache/huggingface/hub/models--z-lab--Qwen3.5-9B-PARO/snapshots/*/  models/Qwen3.5-9B-PARO/
-
-# Place DFlash draft in spd/
-huggingface-cli download z-lab/Qwen3.5-9B-DFlash
-cp -rL ~/.cache/huggingface/hub/models--z-lab--Qwen3.5-9B-DFlash/snapshots/*/  spd/Qwen3.5-9B-DFlash/
-
-# Configure
-mio configure
+mio chat --prompt-mode none
+mio chat --prompt-mode caveman --prompt-level lite
+mio serve --prompt-mode ponytail --prompt-level full
 ```
 
-## VRAM Reference
+Legacy aliases:
 
-Context window VRAM for 35B-A3B MoE (default) with TQ 4-bit:
+```bash
+mio serve --caveman off
+mio serve --caveman ultra
+mio serve --ponytail lite
+```
 
-| Context | KV Cache | Total VRAM |
-|---------|----------|------------|
-| 32K | ~0.5 GB | ~18.5 GB |
-| 64K | ~1.0 GB | ~19.0 GB |
-| 128K (default) | ~2.0 GB | ~20.0 GB |
-| 256K | ~4.0 GB | ~22.0 GB |
-| 512K (TQ2) | ~4.0 GB | ~22.0 GB |
-| 1M (TQ2) | ~7.8 GB | ~25.8 GB |
+Mode selectors are mutually exclusive. `--prompt-level` is valid only with
+`--prompt-mode caveman` or `--prompt-mode ponytail`. With no selector,
+agent/chat/server use `caveman/full`.
 
-All fit within 48 GB M4 Max.
+The policy text is prepended to an existing system message or inserted as a
+new one. Mio skips policy injection when the leading system prompt contains a
+known exact XML tool-protocol marker, because changing those instructions can
+break external clients.
+
+### Evidence boundary
+
+No versioned Qwen 3.6 task corpus currently demonstrates a token reduction,
+coding-success gain, or tool-accuracy improvement for either policy. Levels
+describe instruction intensity, not measured percentages. A future harness
+must compare task success, retries, tool correctness, elapsed time, and output
+tokens against `none`.
+
+## Native agent policy state
+
+The native agent uses the same `none`/`caveman`/`ponytail` policy object and
+defaults to `caveman/full`. It supports top-level flags and runtime commands:
+
+```bash
+mio --prompt-mode ponytail --prompt-level full
+mio --caveman lite
+```
+
+```text
+/caveman off|lite|full|ultra
+/ponytail off|lite|full|ultra
+```
+
+## MCP configuration
+
+MCP has a separate file because it contains transport and permission policy:
+
+```bash
+mio mcp list
+mio serve --mcp-config ~/.mio/mcp.json
+```
+
+Set `MIO_MCP_CONFIG` or pass `--mcp-config`/`--config` to use another file.
+Provider toggles are persisted with mode `0600`. See [15 — MCP](15-mcp.md).
+
+## Relocating Mio data
+
+The external skill installer honors `MIO_HOME`:
+
+```bash
+MIO_HOME=/Volumes/Fast/Mio python3 scripts/install_mio_skills.py
+```
+
+Some older Web UI/config modules still use `~/.mio` directly. Until the
+centralized data-root task lands, test relocation subsystem by subsystem.

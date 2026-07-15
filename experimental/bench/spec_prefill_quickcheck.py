@@ -7,6 +7,7 @@ keep ratios and compares output to a dense baseline.
 
 from __future__ import annotations
 
+import argparse
 import sys
 import time
 from pathlib import Path
@@ -16,6 +17,9 @@ from mlx_lm.utils import load
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from experimental.spec_prefill.session import SpecPrefillSession
+
+
+DEFAULT_TARGET = "models/Qwen3-8B-4bit"
 
 
 PROMPT_SHORT = (
@@ -28,8 +32,11 @@ PROMPT_LONG = (
 )
 
 
-def main():
-    target_path = "/Users/ruler/Documents/mio/models/Qwen3-8B-4bit"
+def main(argv: list[str] | None = None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--model", default=DEFAULT_TARGET, help="target model path or Hugging Face id")
+    args = parser.parse_args(argv)
+    target_path = args.model
     print(f"Loading target {target_path}...", flush=True)
     model, tok = load(target_path)
     mx.eval(model.parameters())

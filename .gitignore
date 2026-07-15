@@ -43,3 +43,7 @@ Thumbs.db
 # Any local-only user data dir
 user_data/
 .claude/
+
+# Local exploratory benchmark smoke captures. Curated, reproducible benchmark
+# artifacts are committed explicitly under benchmarks/results/.
+benchmarks/results/*-smoke-*.json

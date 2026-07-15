@@ -1,79 +1,103 @@
-# TurboQuant KV-Cache Compression
+# KV-cache modes: PolarQuant and TurboQuant
 
-## What Is TurboQuant?
+The target cache grows with attended context and can dominate long-context
+memory. Mio contains two experimental quantized formats, PolarQuant (PQ) and
+TurboQuant (TQ), plus the unquantized MLX cache. They are mutually exclusive.
 
-TurboQuant compresses the Key-Value cache during inference. The KV cache stores attention state for all previous tokens -- it grows linearly with context length and is the main memory bottleneck for long contexts.
+## Configuration
 
-TurboQuant V2 uses hardware-accelerated affine quantization via MLX's `mx.quantized_matmul` Metal kernel. 3.6x cache compression at near-native speed.
+`TierConfig` currently initializes:
 
-## How It Stacks with PARO and DFlash
+```text
+pq_bits = 4
+tq_bits = 16   # off
+```
 
-All three are orthogonal:
-- **PARO**: better model weights (INT4 with rotation) -- loaded once
-- **DFlash**: fewer forward passes (speculative decoding) -- during generation
-- **TurboQuant**: smaller KV cache (quantized) -- during attention
+`--tq4` changes the selected tier to:
 
-Combined: better weights + faster decoding + less memory per token.
+```text
+pq_bits = 16   # off
+tq_bits = 4
+```
 
-## Selecting TQ Mode
-
-**TurboQuant is OFF by default.** Enable with the `--tq4` flag on any
-entrypoint:
+Examples:
 
 ```bash
-mio --tq4
-mio chat --tq4
-mio serve --tq4
+mio --tier large --tq4
+mio chat --tier large --tq4
+mio serve --tier large --tq4
 ```
 
-Inside the agent (legacy interactive selector), type `/context` to switch.
-Programmatically: set `TierConfig.tq_bits = 4` (or 3 / 2) before constructing
-the engine.
+For explicit baseline research, construct a tier with both `pq_bits=16` and
+`tq_bits=16`. Do not run both quantizers at once.
 
+## What must be validated
+
+A cache implementation is correct only if it supports the full runtime
+contract, including:
+
+- update/fetch and attention masks;
+- absolute offsets and sliding windows;
+- trim/restore state;
+- speculative rollback;
+- prefix-state reuse where enabled;
+- serialization or explicit exclusion from reusable state;
+- accurate memory accounting.
+
+Smaller allocated tensors alone do not prove correctness or speed.
+
+## Qwen 3.6 short-context ablation
+
+The checked-in cache artifact uses the Qwen 3.6 27B pair, 256 prompt tokens,
+32 generated tokens, one warm-up, and two measured repetitions.
+
+| Mode | Prefill tok/s | Decode tok/s | End-to-end tok/s | Peak GB | Matches baseline |
+|---|---:|---:|---:|---:|---|
+| target AR, unquantized | 235.03 | 19.25 | 11.63 | 25.23 | control |
+| DFlash + PQ4 | 231.18 | 24.43 | 13.24 | 25.24 | **no** |
+| DFlash + TQ4 | 184.56 | 20.08 | 10.73 | 27.57 | yes |
+
+Against the baseline in this artifact:
+
+- `DFlash + PQ4`: prefill `0.984x`, decode `1.269x`, end to end `1.138x`;
+- `DFlash + TQ4`: prefill `0.785x`, decode `1.043x`, end to end `0.923x`.
+
+These are composite modes: the artifact does not contain unquantized DFlash in
+the same run, so it cannot isolate the incremental effect of PQ4 or TQ4 from
+DFlash. The separate core artifact measures unquantized DFlash at 33.64 decode
+tok/s, but cross-artifact comparisons are not a randomized paired ablation.
+
+## Interpretation
+
+The present evidence does not support "zero overhead", a universal speedup,
+or a memory-saving claim for Qwen 3.6:
+
+- PQ4 produced a different deterministic token sequence in both repetitions;
+- TQ4 preserved tokens but was 7.7% slower end to end and reported 2.34 GB
+  higher peak memory on this short run;
+- 256 prompt tokens are far too few for KV storage to dominate a 21+ GB model,
+  so peak process memory cannot establish long-context compression;
+- two repetitions provide no useful confidence interval.
+
+The negative TQ4 result is still useful: TQ4 should not become the blanket
+performance default based on this workload. The PQ4 divergence requires a
+quality/parity policy before it can be used where exact greedy output matters.
+
+## Reproduce
+
+```bash
+python3 scripts/bench_qwen36_matrix.py \
+  --tier large \
+  --prompt-tokens 256 \
+  --max-tokens 32 \
+  --warmup 1 \
+  --reps 2 \
+  --modes baseline,pq4,tq4 \
+  --output benchmarks/results/qwen36-cache-256-local.json
 ```
-> /tq
-TurboQuant V2:
-- Bits: 4
-- Group size: 64
-- Rotation: True
-- Normalization: True
-- QJL: False
-```
 
-## TQ Cache Options
+For an actual cache study, repeat at 2K, 8K, 32K, and the largest safe context;
+add unquantized DFlash to the same process; record allocated cache bytes per
+layer; and evaluate token drift and task quality beyond 32 generated tokens.
 
-| Setting | Compression | Decode (vs baseline) | When it wins |
-|---------|-------------|---------------------|--------------|
-| **OFF** (default) | 1.0× | 1.00× | Default; matches CLAUDE.md ~204 tok/s on large-moe |
-| 4-bit | 3.6× | 0.7-0.9× small/medium/MoE; **1.67× on 27B-dense at 32K** | When KV bandwidth is the decode bottleneck (long context, dense attention) |
-| 3-bit | 4.7× | ~0.6× | Memory-tight long-context |
-| 2-bit | 5.5× | ~0.5× | 256K+ context where fp16 KV won't fit |
-
-Measured TQ4 vs OFF on M4 Max (see `papers/prefill-speedups.md` and
-`scripts/bench_tq4_context.py`):
-
-| Tier | Context | OFF gen t/s | TQ4 gen t/s | KV (OFF) | KV (TQ4) |
-|------|---------|-------------|-------------|---------|---------|
-| small (4B)        | 7 680   | 94.6  | 83.5 (-12%) | 0.26 GB | 0.07 GB |
-| medium (9B)       | 15 872  | 59.4  | 54.9 (-8%)  | 0.53 GB | 0.15 GB |
-| large (27B-dense) | 32 256  | 10.3  | **17.2 (+67%)** | 2.13 GB | 0.60 GB |
-| large-moe (35B-A3B) | 130 560 | 18.2  | 9.6 (-47%)  | 2.68 GB | 0.76 GB |
-
-**When TQ4 beats baseline**: 27B-dense at 32K — attention is KV-bandwidth-
-bound and shrinking KV is a clear win.
-
-**When TQ4 loses**: MoE at 128K — only 3B params active per token, so KV
-bandwidth isn't the bottleneck; per-step quantize/dequantize overhead
-dominates. Stay on baseline.
-
-## Context Impact (35B-A3B MoE Default)
-
-| Context | fp16 KV | TQ 4-bit | TQ 2-bit | Total VRAM (TQ4) |
-|---------|---------|----------|----------|-------------------|
-| 32K | ~0.5 GB | ~0.1 GB | ~0.1 GB | ~18 GB |
-| 128K (default) | ~2.0 GB | ~0.5 GB | ~0.3 GB | ~18.5 GB |
-| 256K | ~4.0 GB | ~1.0 GB | ~0.5 GB | ~19 GB |
-| 512K | ~8.0 GB | ~2.0 GB | ~1.0 GB | ~20 GB |
-| 1M | ~16 GB | ~4.0 GB | ~2.0 GB | ~22 GB |
-
-Without TQ, 1M context = 16 GB cache (tight). With TQ 2-bit, 1M = 2 GB (easy).
+Raw evidence: [qwen36-cache-256.json](../benchmarks/results/qwen36-cache-256.json).

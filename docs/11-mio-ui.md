@@ -1,15 +1,26 @@
-# Mio UI — Web Interface
+# Mio UI — web interface
 
-A Claude-style chat UI served by `mio serve --webui` at http://localhost:9090/ui. Aims to be the best Mac-native LLM chat UI by leaning hard on browser APIs most cloud chatbots ignore.
+Mio UI is served by `mio serve --webui` at
+`http://127.0.0.1:9090/ui`. It combines chat, artifacts, local tools, projects,
+knowledge views, workflows, schedules, and Mio's external instruction catalog.
+Feature presence in this document is not a browser-compatibility guarantee;
+the release gate still requires live desktop/mobile browser QA.
 
 ## Install
 
 ```bash
-pip install -e .[webui]
-mio serve --webui
+python3 -m pip install -e .
+mio serve --tier large --webui
 ```
 
-The `[webui]` extra pulls in the full stack for document generation, weather, QR codes, calendars, and file uploads: `fpdf2 matplotlib python-docx openpyxl python-pptx reportlab pdfplumber pypdf markdown qrcode icalendar python-barcode python-multipart`.
+The current package includes the Web UI/document stack in the main install;
+there is no separate `[webui]` extra. Optional system tools such as Tesseract
+still require their platform installation.
+
+The server binds to loopback by default and refuses a non-loopback bind unless
+`--unsafe-remote-bind` is supplied. That opt-in does not add authentication.
+Do not expose Mio UI to untrusted network users: it includes local files,
+executable skills, flows, schedules, webhooks, and generated-code artifacts.
 
 ## Core UX features
 
@@ -59,6 +70,29 @@ Slash commands: `/weather /chart /pdf /docx /xlsx /pptx /qr /ical /resume /invoi
 - **Live workspace** (`/workspace`): File System Access API picks a folder with R/W scope; `/save` drops current artifact there
 - **Wake Lock**: acquired at send, released at done — screen stays awake during long generations
 - **Notifications**: browser ping when a reply finishes if the tab is hidden
+
+### Flow Mode
+
+Flow Mode is a persistent visual DAG editor, not a UI-only placeholder. Its
+inspector covers every shipped node type, saves graphs under `~/.mio/flows`,
+runs them server-side, and streams per-node status and final results over SSE.
+The executor supports model/skill calls, bounded HTTP fetches, branching,
+iteration, user input, transforms, local memory, RAG, and artifact emission.
+It executes nodes serially in topological order; there is no intra-flow
+parallel scheduler or retry/backoff policy yet.
+
+An artifact node emits a bounded `artifact_emitted` SSE event. The browser
+passes the payload through the stable `window.Mio.artifacts.ingestAndOpen`
+interface, registers it in the same version/gallery store as chat artifacts,
+and opens the artifact panel. It does not write an undocumented JSONL stub or
+pretend the artifact was sent to chat. A run can emit at most 16 artifacts,
+each with at most 512 KiB of UTF-8 content and at most 2 MiB in aggregate.
+
+A saved flow can be published persistently as a Mio skill. The model sees two
+stable schemas, `list_flow_skills` and `run_flow_skill`, rather than one schema
+per graph. Current bounds are 200 graph nodes and 200 execution hops, a 2 MiB
+flow document, 64 KiB of run arguments, a 256 KiB tool result, and a 120-second
+published-flow timeout. Recursive `run_flow_skill` dispatch is rejected.
 
 ## Artifact types (41 total)
 
@@ -125,9 +159,11 @@ Model wraps rendered content in `<antArtifact identifier="…" type="…" title=
 | `vnd.pimio.image` | filename | inline preview |
 | `vnd.pimio.file` | filename | download card |
 
-## Skills (18 total)
+## Built-in tools and external instruction skills
 
-Mirrors library choices of [anthropics/skills](https://github.com/anthropics/skills).
+The table below is a representative subset of executable built-in tools. It is
+not the external skill catalog and is not an authoritative count; use
+`GET /ui/api/skills` or the playground for the live registry.
 
 | Skill | Library | Purpose |
 |---|---|---|
@@ -150,6 +186,42 @@ Mirrors library choices of [anthropics/skills](https://github.com/anthropics/ski
 | `get_weather` | Open-Meteo (no key) | Current + hourly + 7-day |
 | `execute_python` | subprocess | Run Python |
 
+Separately, Mio's reviewed managed snapshot currently validates **916 external
+instruction skills** under `~/.mio/skills`. This is the expected count for the
+pinned sources, not a hard-coded live total; unmanaged Mio-local skills may be
+discovered alongside them. Skills are searched through `list_mio_skills` and
+loaded on demand through `read_mio_skill`; reading instructions never executes
+bundled repository code. See [14 — External skills](14-external-skills.md).
+
+## Security boundaries
+
+- session identifiers and storage paths are validated server-side;
+- Host, Origin, same-origin mutation, and WebSocket session/CSRF checks run
+  before browser handlers;
+- HTTP request bodies are capped globally at 32 MiB;
+- uploads are read in chunks and capped at 25 MiB;
+- rendered chat/Markdown passes through Mio's sanitizer;
+- executable artifacts use sandboxed iframes without `allow-same-origin`;
+- external URL fetches reject private/non-global destinations and revalidate
+  DNS and redirects;
+- a Content Security Policy and security headers are emitted, while legacy
+  inline assets still require CSP compatibility allowances;
+- modules share state through `window.Mio` rather than accidental globals.
+
+The Web UI exposes only explicitly allow-listed public read tools to the model
+by default. Local reads/writes, execution, private-network tools, flows, and
+MCP orchestration are fail-closed: auto-use requires the exact tool name in
+both `MIO_WEBUI_SKILL_GRANTS` and the request's `skill_grants`; direct
+sensitive runs require the operator grant plus per-call confirmation. The
+registry/playground may list a capability that the model is not authorized to
+invoke.
+
+These controls reduce risk but are not a complete browser or operating-system
+sandbox. Generated artifacts and executable built-in skills remain untrusted
+actions. Built-in bearer authentication, executable-artifact consent,
+eliminating legacy inline CSP allowances, and cross-browser accessibility QA
+remain release work.
+
 ## Endpoints
 
 | Endpoint | Purpose |
@@ -166,3 +238,8 @@ Mirrors library choices of [anthropics/skills](https://github.com/anthropics/ski
 | `POST /ui/api/share` | Mint a share link |
 | `GET /ui/share/{id}` | Standalone read-only artifact view |
 | `GET /ui/files/{name}[?download=1]` | Serve generated file inline or as attachment |
+| `GET/POST /ui/api/flows` | List/save bounded Flow Mode graphs |
+| `GET/DELETE /ui/api/flows/{id}` | Read/delete one graph |
+| `POST/DELETE /ui/api/flows/{id}/expose` | Publish/unpublish a flow as a Mio skill |
+| `POST /ui/api/flows/{id}/run` | Start a server-side graph run |
+| `GET /ui/api/flows/runs/{id}/events` | Stream per-node run events over SSE |

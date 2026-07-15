@@ -1,57 +1,51 @@
-# Mio Documentation Index
+# Mio documentation
 
-## User docs
+The canonical documentation follows the current `codex/qwen36-mlx-engine`
+development line. Numerical claims are either linked to raw benchmark JSON or
+explicitly marked as historical/experimental.
 
-- [01 — Getting Started](./01-getting-started.md) — install, download, first run
-- [02 — Commands](./02-commands.md) — full CLI reference (incl. `--tq4`, `--mpath`, `--caveman`)
-- [03 — Deployment](./03-deployment.md) — server, Docker, monitoring
-- [04 — Customization](./04-customization.md) — system prompts, model wiring
-- [05 — Models](./05-models.md) — tier matrix, model registry
-- [06 — TurboQuant](./06-turboquant.md) — KV-cache quantization (TQ4 default OFF, opt-in)
-- [08 — BMP-DFlash](./08-bmp-dflash.md) — Batched Multi-Path speculative decoding
-- [09 — Prefix Cache](./09-prefix-cache.md) — automatic shared-prefix reuse
-- [11 — Mio UI](./11-mio-ui.md) — Web interface: artifacts, skills, weather widget, document generation
-- [14 — External skills](./14-external-skills.md) — Mio-local catalog, pinned provenance, discovery, and execution policy
+## Start here
 
-## Technical notes / "papers"
+- [01 — Getting started](01-getting-started.md)
+- [02 — CLI and API commands](02-commands.md)
+- [03 — Deployment and local security](03-deployment.md)
+- [04 — Configuration and prompt policies](04-customization.md)
+- [05 — Model registry and Qwen 3.6](05-models.md)
+- [06 — KV-cache modes](06-turboquant.md)
+- [08 — BMP-DFlash](08-bmp-dflash.md)
+- [09 — Prefix cache](09-prefix-cache.md)
+- [10 — Context compaction](10-compaction.md)
+- [11 — Mio UI](11-mio-ui.md)
 
-- [BMP-DFlash technical note](../papers/bmp-dflash.md) — algorithm derivation, correctness proofs, full bench tables
-- [Prefill speedups](../papers/prefill-speedups.md) — prefix cache + LM-head slicing, per-tier numbers
+## Architecture and integration
 
-## Experimental (non-production)
+- [12 — Architecture](12-architecture.md)
+- [13 — Development plan](13-development-plan.md)
+- [14 — External skills inside Mio](14-external-skills.md)
+- [15 — Mio-owned MCP](15-mcp.md)
+- [16 — Reproducible benchmarks](16-benchmarks.md)
 
-Code under `experimental/` does not affect production. Wiring decisions deferred per item.
+## Research
 
-- [Speculative Prefill on Qwen3 (pure attention)](../experimental/notes/spec_prefill_findings.md) —
-  2.5-2.6× prefill speedup on Qwen3-8B at 20% keep ratio. Does NOT work on
-  Qwen3.5 hybrid_gdn (SSM layers can't drop tokens).
-- [DGSA — Draft-Guided Sparse Attention (negative result)](../experimental/notes/dgsa_findings.md) —
-  Novel attention-only adaptation for hybrid SSM models. Architecturally
-  ceiling-bound to ≤1.08× because attention is only 8% of Qwen3.5 prefill
-  compute (MLP 57%, SSM 35%). Documented as definitive negative result.
-- [MLP speedup investigation (negative result)](../experimental/notes/mlp_speedup_findings.md) —
-  Tried `mx.compile`, activation zero-masking, etc. on Qwen3.5 MLP. None
-  deliver speedup; 4-bit grouped matmul kernels are already at hardware
-  peak. Further wins require custom Metal sparse-matmul kernels or model
-  retraining.
+- [Mio on Qwen 3.6: local harnessing, prefill, and speculative decode](../papers/mio-qwen36-research.md)
+- [BMP-DFlash technical note](../papers/bmp-dflash.md) — historical Qwen 3/3.5 experiments
+- [Prefill speedups technical note](../papers/prefill-speedups.md) — historical prefix/LM-head experiments
+- [Raw benchmark artifacts](../benchmarks/results/)
 
-## What's currently optimised
+## Current evidence boundary
 
-| Optimization | Default | Opt-in flag | Status |
-|--------------|---------|-------------|--------|
-| Caveman system prompt (level: ultra) | **on** | `--no-caveman` to disable; `--caveman {off,lite,full,ultra}` to set level | Production |
-| DFlash speculative decoding | **on** | (always on when draft loaded) | Production |
-| LM-head slicing (`only_last_logit`) | **on** | (auto, no flag) | Production, +13-15% cold prefill |
-| Prefix cache | **on** | (auto, no flag; gated off when TQ4 / BMP active) | Production, 4.7-8.6× warm hits |
-| TurboQuant 4-bit KV cache | off | `--tq4` | Production, opt-in |
-| BMP-DFlash multi-path verify | off | `--mpath K` | Production, opt-in (K=2 wins on Qwen3-8B math; not on Qwen3.5) |
-| Speculative Prefill | off | (experimental only) | `experimental/spec_prefill/`, Qwen3-8B only |
+The repository contains historical schema-v1 Qwen 3.6 results and current
+working-tree matched R&D artifacts. The current 27B study finds exact cap-2 and
+cap-3 DSpark runs with modest decode point estimates but material TTFT
+regression; upstream DFlash has a larger direct decode gain but also regresses
+TTFT and is not Mio's vendored production runtime. The fused cold-prefill
+pilot is promising but short and single-threaded. None establishes a global
+prefill breakthrough, long-context scaling, coding-task quality, or
+multi-user throughput.
 
-## Latest measurements (M4 Max, default tiers)
-
-`large-moe` (Qwen3.5-35B-A3B) baseline: 202 gen tok/s, 0.89 acceptance, 9.14 avg accept length.
-Unchanged through every optimisation in this matrix when defaults are used.
-
-For prefill TTFT: with prefix cache active on a long shared prompt (≈1700 tokens),
-warm calls hit 4.7-8.6× faster than cold across all four tiers
-(see `papers/prefill-speedups.md` §1.3).
+The active implementation also includes a Mio-owned managed skill snapshot
+whose pinned revisions currently validate at 916 entries, Mio-local MCP
+presets, prompt modes `none`/`caveman`/`ponytail`, Qwen 3.6
+sliding-attention support, and loopback server defaults. User-managed skills
+may make the live discovery count differ. Release gates and remaining work are
+tracked in [13 — Development plan](13-development-plan.md).

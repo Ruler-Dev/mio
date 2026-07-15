@@ -1,0 +1,123 @@
+{
+  "schema": {
+    "name": "mio.deferred-drafter-priming-pilot",
+    "version": 1
+  },
+  "created_at": "2026-07-15T21:17:38Z",
+  "provenance": {
+    "git": {
+      "revision": "9b9bb142f97958f720e26f29233b27c5d2f06978",
+      "dirty": true
+    },
+    "software": {
+      "mlx": "0.32.0",
+      "mlx-lm": "0.31.3",
+      "dflash-mlx": "0.1.8"
+    },
+    "hardware": {
+      "platform": "macOS-26.5.1-arm64-arm-64bit",
+      "machine": "arm64",
+      "device": "Apple M4 Max",
+      "memory_bytes": 51539607552
+    },
+    "models": {
+      "target": "models/Qwen3.6-27B-UD-Q4_K_XL-mlx",
+      "target_config_sha256": "78a717772ccc416418b200af6e6165c39a5850a838a5d3c4810f8095c7b163bc",
+      "draft": "spd/Qwen3.6-27B-DFlash",
+      "draft_config_sha256": "fcdec9ee2da902d24e69ba3fc666e50a0aa723147689ffc900f425db0381bc54"
+    }
+  },
+  "configuration": {
+    "max_tokens": 16,
+    "repetitions": 3,
+    "distinct_prompts": 4,
+    "prompt_tokens": {
+      "python-refactor": 71,
+      "debugging": 49,
+      "structured-json": 40,
+      "copy-heavy": 57
+    },
+    "block_tokens": 16,
+    "verify_len_cap": 16,
+    "verify_mode": "dflash",
+    "draft_quant": "w4:gs64",
+    "max_deferred_prompt_tokens": 512,
+    "chat_template": true,
+    "fuse_cold_prefill": true,
+    "prefix_snapshot": false,
+    "balanced_order": true,
+    "warmup_each_arm": true,
+    "bootstrap_samples": 10000,
+    "bootstrap_unit": "prompt_cluster_with_all_repetitions",
+    "seed": 20260715
+  },
+  "arms": {
+    "standard": "dflash_mlx 0.1.8 cold prefill: prompt_len-1 plus singleton seam; eager draft-context projection",
+    "candidate": "one full cold target prefill; draft-context projection evaluated after first token"
+  },
+  "summary": {
+    "pairs": 12,
+    "parity_rate": 1.0,
+    "fallback_count": 0,
+    "median_ttft_speedup": 1.1554964888266426,
+    "median_end_to_end_speedup": 1.0793848272923603,
+    "ttft_speedup_ci95": {
+      "estimand": "median_paired_speedup_cluster_bootstrap_by_prompt",
+      "point_estimate": 1.1554964888266426,
+      "lower": 1.1121740618537501,
+      "upper": 1.1613894199847474,
+      "confidence_level": 0.95,
+      "bootstrap_samples": 10000,
+      "clusters": 4,
+      "pairs": 12
+    },
+    "end_to_end_speedup_ci95": {
+      "estimand": "median_paired_speedup_cluster_bootstrap_by_prompt",
+      "point_estimate": 1.0793848272923603,
+      "lower": 1.0657189769719124,
+      "upper": 1.0938005601375909,
+      "confidence_level": 0.95,
+      "bootstrap_samples": 10000,
+      "clusters": 4,
+      "pairs": 12
+    },
+    "all_pair_ttft_speedups_above_one": true,
+    "all_pair_end_to_end_speedups_above_one": true
+  },
+  "pairs": [
+    {"prompt_id": "python-refactor", "repetition": 1, "token_parity": true, "standard_ttft_seconds": 0.460893375, "candidate_ttft_seconds": 0.414301125, "ttft_speedup": 1.1124598684109295, "standard_wall_seconds": 0.68111975, "candidate_wall_seconds": 0.631574791, "end_to_end_speedup": 1.0784467013345376},
+    {"prompt_id": "debugging", "repetition": 1, "token_parity": true, "standard_ttft_seconds": 0.33461, "candidate_ttft_seconds": 0.288467792, "ttft_speedup": 1.159956186720492, "standard_wall_seconds": 0.695828625, "candidate_wall_seconds": 0.655642084, "end_to_end_speedup": 1.0612934129469334},
+    {"prompt_id": "structured-json", "repetition": 1, "token_parity": true, "standard_ttft_seconds": 0.331010166, "candidate_ttft_seconds": 0.285849792, "ttft_speedup": 1.1579863804833554, "standard_wall_seconds": 0.476241541, "candidate_wall_seconds": 0.433682208, "end_to_end_speedup": 1.0981348374798903},
+    {"prompt_id": "copy-heavy", "repetition": 1, "token_parity": true, "standard_ttft_seconds": 0.335519, "candidate_ttft_seconds": 0.290726833, "ttft_speedup": 1.1540696004486108, "standard_wall_seconds": 0.480431916, "candidate_wall_seconds": 0.437580792, "end_to_end_speedup": 1.0979273422952258},
+    {"prompt_id": "python-refactor", "repetition": 2, "token_parity": true, "standard_ttft_seconds": 0.460155417, "candidate_ttft_seconds": 0.413850416, "ttft_speedup": 1.1118882552965708, "standard_wall_seconds": 0.673890375, "candidate_wall_seconds": 0.630440958, "end_to_end_speedup": 1.0689190898031724},
+    {"prompt_id": "debugging", "repetition": 2, "token_parity": true, "standard_ttft_seconds": 0.334078125, "candidate_ttft_seconds": 0.287299292, "ttft_speedup": 1.162822653249003, "standard_wall_seconds": 0.694306542, "candidate_wall_seconds": 0.652178959, "end_to_end_speedup": 1.0645951274855525},
+    {"prompt_id": "structured-json", "repetition": 2, "token_parity": true, "standard_ttft_seconds": 0.330948333, "candidate_ttft_seconds": 0.28431075, "ttft_speedup": 1.1640373534943718, "standard_wall_seconds": 0.475973333, "candidate_wall_seconds": 0.430972, "end_to_end_speedup": 1.1044182290264797},
+    {"prompt_id": "copy-heavy", "repetition": 2, "token_parity": true, "standard_ttft_seconds": 0.337387875, "candidate_ttft_seconds": 0.293670917, "ttft_speedup": 1.148863763720941, "standard_wall_seconds": 0.483046459, "candidate_wall_seconds": 0.443712792, "end_to_end_speedup": 1.0886466825143954},
+    {"prompt_id": "python-refactor", "repetition": 3, "token_parity": true, "standard_ttft_seconds": 0.474189917, "candidate_ttft_seconds": 0.427156083, "ttft_speedup": 1.1101092454769046, "standard_wall_seconds": 0.692094417, "candidate_wall_seconds": 0.652807458, "end_to_end_speedup": 1.0601815413083102},
+    {"prompt_id": "debugging", "repetition": 3, "token_parity": true, "standard_ttft_seconds": 0.345379333, "candidate_ttft_seconds": 0.296873625, "ttft_speedup": 1.163388404746296, "standard_wall_seconds": 0.710633875, "candidate_wall_seconds": 0.66610925, "end_to_end_speedup": 1.0668428264582723},
+    {"prompt_id": "structured-json", "repetition": 3, "token_parity": true, "standard_ttft_seconds": 0.342506958, "candidate_ttft_seconds": 0.299565167, "ttft_speedup": 1.143347076798151, "standard_wall_seconds": 0.49002675, "candidate_wall_seconds": 0.453592834, "end_to_end_speedup": 1.080322953250183},
+    {"prompt_id": "copy-heavy", "repetition": 3, "token_parity": true, "standard_ttft_seconds": 0.359993291, "candidate_ttft_seconds": 0.311164333, "ttft_speedup": 1.1569233772046745, "standard_wall_seconds": 0.509809916, "candidate_wall_seconds": 0.467855542, "end_to_end_speedup": 1.0896737779799561}
+  ],
+  "ablation": {
+    "projection_defer_only": {
+      "pairs": 12,
+      "parity_rate": 1.0,
+      "median_ttft_speedup": 1.0043319727582438,
+      "median_end_to_end_speedup": 0.9968988430791699,
+      "interpretation": "Deferring the draft projection alone is parity-safe but too small and E2E-neutral/slightly negative."
+    },
+    "candidate_projection_flush_us": [2555.958, 1841.917, 1882.334, 1816.666, 2495.291, 1811.583, 1764.792, 1812.75, 2799.167, 1795.791, 1867.666, 1919.167]
+  },
+  "mechanism": {
+    "observation": "With no prefix snapshot/service, dflash_mlx still sets snapshot_boundary=prompt_len, then executes prompt_len-1 and a singleton seam forward.",
+    "candidate_change": "Use the existing full-tail path with boundary zero for cold requests, evaluate the exact draft-context projection on first draft-context access after the already-native early TokenEvent.",
+    "expected_effect": "Remove one full-model singleton forward from TTFT and one avoidable cache/synchronization boundary without changing greedy token semantics."
+  },
+  "claim_scope": "short_single_model_single_machine_pilot_not_promotion_evidence",
+  "promotion_requirements": [
+    "Repeat at 64 and 256 output tokens with matched baseline and upstream DFlash arms.",
+    "Add long-prompt buckets and prefix snapshot restore/publish tests; fused mode must remain disabled for snapshot requests until designed explicitly.",
+    "Certify stop/suppress/tool-call corpora, cancellation, memory, p95 latency, and concurrency.",
+    "Validate at least one additional Qwen hybrid scale and an independent Apple Silicon machine."
+  ]
+}

@@ -1,122 +1,163 @@
-# Getting Started
+# Getting started
 
-## Prerequisites
+## Requirements
 
-- macOS with Apple Silicon (M1/M2/M3/M4)
-- Python >= 3.10
-- 48 GB+ unified memory recommended (16 GB minimum for small tier only)
+- macOS on Apple Silicon;
+- Python 3.10 or newer;
+- Git;
+- enough disk and unified memory for the selected checkpoint;
+- optional: Hugging Face CLI for explicit downloads, Node.js for Ponytail MCP,
+  and Tesseract for OCR tools.
 
-## Installation
+The measured Qwen 3.6 27B target occupies about 20-22 GB on disk before the
+DSpark/DFlash checkpoints and runtime state. A 48 GB Mac was used for the checked-in benchmark.
+Smaller tiers are available for lower-memory machines.
+
+## Install Mio
 
 ```bash
+git clone https://github.com/Ruler-Dev/mio.git
 cd mio
-pip install -e .
+python3 -m pip install -e .
+mio --help
 ```
 
-## Download Models
-
-Models are stored locally:
-- `models/` -- PARO target models (z-lab, INT4 with pairwise rotation)
-- `spd/` -- DFlash speculative decoding drafts (z-lab)
-
-Download all default tier models:
-```bash
-mio download
-```
-
-Or pull a specific model (target + DFlash draft):
-```bash
-mio pull qwen3.5-35b-a3b    # Default: 35B-A3B MoE
-mio pull qwen3.5-27b        # Dense 27B
-mio pull qwen3.5-9b         # 9B
-mio pull qwen3.5-4b         # 4B
-```
-
-Verify models are ready:
-```bash
-python -m mio.model_check
-```
-
-## First Run
-
-### Launch the coding agent (default)
-```bash
-mio
-```
-
-This loads the **large-moe** tier (Qwen3.5-35B-A3B MoE PARO, 128K context, fp16 KV) and drops you into an interactive agent with Caveman Ultra mode. Type `/help` for slash commands.
-
-Default settings for 48 GB M4 Max:
-- **Model:** Qwen3.5-35B-A3B MoE PARO (35B brain, 3B active per token)
-- **Context:** 128K tokens
-- **KV cache:** standard fp16 (TQ4 is opt-in via `--tq4`)
-- **Speed:** ~204 tok/s
-- **VRAM:** ~18 GB (leaves 30 GB free)
-- **Prefix cache:** automatic; ~5-8× TTFT speedup on warm hits when consecutive prompts share a long prefix (system prompt, agent history)
-
-For deeper-context users, pass `--tq4` to enable TurboQuant 4-bit KV cache (KV ≈ 28% of fp16, decode 0.7-0.9× of baseline; on 27B-dense at 32K decode is actually 1.67× faster).
-
-### Other ways to start
+Verify the installed dependency graph when changing environments:
 
 ```bash
-mio --tier medium            # Use 9B model (108 tok/s, less VRAM)
-mio --tier small             # Use 4B model (187 tok/s, minimal VRAM)
-mio --tandem                 # All tiers loaded, auto-routing
-mio "fix the type error"     # Start with a task
-mio serve                    # API server mode
-mio chat                     # Simple chat (no agent tools)
+python3 -m pip check
+python3 -c 'import mlx; print(mlx.__version__)'
 ```
 
-### Inside the agent
+## Download the tested Qwen 3.6 stack
 
-Switch models on the fly:
-```
-> /tier medium          # Switch to 9B (reloads model)
-> /tier large-moe       # Switch back to 35B-A3B (reloads model)
-```
-
-Change context window and TQ cache interactively:
-```
-> /context              # Opens interactive selector
-Select context window:
-  [1]    8K
-  [2]   16K
-  [3]   32K
-  [4]   64K
-  [5]  128K  <-- current
-  [6]  256K
-Context [5]: 6
-
-Select TurboQuant cache:
-  [1] TQ 4-bit  <-- current
-  [2] TQ 3-bit
-  [3] TQ 2-bit
-  [4] OFF
-TQ mode [1]: 1
-
-Reloading model...
-Context set: 256K, TQ 4-bit
-Engine ready: large-moe
+```bash
+mio pull large
+python3 -m mio.model_check
 ```
 
-## Model Tiers
+`mio pull large` resolves to:
 
-| Tier | Model | VRAM | Context | tok/s |
-|------|-------|------|---------|-------|
-| **large-moe** (default) | Qwen3.5-35B-A3B MoE PARO | ~17 GB | 128K | ~204 |
-| large | Qwen3.5-27B PARO | ~14 GB | 32K | ~56 |
-| medium | Qwen3.5-9B PARO | ~5 GB | 16K | ~108 |
-| small | Qwen3.5-4B PARO | ~2.5 GB | 8K | ~187 |
+- `models/Qwen3.6-27B-UD-Q4_K_XL-mlx`;
+- `spd/Qwen3.6-27B-DSpark` as the preferred drafter;
+- `spd/Qwen3.6-27B-DFlash` as an independently compatible fallback.
 
-All models use PARO quantization (2.4% better than AWQ) with DFlash speculative decoding and TurboQuant V2 KV cache.
+Use `mio pull large --no-dspark` for a target+DFlash installation or
+`mio pull large --no-fallback` for target+DSpark without a local fallback. The
+default downloads all three so runtime fallback never reuses the hybrid
+DSpark checkpoint as if it were a pure DFlash model.
 
-## Memory Planning (M4 Max 48 GB)
+The downloader resumes into stable local directories and considers a model
+complete only when `config.json` and every declared SafeTensors shard exist.
+Never commit model weights or Hugging Face credentials.
 
-| Configuration | VRAM | Fits? |
-|---|---|---|
-| large-moe only (35B-A3B, 128K, TQ4) | ~18 GB | Yes (default) |
-| large-moe + medium (tandem) | ~24 GB | Yes |
-| All four tiers (tandem) | ~40 GB | Yes |
-| large-moe at 256K TQ4 | ~20 GB | Yes |
-| large-moe at 256K TQ2 | ~19 GB | Yes |
-| large only (27B, 128K, TQ4) | ~16 GB | Yes |
+## Install the external skills inside Mio
+
+```bash
+python3 scripts/install_mio_skills.py
+```
+
+The command installs the pinned, installer-verified managed snapshot (916
+skills at the reviewed revisions) under `~/.mio/skills`. Unmanaged local
+skills can make the live discovery total differ. The installer does not modify
+`~/.codex`, `~/.claude`, or another product's configuration. See
+[14 — External skills](14-external-skills.md).
+
+## Check Mio-local MCP
+
+```bash
+mio mcp install-tools
+mio mcp doctor
+mio mcp check --json
+mio mcp list
+```
+
+The local `llm-wiki`, `headroom`, and `ponytail` presets are enabled in the
+registry by default and exposed through bounded discovery/call tools. Provider
+processes start lazily on first use. In Mio UI, local MCP orchestration is a
+sensitive capability: a model request needs both the exact operator grant and
+per-request consent before it can use the bridge; a direct sensitive run also
+needs confirmation. LLM Wiki ships with Mio; the packaged installer creates
+the isolated Headroom and Ponytail runtime trees. The source-checkout script
+is only a thin compatibility wrapper. Missing optional providers are isolated
+from engine startup. See [15 — MCP](15-mcp.md).
+
+## First run
+
+Use the measured dense tier explicitly:
+
+```bash
+mio --tier large
+```
+
+Other entry points:
+
+```bash
+mio chat --tier large --prompt-mode none
+mio serve --tier large
+mio serve --tier large --webui
+```
+
+Open the UI at `http://127.0.0.1:9090/ui`. The server binds to loopback by
+default. Non-loopback binds are rejected unless the operator supplies
+`--unsafe-remote-bind`; that opt-in does not add authentication.
+
+## Prompt policies
+
+For the native agent, chat, or server, select one policy:
+
+```bash
+mio serve --prompt-mode none
+mio serve --prompt-mode caveman --prompt-level full
+mio serve --prompt-mode ponytail --prompt-level full
+mio --ponytail full --tier large
+```
+
+The default is `caveman/full`. Caveman and Ponytail are prompt policies, not
+inference accelerators. Their effect on Qwen 3.6 coding quality and total task
+time has not yet been measured.
+
+## Context and cache overrides
+
+```bash
+mio serve --tier large --context 32k
+mio serve --tier large --context 128k
+mio serve --tier large --tq4
+mio serve --tier large --mpath 2
+```
+
+`--tq4` selects TurboQuant and disables PolarQuant for that run. `--mpath 2`
+is experimental BMP verification. Do not assume either is faster: the current
+256+32-token Qwen 3.6 ablation found TQ4 slower end to end and PQ4 changed the
+greedy output. Benchmark the intended prompt lengths first.
+
+## Minimal verification
+
+```bash
+python3 -m pytest -q
+python3 scripts/bench_qwen36_matrix.py \
+  --tier large --prompt-tokens 256 --max-tokens 32 \
+  --warmup 1 --reps 2 --modes baseline,dflash
+```
+
+For a release or research claim, use more repetitions and multiple prompt
+lengths/workloads. The two-repetition command above is only a quick local
+parity/performance smoke test.
+
+## Paths
+
+| Path | Purpose |
+|---|---|
+| `models/` | target checkpoints |
+| `spd/` | DSpark and DFlash speculative checkpoints |
+| `~/.mio/config.json` | persisted engine/server configuration |
+| `~/.mio/mcp.json` | Mio MCP overrides |
+| `~/.mio/skills/` | Mio external instruction skills |
+| `~/.mio/tools/` | isolated optional MCP tools/source trees |
+| `~/.mio/wiki/` | local LLM Wiki data |
+| `~/.mio/sessions/` | Web UI sessions |
+| `benchmarks/results/` | versioned raw benchmark artifacts |
+
+Set `MIO_HOME` for the skill installer when a different Mio data root is
+needed. Not every older subsystem has been migrated to that environment
+variable yet; centralizing all persistence is tracked in the development plan.

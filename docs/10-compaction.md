@@ -1,13 +1,12 @@
-# Context Auto-Compaction
+# Context auto-compaction
 
-Mio v0.4 introduces automatic context compaction: when an incoming prompt
-approaches the model's context window, mio reduces it in place before
-prefill. This prevents Metal OOM crashes on long agent sessions and keeps
-attention quality high by avoiding near-full contexts where Qwen3.5 starts to
-drift.
+When an incoming prompt approaches the configured model context, Mio can
+reduce older content before prefill. This is a risk-reduction mechanism for
+long sessions; it does not guarantee that an oversized final message will fit
+or that summarization preserves every fact.
 
 Implementation: `mio/compactor.py`, wired into `server.chat_completions`
-before `_apply_caveman`.
+before prompt-policy injection.
 
 ## Trigger
 
@@ -78,9 +77,9 @@ that start with the same post-compaction prefix then rebuild the cache
 normally — effectively one miss every K turns where K is the compaction
 frequency (usually tens of turns for a Kilo session).
 
-This is strictly better than the alternative: without compaction, long agent
-sessions either OOM on Metal ("innocent victim" command-buffer discards) or
-run with degraded attention quality on near-full contexts.
+This generally trades old detail for a lower memory/context load. Whether that
+trade improves task completion depends on the conversation and has not yet
+been measured on the Qwen 3.6 coding harness.
 
 ## Observability
 
