@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Any, Optional
+from typing import Any
 
 import mlx.core as mx
 import numpy as np
@@ -137,6 +137,7 @@ def generate_ddtree_once(
         _eval_logits_and_captured,
         _arm_target_rollback_with_prefix,
         _match_acceptance_length,
+        _effective_draft_window,
         _resolve_verify_len_cap,
         _restore_target_cache_after_acceptance,
         _verify_target_block,
@@ -161,6 +162,7 @@ def generate_ddtree_once(
     )
     draft_sink = int(os.environ.get("DFLASH_DRAFT_SINK", "64"))
     draft_window = int(os.environ.get("DFLASH_DRAFT_WINDOW", "1024"))
+    draft_window = _effective_draft_window(draft_model, draft_window)
     draft_cache = [
         ContextOnlyDraftKVCache(sink_size=draft_sink, window_size=draft_window)
         for _ in range(len(draft_model.layers))

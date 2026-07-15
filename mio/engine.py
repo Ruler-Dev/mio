@@ -7,14 +7,10 @@ Uses the vendored mio.dflash runtime (the fast DFlash path that benchmarks
 from __future__ import annotations
 
 import json
-import sys
-import time
 from collections.abc import Generator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-
-import mlx.core as mx
 
 from mio.config import TierConfig
 
@@ -131,18 +127,40 @@ class MioEngine:
         if target_family == "hybrid_gdn":
             _install_target_speculative_hooks(self._target_model)
             configure_full_attention_split(self._target_model, enabled=True, chunk_size=8)
-        self._target_meta = {"paro": True, "target_family": target_family}
+        config_path = Path(tc.target_model) / "config.json"
+        try:
+            target_config = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            target_config = {}
+        self._target_meta = {
+            "paro": True,
+            "target_family": target_family,
+            "config": target_config,
+        }
         print(f"  Target: PARO INT4 ({target_family})")
 
     def _load_draft(self, tc: TierConfig) -> None:
         """Load the DFlash draft model. No draft -> baseline AR fallback."""
         try:
-            from mio.dflash.runtime import load_draft_bundle
+            from mio.dflash.runtime import (
+                bind_draft_target_model,
+                load_draft_bundle,
+                validate_draft_target_compatibility,
+            )
             self._draft_model, draft_meta = load_draft_bundle(tc.draft_model)
-            print(f"  Draft loaded: {draft_meta.get('resolved_model_ref', tc.draft_model)}")
         except Exception as e:
             print(f"  WARNING: Draft load failed ({e}), baseline AR fallback")
             self._draft_model = None
+            return
+
+        # A model that loads but targets a different architecture is not a safe
+        # autoregressive fallback condition: surface the configuration error.
+        validate_draft_target_compatibility(
+            self._target_meta.get("config") or {},
+            draft_meta.get("config") or {},
+        )
+        bind_draft_target_model(self._draft_model, self._target_model)
+        print(f"  Draft loaded: {draft_meta.get('resolved_model_ref', tc.draft_model)}")
 
     @staticmethod
     def _detect_paro(model_path: str) -> bool:
@@ -300,12 +318,31 @@ class MioEngine:
         draft_cache = entry.get("draft_cache")
         if draft_cache is not None:
             for dc in draft_cache:
-                if dc.keys is None or dc.values is None:
-                    continue
-                cur = int(dc.keys.shape[2])
-                if cur > length:
-                    dc.keys = dc.keys[:, :, :length, :]
-                    dc.values = dc.values[:, :, :length, :]
+                keys = getattr(dc, "keys", None)
+                values = getattr(dc, "values", None)
+                positions = getattr(dc, "positions", None)
+
+                # dflash-mlx caches keep a fixed sink plus a moving tail. Their
+                # physical length is therefore unrelated to the absolute RoPE
+                # offset. Filter by absolute positions so a divergent cached
+                # tail can never leak into the next prompt.
+                if keys is not None and values is not None and positions is not None:
+                    position_values = [int(position) for position in positions.tolist()]
+                    keep = sum(position < length for position in position_values)
+                    if keep:
+                        dc.keys = keys[:, :, :keep, :]
+                        dc.values = values[:, :, :keep, :]
+                        dc.positions = positions[:keep]
+                    else:
+                        dc.keys = None
+                        dc.values = None
+                        dc.positions = None
+                elif keys is not None and values is not None:
+                    # Compatibility with the old contiguous draft cache.
+                    keep = min(int(keys.shape[2]), length)
+                    dc.keys = keys[:, :, :keep, :]
+                    dc.values = values[:, :, :keep, :]
+                if hasattr(dc, "offset"):
                     dc.offset = length
 
         target_hidden = entry.get("target_hidden")
@@ -313,6 +350,12 @@ class MioEngine:
             cur = int(target_hidden.shape[1])
             if cur > length:
                 entry["target_hidden"] = target_hidden[:, :length, :]
+
+        draft_context = entry.get("draft_context")
+        if draft_context is not None:
+            cur = int(draft_context.shape[1])
+            if cur > length:
+                entry["draft_context"] = draft_context[:, :length, :]
 
     def _prefix_cache_store(self, prompt_tokens: list[int], summary_event: dict | None) -> None:
         """Store the current request's post-generation cache state directly.
@@ -450,7 +493,7 @@ class MioEngine:
         if os.environ.get("MIO_DEBUG_LOG", "") in ("1", "true", "yes"):
             try:
                 path = os.environ.get("MIO_DEBUG_LOG_PATH", "/tmp/mio-serve-debug.log")
-                import json, time
+                import time
                 with open(path, "a") as f:
                     f.write(json.dumps({
                         "ts": time.time(), "event": "chat_template",
@@ -577,6 +620,7 @@ class MioEngine:
                 tq_bits=tq_bits,
                 pq_bits=pq_bits,
                 warm_state=warm_state,
+                return_final_state=self._prefix_cache_enabled(),
             )
             if self._prefix_cache_enabled():
                 self._prefix_cache_store(prompt_tokens, result)

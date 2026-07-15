@@ -24,7 +24,6 @@ from mio.dflash.model import (
     ContextOnlyDraftKVCache,
     DFlashDraftModel,
     DFlashDraftModelArgs,
-    extract_context_feature,
 )
 from mio.dflash.recurrent_rollback_cache import RecurrentRollbackCache
 
@@ -226,6 +225,48 @@ def _resolve_draft_window() -> tuple[int, int]:
     sink = int(os.environ.get("DFLASH_DRAFT_SINK", "64").strip())
     window = int(os.environ.get("DFLASH_DRAFT_WINDOW", "1024").strip())
     return max(0, sink), max(1, window)
+
+
+def _effective_draft_window(draft_model: Any, requested_window: int) -> int:
+    """Honor the minimum sliding-attention window encoded by the checkpoint."""
+
+    configured_window = int(
+        getattr(getattr(draft_model, "args", None), "sliding_window", 0) or 0
+    )
+    return max(1, int(requested_window), configured_window)
+
+
+def _project_draft_context(
+    draft_model: DFlashDraftModel,
+    target_hidden: mx.array,
+) -> mx.array:
+    """Project captured target features once, before the speculative cycle."""
+
+    projector = getattr(draft_model, "project_target_hidden", None)
+    return projector(target_hidden) if callable(projector) else target_hidden
+
+
+def _forward_draft(
+    draft_model: DFlashDraftModel,
+    *,
+    noise_embedding: mx.array,
+    draft_context: mx.array,
+    cache: list[Any],
+) -> mx.array:
+    """Run a draft block without re-projecting the full context each cycle."""
+
+    forward_projected = getattr(draft_model, "forward_projected_context", None)
+    if callable(forward_projected):
+        return forward_projected(
+            noise_embedding=noise_embedding,
+            draft_context=draft_context,
+            cache=cache,
+        )
+    return draft_model(
+        noise_embedding=noise_embedding,
+        target_hidden=draft_context,
+        cache=cache,
+    )
 
 def _should_quantize_draft(quantize_draft: bool = False) -> bool:
     if quantize_draft:
@@ -823,7 +864,6 @@ def _install_split_full_attention_hook(attn: Any) -> None:
             queries = self.rope(queries)
             keys = self.rope(keys)
 
-        total_kv_len = int(keys.shape[2])
         exact_prefix_threshold = int(
             getattr(
                 self,
@@ -1076,6 +1116,88 @@ def load_draft_bundle(
     }
 
 
+def validate_draft_target_compatibility(
+    target_config: dict[str, Any],
+    draft_config: dict[str, Any],
+) -> dict[str, int]:
+    """Fail fast when a DFlash checkpoint cannot match the target model."""
+
+    target_text = target_config.get("text_config") or target_config
+    errors: list[str] = []
+
+    target_hidden = int(target_text.get("hidden_size", 0) or 0)
+    draft_hidden = int(draft_config.get("hidden_size", 0) or 0)
+    target_layers = int(target_text.get("num_hidden_layers", 0) or 0)
+    declared_target_layers = int(draft_config.get("num_target_layers", 0) or 0)
+    target_vocab = int(target_text.get("vocab_size", 0) or 0)
+    draft_vocab = int(draft_config.get("vocab_size", 0) or 0)
+    target_context = int(target_text.get("max_position_embeddings", 0) or 0)
+    sliding_window = int(draft_config.get("sliding_window", 0) or 0)
+    draft_layers = int(draft_config.get("num_hidden_layers", 0) or 0)
+    layer_types = tuple(draft_config.get("layer_types") or ())
+    dflash_config = draft_config.get("dflash_config") or {}
+    target_layer_ids = tuple(int(index) for index in dflash_config.get("target_layer_ids") or ())
+    mask_token_id = int(dflash_config.get("mask_token_id", -1) or 0)
+    block_size = int(draft_config.get("block_size", 0) or 0)
+
+    if not target_hidden or target_hidden != draft_hidden:
+        errors.append(f"hidden_size target={target_hidden} draft={draft_hidden}")
+    if not target_layers or target_layers != declared_target_layers:
+        errors.append(
+            f"num_target_layers target={target_layers} draft={declared_target_layers}"
+        )
+    if not target_vocab or target_vocab != draft_vocab:
+        errors.append(f"vocab_size target={target_vocab} draft={draft_vocab}")
+    if target_layer_ids and (
+        len(target_layer_ids) != draft_layers
+        or min(target_layer_ids) < 0
+        or max(target_layer_ids) >= target_layers
+    ):
+        errors.append(
+            f"target_layer_ids={list(target_layer_ids)} invalid for {target_layers} target layers"
+        )
+    if layer_types and len(layer_types) != draft_layers:
+        errors.append(
+            f"layer_types has {len(layer_types)} entries for {draft_layers} draft layers"
+        )
+    if sliding_window and target_context and sliding_window > target_context:
+        errors.append(
+            f"sliding_window={sliding_window} exceeds target context={target_context}"
+        )
+    if not 0 <= mask_token_id < target_vocab:
+        errors.append(f"mask_token_id={mask_token_id} outside target vocab={target_vocab}")
+    if block_size <= 1:
+        errors.append(f"block_size={block_size} must be greater than one")
+
+    if errors:
+        raise ValueError("Incompatible DFlash target/draft: " + "; ".join(errors))
+    return {
+        "hidden_size": target_hidden,
+        "num_target_layers": target_layers,
+        "vocab_size": target_vocab,
+        "block_size": block_size,
+        "sliding_window": sliding_window,
+    }
+
+
+def bind_draft_target_model(
+    draft_model: DFlashDraftModel,
+    target_model: Any,
+) -> None:
+    """Bind target-specific embedding semantics required by upstream DFlash."""
+
+    binder = getattr(draft_model, "bind_target_model", None)
+    if not callable(binder):
+        return
+
+    class _TargetOps:
+        @staticmethod
+        def text_model(model: Any) -> Any:
+            return _target_text_model(model)
+
+    binder(target_model, target_ops=_TargetOps())
+
+
 def target_forward_with_hidden_states(
     target_model: Any,
     *,
@@ -1186,7 +1308,9 @@ def chunked_prefill(
         chunk_logits, chunk_hidden = target_forward_with_hidden_states(
             target_model, input_ids=piece, cache=cache,
             capture_layer_ids=capture_layer_ids,
-            only_last_logit=(only_last_logit and is_last),
+            # Intermediate chunk logits are discarded. Projecting only their
+            # last position avoids a vocab-sized matmul for every prompt token.
+            only_last_logit=(only_last_logit or not is_last),
         )
         mx.eval(chunk_logits)
         if isinstance(chunk_hidden, dict):
@@ -1200,6 +1324,68 @@ def chunked_prefill(
     else:
         merged = _concat_hidden_state_chunk_dicts(hidden_chunks, capture_layer_ids)
     return logits, merged
+
+
+def chunked_dflash_prefill(
+    target_model: Any,
+    draft_model: DFlashDraftModel,
+    *,
+    input_ids: mx.array,
+    cache: list[Any],
+    chunk_size: Optional[int] = None,
+    only_last_logit: bool = True,
+) -> tuple[mx.array, mx.array]:
+    """Prefill target caches while storing only projected DFlash features.
+
+    Capturing N target layers normally creates a ``N * hidden_size`` tensor
+    for the entire prompt. Projecting each chunk immediately bounds that raw
+    feature lifetime to one chunk and keeps the persistent context at one
+    ``hidden_size`` per token.
+    """
+
+    if input_ids.ndim != 2:
+        raise ValueError(f"expected (B, L), got {input_ids.shape}")
+    total = int(input_ids.shape[1])
+    if total <= 0:
+        raise ValueError("DFlash prefill requires at least one token")
+    if chunk_size is None:
+        chunk_size = _prefill_chunk_size_env()
+
+    capture_layer_ids = {
+        int(layer_id) + 1 for layer_id in draft_model.target_layer_ids
+    }
+    projected_chunks: list[mx.array] = []
+    logits: mx.array | None = None
+    starts = list(range(0, total, chunk_size))
+    for index, start in enumerate(starts):
+        end = min(start + chunk_size, total)
+        is_last = index == len(starts) - 1
+        chunk_logits, captured = target_forward_with_hidden_states(
+            target_model,
+            input_ids=input_ids[:, start:end],
+            cache=cache,
+            capture_layer_ids=capture_layer_ids,
+            only_last_logit=(only_last_logit or not is_last),
+        )
+        if not isinstance(captured, dict):
+            raise TypeError("selective DFlash capture must return a layer dictionary")
+        raw_features = extract_context_feature_from_dict(
+            captured,
+            list(draft_model.target_layer_ids),
+        )
+        projected = _project_draft_context(draft_model, raw_features)
+        mx.eval(chunk_logits, projected)
+        projected_chunks.append(projected)
+        logits = chunk_logits
+
+    assert logits is not None
+    draft_context = (
+        projected_chunks[0]
+        if len(projected_chunks) == 1
+        else mx.concatenate(projected_chunks, axis=1)
+    )
+    mx.eval(draft_context)
+    return logits, draft_context
 
 
 def trim_cache_to(cache_entries: list[Any], size: int) -> int:
@@ -1511,6 +1697,7 @@ def generate_dflash_once(
     if quantize_kv_cache:
         configure_full_attention_split(target_model, enabled=False)
     draft_sink_size, draft_window_size = _resolve_draft_window()
+    draft_window_size = _effective_draft_window(draft_model, draft_window_size)
 
     prompt_tokens = (
         list(prompt_tokens_override)
@@ -1603,39 +1790,34 @@ def generate_dflash_once(
     # positions — a vocab-sized matmul per prompt token.
     # Use chunked prefill when the prompt could blow past Metal's single-buffer
     # cap (~30 GB). Under the threshold, chunked_prefill takes a single-shot path.
-    prefill_logits, prefill_hidden_states = chunked_prefill(
+    prefill_logits, draft_context = chunked_dflash_prefill(
         target_model,
+        draft_model,
         input_ids=prompt_array,
         cache=target_cache,
-        capture_layer_ids=capture_layer_ids,
         only_last_logit=True,
     )
-    _eval_logits_and_captured(prefill_logits, prefill_hidden_states)
     prefill_ns = time.perf_counter_ns() - prefill_start_ns
 
     suppress_token_mask = build_suppress_token_mask(int(prefill_logits.shape[-1]), suppress_token_ids)
     # prefill_logits shape is (B, 1, V) when only_last_logit=True.
     staged_first = greedy_tokens_with_mask(prefill_logits[:, -1, :], suppress_token_mask).reshape(-1)
-    target_hidden = extract_context_feature_from_dict(
-        prefill_hidden_states,
-        list(draft_model.target_layer_ids),
-    )
-    # If we ran a warm-prefix prefill, target_hidden covers only the novel suffix.
-    # Concatenate the cached target_hidden for the warm range so the draft model
-    # sees the full prompt context on the first cycle.
-    if warm_state is not None and "target_hidden" in warm_state:
-        cached_th = warm_state["target_hidden"]
-        if cached_th is not None and int(cached_th.shape[1]) > 0:
-            target_hidden = mx.concatenate([cached_th, target_hidden], axis=1)
+    # Prefill-only snapshots may carry projected draft context while their
+    # draft KV cache is still empty. Preserve compatibility with old snapshots
+    # that stored raw concatenated target features.
+    if warm_state is not None:
+        cached_context = warm_state.get("draft_context")
+        if cached_context is None and warm_state.get("target_hidden") is not None:
+            cached_context = _project_draft_context(
+                draft_model,
+                warm_state["target_hidden"],
+            )
+        if cached_context is not None and int(cached_context.shape[1]) > 0:
+            draft_context = mx.concatenate([cached_context, draft_context], axis=1)
+            mx.eval(draft_context)
 
     # Prefill-only shortcut: used by PrefixCache to warm caches for a specific prefix.
     if prefill_only:
-        # Capture target_hidden so the cache entry can restore draft-side context.
-        warm_target_hidden = extract_context_feature_from_dict(
-            prefill_hidden_states,
-            list(draft_model.target_layer_ids),
-        )
-        mx.eval(warm_target_hidden)
         elapsed_us = (time.perf_counter_ns() - start_ns) / 1_000.0
         result = {
             "elapsed_us": elapsed_us,
@@ -1665,7 +1847,7 @@ def generate_dflash_once(
             result["final_state"] = {
                 "target_cache": target_cache,
                 "draft_cache": draft_cache,
-                "target_hidden": warm_target_hidden,
+                "draft_context": draft_context,
                 "offset": prompt_len,
             }
         return result
@@ -1692,7 +1874,6 @@ def generate_dflash_once(
         draft_cycle_ns = 0
         verify_cycle_ns = 0
         replay_cycle_ns = 0
-        commit_cycle_ns = 0
         remaining = max_new_tokens - generated_token_count
         block_len = max(1, min(effective_block_tokens, remaining))
         block_token_buffer[:block_len] = draft_model.mask_token_id
@@ -1702,9 +1883,10 @@ def generate_dflash_once(
         if block_len > 1:
             draft_start_ns = time.perf_counter_ns()
             noise_embedding = _target_embed_tokens(target_model)(block_token_ids[None])
-            draft_hidden = draft_model(
+            draft_hidden = _forward_draft(
+                draft_model,
                 noise_embedding=noise_embedding,
-                target_hidden=target_hidden,
+                draft_context=draft_context,
                 cache=draft_cache,
             )
             draft_logits = _lm_head_logits(target_model, draft_hidden[:, 1:, :])
@@ -1754,7 +1936,8 @@ def generate_dflash_once(
 
         commit_start_ns = time.perf_counter_ns()
         start += commit_count
-        target_hidden = committed_hidden
+        draft_context = _project_draft_context(draft_model, committed_hidden)
+        mx.eval(draft_context)
         replay_cycle_ns = _restore_target_cache_after_acceptance(
             target_cache,
             target_len=start,
@@ -1765,8 +1948,6 @@ def generate_dflash_once(
         cycles_completed += 1
         commit_wall_ns = time.perf_counter_ns() - commit_start_ns
         commit_ns_total += commit_wall_ns
-        commit_cycle_ns = max(0, commit_wall_ns - replay_cycle_ns)
-
         stop_hit = False
         if stop_token_array is not None:
             stop_hit = bool(
@@ -1856,13 +2037,13 @@ def stream_dflash_generate(
     if quantize_kv_cache:
         configure_full_attention_split(target_model, enabled=False)
     draft_sink_size, draft_window_size = _resolve_draft_window()
+    draft_window_size = _effective_draft_window(draft_model, draft_window_size)
 
     prompt_tokens = (
         list(prompt_tokens_override)
         if prompt_tokens_override is not None
         else _prepare_prompt_tokens(tokenizer, prompt, use_chat_template=use_chat_template)
     )
-    fallback_ar = False
     fallback_reason: Optional[str] = None
 
     prompt_len = len(prompt_tokens)
@@ -1920,14 +2101,13 @@ def stream_dflash_generate(
 
     start_ns = time.perf_counter_ns()
     prefill_start_ns = time.perf_counter_ns()
-    prefill_logits, prefill_hidden_states = chunked_prefill(
+    prefill_logits, draft_context = chunked_dflash_prefill(
         target_model,
+        draft_model,
         input_ids=prompt_array,
         cache=target_cache,
-        capture_layer_ids=capture_layer_ids,
         only_last_logit=True,
     )
-    _eval_logits_and_captured(prefill_logits, prefill_hidden_states)
     prefill_ns = time.perf_counter_ns() - prefill_start_ns
 
     vocab_dim = int(prefill_logits.shape[-1])
@@ -1942,14 +2122,16 @@ def stream_dflash_generate(
         relaxed_mask = initial_mask
     suppress_token_mask = initial_mask
     staged_first = greedy_tokens_with_mask(prefill_logits[:, -1, :], suppress_token_mask).reshape(-1)
-    target_hidden = extract_context_feature_from_dict(
-        prefill_hidden_states,
-        list(draft_model.target_layer_ids),
-    )
-    if warm_state is not None and "target_hidden" in warm_state:
-        cached_th = warm_state["target_hidden"]
-        if cached_th is not None and int(cached_th.shape[1]) > 0:
-            target_hidden = mx.concatenate([cached_th, target_hidden], axis=1)
+    if warm_state is not None:
+        cached_context = warm_state.get("draft_context")
+        if cached_context is None and warm_state.get("target_hidden") is not None:
+            cached_context = _project_draft_context(
+                draft_model,
+                warm_state["target_hidden"],
+            )
+        if cached_context is not None and int(cached_context.shape[1]) > 0:
+            draft_context = mx.concatenate([cached_context, draft_context], axis=1)
+            mx.eval(draft_context)
 
     yield {
         "event": "prefill",
@@ -1984,9 +2166,10 @@ def stream_dflash_generate(
         if block_len > 1:
             draft_start_ns = time.perf_counter_ns()
             noise_embedding = _target_embed_tokens(target_model)(block_token_ids[None])
-            draft_hidden = draft_model(
+            draft_hidden = _forward_draft(
+                draft_model,
                 noise_embedding=noise_embedding,
-                target_hidden=target_hidden,
+                draft_context=draft_context,
                 cache=draft_cache,
             )
             draft_logits = _lm_head_logits(target_model, draft_hidden[:, 1:, :])
@@ -2030,7 +2213,8 @@ def stream_dflash_generate(
         committed_segment = verify_token_ids[:commit_count]
         commit_start_ns = time.perf_counter_ns()
         start += commit_count
-        target_hidden = committed_hidden
+        draft_context = _project_draft_context(draft_model, committed_hidden)
+        mx.eval(draft_context)
         replay_ns_total += _restore_target_cache_after_acceptance(
             target_cache,
             target_len=start,

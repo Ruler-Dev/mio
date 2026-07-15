@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from mio.config import MioConfig
 
 
@@ -86,6 +84,28 @@ def test_prefix_cache_invalidate():
     eng._prefix_cache_invalidate()
     assert len(eng._prefix_cache) == 0
     assert eng._last_prompt_tokens == []
+
+
+def test_position_aware_draft_cache_truncation_drops_divergent_tail():
+    """Sink/window draft caches must be truncated by RoPE position, not shape."""
+    import mlx.core as mx
+
+    from mio.dflash.model import ContextOnlyDraftKVCache
+    from mio.engine import MioEngine
+
+    cache = ContextOnlyDraftKVCache(sink_size=2, window_size=4)
+    cache.keys = mx.arange(6, dtype=mx.float32).reshape(1, 1, 6, 1)
+    cache.values = cache.keys
+    cache.positions = mx.array([0, 1, 4996, 4997, 4998, 4999], dtype=mx.int32)
+    cache.offset = 5000
+
+    state = {"target_cache": [], "draft_cache": [cache], "offset": 5000}
+    MioEngine._truncate_warm_state(state, 4000)
+
+    assert cache.offset == 4000
+    assert cache.keys.shape[2] == 2
+    assert cache.values.shape[2] == 2
+    assert cache.positions.tolist() == [0, 1]
 
 
 def test_prefix_cache_store_skips_below_threshold():

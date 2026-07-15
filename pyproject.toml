@@ -10,6 +10,7 @@ license = "MIT"
 # tesseract for OCR) degrades gracefully.
 dependencies = [
     # Inference core
+    "dflash-mlx>=0.1.8,<1.0.0",
     "mlx>=0.32.0,<1.0.0",
     "mlx-lm>=0.31.3,<1.0.0",
     "mlx-vlm>=0.6.4,<1.0.0",    # VLM loader (image-in-prompt Qwen variants)

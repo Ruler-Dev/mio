@@ -8,7 +8,6 @@ the primitives and docs/08-bmp-dflash.md for the full writeup.
 from __future__ import annotations
 
 import time
-from collections.abc import Iterator
 from typing import Any, Optional
 
 import mlx.core as mx
@@ -19,8 +18,6 @@ from mio.dflash.bmp import (
     extract_top_k,
     filter_cache_batch,
     per_row_acceptance,
-    restore_cache,
-    snapshot_cache,
 )
 from mio.dflash.model import DFlashDraftModel
 
@@ -53,12 +50,12 @@ def generate_bmp_dflash_once(
     # Local imports to keep runtime.py the source of truth for these helpers.
     from mio.dflash.runtime import (
         _arm_target_rollback_with_prefix,
-        _clear_rollback_state,
         _lm_head_logits,
         _prepare_prompt_tokens,
         _target_embed_tokens,
         _resolve_dflash_max_ctx,
         _resolve_draft_window,
+        _effective_draft_window,
         _resolve_verify_len_cap,
         build_suppress_token_mask,
         configure_full_attention_split,
@@ -85,6 +82,7 @@ def generate_bmp_dflash_once(
         pass
 
     draft_sink_size, draft_window_size = _resolve_draft_window()
+    draft_window_size = _effective_draft_window(draft_model, draft_window_size)
 
     prompt_tokens = (
         list(prompt_tokens_override)
