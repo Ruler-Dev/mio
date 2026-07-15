@@ -234,7 +234,11 @@ produce actionable validation errors.
 
 ### 6.3 Observability
 
-- Unify console, dashboard and JSON metrics around one event schema.
+- **Landed:** bridge completed `GenerationMetrics` from the serve console into
+  a thread-safe, bounded dashboard collector with schema-v1 snapshots and
+  WebSocket heartbeat/reconnect behavior.
+- Extend that schema to every JSON/console surface rather than maintaining the
+  remaining compatibility summaries.
 - Add TTFT, queue time, prefill, verify, decode, acceptance distribution,
   fallback reason, cache hit and peak memory.
 - Export optional Prometheus/OpenTelemetry locally.
@@ -255,9 +259,18 @@ external tool-protocol system prompts are not corrupted.
 
 ### 7.2 Native tools
 
-- Split filesystem reads, writes and shell execution into permission classes.
-- Add workspace roots, command allow/deny policy, timeouts and output limits.
-- Make every mutation visible in the transcript and audit log.
+- **Landed:** split reads, writes, shell, and network into trusted-caller
+  capability grants; omitted policy is read-only.
+- **Landed:** confine file operations to no-follow workspace roots and run a
+  real zsh inside a macOS inherited sandbox with separate network authority,
+  sanitized environment, timeout, and output limits.
+- **Landed:** show bounded tool previews in the live terminal and emit bounded
+  audit events with content-free command digests; cap per-turn calls/results.
+- **Landed:** detect the nearest Git workspace, expose explicit extra-root and
+  network flags, and refuse root/home/broad-volume workspaces without an unsafe
+  acknowledgement.
+- Add a configurable command allow/deny layer for deployments that need a
+  narrower shell than the current workspace sandbox.
 - Replace regex-only tool parsing with model-template-aware structured parsing
   while keeping a compatibility fallback.
 
@@ -282,10 +295,19 @@ external tool-protocol system prompts are not corrupted.
 - **Landed:** treat MCP bridges as sensitive Web UI orchestration; model
   auto-use needs exact operator and per-request grants, and direct UI runs need
   confirmation.
+- **Landed:** apply the native agent's READ/WRITE/SHELL/NETWORK policy as a
+  conservative ceiling over MCP declarations and always reject secret grants.
+- **Landed:** constrain native-agent stdio MCP children to the same
+  OS/workspace sandbox, separate writable data roots from read-only code roots,
+  rotate cached providers across policy fingerprints, and deny external
+  HTTP/SSE transports at this trust boundary.
 - Add per-provider tool allow-lists and user confirmation for risky calls.
 - Treat tool descriptions/results as untrusted content and delimit them in the
   prompt to reduce tool poisoning.
-- Add health/status UI.
+- **Landed:** add a Settings health/status panel backed by a redacted,
+  bounded and CSRF-protected probe of enabled local unauthenticated stdio
+  providers; every probe is sandboxed, and remote, credential-bearing or
+  unisolatable transports are never contacted from the browser view.
 - **Landed:** add `mio mcp doctor`, offline `mio mcp check`, and the packaged
   `mio mcp install-tools` installer.
 - **Landed:** cover stdio/HTTP lifecycle, timeouts, malformed frames, bounds,
@@ -348,7 +370,10 @@ compression claim is adopted before a controlled Mio evaluation.
   knowledge, automation and settings routers.
 - Split the HTML shell into buildable templates/components while retaining a
   no-cloud production bundle.
-- Remove CDN runtime dependencies and add an asset manifest.
+- **Landed:** vendor the main shell's Marked/Prism runtime so application boot
+  has no CDN dependency.
+- Add an explicit asset manifest and extend the no-cloud bundle to optional
+  artifact libraries that still load only when those artifact types are used.
 
 ### 12.2 Security
 
@@ -383,7 +408,10 @@ compression claim is adopted before a controlled Mio evaluation.
   256 KiB result and 120-second published-run bounds.
 - **Landed:** start the scheduler on the live WebUI event loop and shut it down
   through the FastAPI lifespan.
-- Complete dashboard data parsing and live error recovery.
+- **Landed:** connect the dashboard to real generation telemetry with a stable
+  snapshot schema, bounded cross-thread delivery, heartbeat, and reconnect.
+- **Landed:** disable side-by-side comparison until two distinct loaded models
+  exist and reject equal tier selections.
 - **Landed:** deliver bounded `artifact_emitted` events to the ordinary gallery
   and artifact panel through the stable `window.Mio.artifacts` API.
 - Add undo/retry semantics to destructive session/project actions.
@@ -394,8 +422,11 @@ desktop widths with no console errors, broken controls or horizontal overflow.
 ## 13. Persistence and data integrity
 
 - Centralize `MIO_HOME` resolution instead of repeating `Path.home()/.mio`.
-- Add schemas and migrations for every JSON/SQLite store.
-- Use file locks plus atomic replace for concurrent writers.
+- **Landed:** validate prompts, memory, projects, schedules, and webhooks before
+  every mutation; malformed files fail closed and are preserved for recovery.
+- **Landed:** use inter-process locks plus atomic read/modify/write replacement
+  for those five collection stores.
+- Add versioned schemas/migrations for every remaining JSON/SQLite store.
 - Add export/import and a documented backup strategy.
 - Separate cache/derived files from user-authored durable content.
 - Never store tokens or provider secrets in versioned configuration.

@@ -38,7 +38,7 @@ from fastapi import APIRouter, File, HTTPException, Request, UploadFile, WebSock
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 
 from mio.paths import mio_home
-from mio.persistence import atomic_write_bytes, atomic_write_json
+from mio.persistence import atomic_update_json, atomic_write_bytes, atomic_write_json
 from mio.prompt_policy import PromptMode, PromptPolicy, apply_prompt_policy
 from mio.webui.image_proxy import ImageFetchError, fetch_image
 from mio.webui.safe_files import (
@@ -428,30 +428,102 @@ def _prompts_path() -> Path:
     return _prompts_file
 
 
-def _load_prompts() -> list:
-    p = _prompts_path()
-    if not p.exists():
+class PersistentStoreError(ValueError):
+    """A persisted Web UI store is valid JSON with an invalid schema."""
+
+
+def _raise_store_conflict(store: str, exc: BaseException) -> None:
+    raise HTTPException(
+        status_code=409,
+        detail=f"stored {store} data is invalid; no changes were written",
+    ) from exc
+
+
+def _validate_record_store(value: Any, *, store: str, identity: str) -> list[dict]:
+    """Validate a persisted Web UI collection without repairing corruption.
+
+    Legacy records may omit optional presentation fields, but the envelope and
+    stable identity are required for every mutation.  Raising on malformed
+    state is intentional: silently treating corruption as an empty collection
+    would let the next write destroy the only recoverable copy.
+    """
+    if not isinstance(value, list):
+        raise ValueError(f"{store} store must contain a JSON array")
+    seen: set[str] = set()
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise ValueError(f"{store} record {index} must be a JSON object")
+        item_id = item.get(identity)
+        if not isinstance(item_id, str) or not item_id:
+            raise ValueError(
+                f"{store} record {index} must have a non-empty {identity}"
+            )
+        if item_id in seen:
+            raise ValueError(f"{store} store contains duplicate {identity} {item_id!r}")
+        seen.add(item_id)
+    return value
+
+
+def _load_record_store(path: Path, *, store: str, identity: str) -> list[dict]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
         return []
     try:
-        return json.loads(p.read_text())
-    except Exception:
-        return []
+        return _validate_record_store(value, store=store, identity=identity)
+    except ValueError as exc:
+        raise PersistentStoreError(str(exc)) from exc
+
+
+def _update_record_store(
+    path: Path,
+    update,
+    *,
+    store: str,
+    identity: str,
+) -> list[dict]:
+    def transaction(current: Any) -> list[dict]:
+        try:
+            records = _validate_record_store(current, store=store, identity=identity)
+        except ValueError as exc:
+            raise PersistentStoreError(str(exc)) from exc
+        replacement = update([dict(item) for item in records])
+        return _validate_record_store(replacement, store=store, identity=identity)
+
+    return atomic_update_json(path, transaction, default_factory=list)
+
+
+def _load_prompts() -> list:
+    return _load_record_store(_prompts_path(), store="prompts", identity="id")
 
 
 def _save_prompts(prompts: list) -> None:
-    p = _prompts_path()
-    atomic_write_json(p, prompts)
+    replacement = _validate_record_store(prompts, store="prompts", identity="id")
+    _update_record_store(
+        _prompts_path(),
+        lambda _current: replacement,
+        store="prompts",
+        identity="id",
+    )
+
+
+def _update_prompts(update) -> list[dict]:
+    return _update_record_store(
+        _prompts_path(), update, store="prompts", identity="id"
+    )
 
 
 @router.get("/api/prompts")
 async def list_prompts():
-    return {"prompts": _load_prompts()}
+    try:
+        return {"prompts": _load_prompts()}
+    except (json.JSONDecodeError, PersistentStoreError) as exc:
+        _raise_store_conflict("prompts", exc)
 
 
 @router.post("/api/prompts")
 async def save_prompt(body: dict):
-    prompts = _load_prompts()
-    pid = body.get("id") or str(uuid.uuid4())[:8]
+    pid = str(body.get("id") or str(uuid.uuid4())[:8])
     entry = {
         "id": pid,
         "name": body.get("name", "Untitled"),
@@ -459,16 +531,26 @@ async def save_prompt(body: dict):
         "slash": body.get("slash", ""),  # optional custom /slash keyword
         "updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
-    prompts = [p for p in prompts if p.get("id") != pid]
-    prompts.append(entry)
-    _save_prompts(prompts)
+    def upsert(prompts: list[dict]) -> list[dict]:
+        prompts = [prompt for prompt in prompts if prompt.get("id") != pid]
+        prompts.append(entry)
+        return prompts
+
+    try:
+        _update_prompts(upsert)
+    except (json.JSONDecodeError, PersistentStoreError) as exc:
+        _raise_store_conflict("prompts", exc)
     return entry
 
 
 @router.delete("/api/prompts/{pid}")
 async def delete_prompt(pid: str):
-    prompts = [p for p in _load_prompts() if p.get("id") != pid]
-    _save_prompts(prompts)
+    try:
+        _update_prompts(
+            lambda prompts: [prompt for prompt in prompts if prompt.get("id") != pid]
+        )
+    except (json.JSONDecodeError, PersistentStoreError) as exc:
+        _raise_store_conflict("prompts", exc)
     return {"ok": True}
 
 
@@ -478,40 +560,56 @@ def _memory_path() -> Path:
 
 
 def _load_memory() -> list:
-    p = _memory_path()
-    if not p.exists():
-        return []
-    try:
-        return json.loads(p.read_text())
-    except Exception:
-        return []
+    return _load_record_store(_memory_path(), store="memory", identity="id")
 
 
 def _save_memory(mem: list) -> None:
-    p = _memory_path()
-    atomic_write_json(p, mem)
+    replacement = _validate_record_store(mem, store="memory", identity="id")
+    _update_record_store(
+        _memory_path(),
+        lambda _current: replacement,
+        store="memory",
+        identity="id",
+    )
+
+
+def _update_memory(update) -> list[dict]:
+    return _update_record_store(
+        _memory_path(), update, store="memory", identity="id"
+    )
 
 
 @router.get("/api/memory")
 async def list_memory():
-    return {"memory": _load_memory()}
+    try:
+        return {"memory": _load_memory()}
+    except (json.JSONDecodeError, PersistentStoreError) as exc:
+        _raise_store_conflict("memory", exc)
 
 
 @router.post("/api/memory")
 async def add_memory(body: dict):
-    mem = _load_memory()
-    mid = body.get("id") or str(uuid.uuid4())[:8]
+    mid = str(body.get("id") or str(uuid.uuid4())[:8])
     entry = {"id": mid, "text": body.get("text", ""), "added": time.strftime("%Y-%m-%dT%H:%M:%S")}
-    mem = [m for m in mem if m.get("id") != mid]
-    mem.append(entry)
-    _save_memory(mem)
+
+    def upsert(mem: list[dict]) -> list[dict]:
+        mem = [item for item in mem if item.get("id") != mid]
+        mem.append(entry)
+        return mem
+
+    try:
+        _update_memory(upsert)
+    except (json.JSONDecodeError, PersistentStoreError) as exc:
+        _raise_store_conflict("memory", exc)
     return entry
 
 
 @router.delete("/api/memory/{mid}")
 async def delete_memory(mid: str):
-    mem = [m for m in _load_memory() if m.get("id") != mid]
-    _save_memory(mem)
+    try:
+        _update_memory(lambda mem: [item for item in mem if item.get("id") != mid])
+    except (json.JSONDecodeError, PersistentStoreError) as exc:
+        _raise_store_conflict("memory", exc)
     return {"ok": True}
 
 
@@ -521,28 +619,35 @@ def _projects_path() -> Path:
 
 
 def _load_projects() -> list:
-    p = _projects_path()
-    if not p.exists():
-        return []
-    try:
-        return json.loads(p.read_text())
-    except Exception:
-        return []
+    return _load_record_store(_projects_path(), store="projects", identity="id")
 
 
 def _save_projects(projs: list) -> None:
-    p = _projects_path()
-    atomic_write_json(p, projs)
+    replacement = _validate_record_store(projs, store="projects", identity="id")
+    _update_record_store(
+        _projects_path(),
+        lambda _current: replacement,
+        store="projects",
+        identity="id",
+    )
+
+
+def _update_projects(update) -> list[dict]:
+    return _update_record_store(
+        _projects_path(), update, store="projects", identity="id"
+    )
 
 
 @router.get("/api/projects")
 async def list_projects():
-    return {"projects": _load_projects()}
+    try:
+        return {"projects": _load_projects()}
+    except (json.JSONDecodeError, PersistentStoreError) as exc:
+        _raise_store_conflict("projects", exc)
 
 
 @router.post("/api/projects")
 async def save_project(body: dict):
-    projs = _load_projects()
     pid = _validate_identifier(body.get("id") or str(uuid.uuid4())[:8], label="project id")
     raw_files = body.get("files", [])
     files = []
@@ -569,22 +674,36 @@ async def save_project(body: dict):
         "pinned_prompts": body.get("pinned_prompts", []),
         "updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
-    projs = [p for p in projs if p.get("id") != pid]
-    projs.append(entry)
-    _save_projects(projs)
+    def upsert(projects: list[dict]) -> list[dict]:
+        projects = [project for project in projects if project.get("id") != pid]
+        projects.append(entry)
+        return projects
+
+    try:
+        _update_projects(upsert)
+    except (json.JSONDecodeError, PersistentStoreError) as exc:
+        _raise_store_conflict("projects", exc)
     return entry
 
 
 @router.delete("/api/projects/{pid}")
 async def delete_project(pid: str):
-    projs = [p for p in _load_projects() if p.get("id") != pid]
-    _save_projects(projs)
+    try:
+        _update_projects(
+            lambda projects: [project for project in projects if project.get("id") != pid]
+        )
+    except (json.JSONDecodeError, PersistentStoreError) as exc:
+        _raise_store_conflict("projects", exc)
     return {"ok": True}
 
 
 @router.get("/api/projects/{pid}")
 async def get_project(pid: str):
-    for p in _load_projects():
+    try:
+        projects = _load_projects()
+    except (json.JSONDecodeError, PersistentStoreError) as exc:
+        _raise_store_conflict("projects", exc)
+    for p in projects:
         if p.get("id") == pid:
             return p
     return {"error": "not found"}
@@ -2347,7 +2466,10 @@ async def chat_templates_delete(template_id: str):
 @router.get("/api/schedules")
 async def schedules_list():
     from mio.webui import scheduler as _sched
-    return {"schedules": _sched.load_schedules(), "recent": _sched.recent_runs()}
+    try:
+        return {"schedules": _sched.load_schedules(), "recent": _sched.recent_runs()}
+    except (json.JSONDecodeError, _sched.ScheduleStoreError) as exc:
+        _raise_store_conflict("schedules", exc)
 
 
 @router.post("/api/schedules")
@@ -2361,6 +2483,8 @@ async def schedules_create(body: dict):
             tier=(body or {}).get("tier"),
             enabled=(body or {}).get("enabled", True),
         )
+    except (json.JSONDecodeError, _sched.ScheduleStoreError) as exc:
+        _raise_store_conflict("schedules", exc)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -2370,6 +2494,8 @@ async def schedules_update(sched_id: str, body: dict):
     from mio.webui import scheduler as _sched
     try:
         return _sched.update_schedule(sched_id, body or {})
+    except (json.JSONDecodeError, _sched.ScheduleStoreError) as exc:
+        _raise_store_conflict("schedules", exc)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -2377,7 +2503,10 @@ async def schedules_update(sched_id: str, body: dict):
 @router.delete("/api/schedules/{sched_id}")
 async def schedules_delete(sched_id: str):
     from mio.webui import scheduler as _sched
-    return _sched.delete_schedule(sched_id)
+    try:
+        return _sched.delete_schedule(sched_id)
+    except (json.JSONDecodeError, _sched.ScheduleStoreError) as exc:
+        _raise_store_conflict("schedules", exc)
 
 
 # ---- Webhook endpoints ----
@@ -2385,7 +2514,10 @@ async def schedules_delete(sched_id: str):
 @router.get("/api/webhooks")
 async def webhooks_list():
     from mio.webui import webhooks as _wh
-    return {"webhooks": _wh.public_webhooks(), "recent": _wh.recent_runs()}
+    try:
+        return {"webhooks": _wh.public_webhooks(), "recent": _wh.recent_runs()}
+    except (json.JSONDecodeError, _wh.WebhookStoreError) as exc:
+        _raise_store_conflict("webhooks", exc)
 
 
 @router.post("/api/webhooks")
@@ -2398,6 +2530,8 @@ async def webhooks_create(body: dict):
             tier=(body or {}).get("tier"),
             secret=(body or {}).get("secret"),
         )
+    except (json.JSONDecodeError, _wh.WebhookStoreError) as exc:
+        _raise_store_conflict("webhooks", exc)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -2405,7 +2539,10 @@ async def webhooks_create(body: dict):
 @router.delete("/api/webhooks/{slug}")
 async def webhooks_delete(slug: str):
     from mio.webui import webhooks as _wh
-    return _wh.delete_webhook(slug)
+    try:
+        return _wh.delete_webhook(slug)
+    except (json.JSONDecodeError, _wh.WebhookStoreError) as exc:
+        _raise_store_conflict("webhooks", exc)
 
 
 @router.post("/api/webhook/{slug}")
@@ -2416,7 +2553,11 @@ async def webhook_fire(slug: str, request: Request, body: dict | None = None):
     forwarded into the model prompt.
     """
     from mio.webui import webhooks as _wh
-    hook = next((h for h in _wh.load_webhooks() if h["slug"] == slug), None)
+    try:
+        hooks = _wh.load_webhooks()
+    except (json.JSONDecodeError, _wh.WebhookStoreError) as exc:
+        _raise_store_conflict("webhooks", exc)
+    hook = next((h for h in hooks if h["slug"] == slug), None)
     if not hook:
         raise HTTPException(status_code=404, detail="unknown webhook")
     payload = body or {}
@@ -2919,9 +3060,12 @@ async def _handle_chat(websocket: WebSocket, data: dict):
             m = re.match(r"^/remember\s+(.+)", c, re.IGNORECASE | re.DOTALL)
             if m:
                 fact = m.group(1).strip()
-                mem = _load_memory()
-                mem.append({"id": str(uuid.uuid4())[:8], "text": fact, "added": time.strftime("%Y-%m-%dT%H:%M:%S")})
-                _save_memory(mem)
+                memory_entry = {
+                    "id": str(uuid.uuid4())[:8],
+                    "text": fact,
+                    "added": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                }
+                _update_memory(lambda mem: [*mem, memory_entry])
                 await websocket.send_json({"type": "start", "tier": "memory"})
                 await websocket.send_json({"type": "token", "text": "✓ Saved to memory: \"" + fact + "\""})
                 await websocket.send_json({"type": "done", "full_text": "✓ Saved to memory: \"" + fact + "\"",

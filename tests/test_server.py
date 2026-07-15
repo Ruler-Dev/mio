@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from types import SimpleNamespace
 
@@ -10,8 +11,9 @@ import pytest
 from fastapi import HTTPException
 
 from mio import server
+from mio.agent_policy import AgentToolPermission
 from mio.engine import GenerationMetrics
-from mio.mcp import MCPRegistry, MCPServerConfig, MCPTransport
+from mio.mcp import MCPPermission, MCPRegistry, MCPServerConfig, MCPTransport
 from mio.router import TandemRouter
 from mio.server import _cors_origins
 from mio.web_security import host_allowed, reset_web_security_state
@@ -390,6 +392,311 @@ def test_mcp_endpoint_lists_only_config_and_redacts_environment(monkeypatch):
     monkeypatch.setattr(server, "_mcp_registry", MCPRegistry([config]))
     response = asyncio.run(server.list_mcp_servers())
     assert response["data"][0]["environment"] == {"TOKEN_LIKE_VALUE": "<redacted>"}
+
+
+def test_mcp_health_probes_only_safe_local_providers_and_redacts_results(
+    monkeypatch,
+    tmp_path,
+):
+    active = MCPServerConfig(
+        name="local",
+        transport=MCPTransport.STDIO,
+        command=("provider", "--token=never-return-this"),
+        environment={"PRIVATE_VALUE": "never-return-this-either"},
+        max_output_bytes=4 * 1024 * 1024,
+        permissions=frozenset(
+            {
+                MCPPermission.READ,
+                MCPPermission.WRITE,
+                MCPPermission.NETWORK,
+                MCPPermission.FILESYSTEM_READ,
+                MCPPermission.FILESYSTEM_WRITE,
+            }
+        ),
+    )
+    disabled = MCPServerConfig(
+        name="disabled",
+        transport=MCPTransport.STDIO,
+        command=("disabled-provider",),
+        enabled=False,
+    )
+    remote = MCPServerConfig(
+        name="remote",
+        transport=MCPTransport.HTTP,
+        url="https://example.invalid/mcp?token=never-return-this",
+        enabled=True,
+    )
+    authenticated = MCPServerConfig(
+        name="authenticated",
+        transport=MCPTransport.HTTP,
+        url="http://127.0.0.1:9999/mcp",
+        enabled=True,
+        header_env={"Authorization": "PRIVATE_TOKEN_ENV"},
+    )
+    registry = MCPRegistry([active, disabled, remote, authenticated])
+
+    class ReadyProvider:
+        closed = False
+
+        async def initialize(self):
+            return {"serverInfo": {"name": "never-return-this-provider-name"}}
+
+        async def list_tools(self):
+            return {"tools": [{"name": "never-return-this-tool"}, {"name": "safe"}]}
+
+        async def close(self):
+            self.closed = True
+
+    provider = ReadyProvider()
+    probe_configs = []
+    probe_policies = []
+
+    def create_provider(probe_registry, name, **kwargs):
+        probe_configs.append(probe_registry.get(name))
+        probe_policies.append(kwargs["agent_policy"])
+        return provider
+
+    monkeypatch.setattr(MCPRegistry, "create_provider", create_provider)
+    monkeypatch.setattr(server, "_mcp_registry", registry)
+    monkeypatch.setattr(server, "_MCP_HEALTH_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(server, "_MCP_HEALTH_CLOSE_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(server, "mio_home", lambda: tmp_path / "mio-home")
+
+    response = asyncio.run(server.mcp_health())
+
+    assert response["status"] == "ready"
+    assert response["summary"] == {
+        "configured": 4,
+        "reported": 4,
+        "omitted": 0,
+        "ready": 1,
+        "unavailable": 0,
+        "timeout": 0,
+        "disabled": 1,
+        "skipped": 2,
+    }
+    rows = {row["name"]: row for row in response["data"]}
+    assert rows["local"]["status"] == "ready"
+    assert rows["local"]["tool_count"] == 2
+    assert rows["remote"]["reason"] == "remote_not_probed"
+    assert rows["authenticated"]["reason"] == "credentials_not_probed"
+    assert rows["disabled"]["status"] == "disabled"
+    assert len(probe_configs) == 1
+    assert 0 < probe_configs[0].timeout_s <= server._MCP_HEALTH_TIMEOUT_S / 2
+    assert probe_configs[0].max_output_bytes == server._MCP_HEALTH_MAX_OUTPUT_BYTES
+    assert probe_configs[0].permissions == frozenset(
+        {
+            MCPPermission.READ,
+            MCPPermission.FILESYSTEM_READ,
+            MCPPermission.PROCESS,
+        }
+    )
+    assert probe_policies[0].workspace_roots == (
+        (tmp_path / "mio-home" / "mcp-health").resolve(),
+    )
+    assert probe_policies[0].permissions == frozenset(
+        {AgentToolPermission.READ, AgentToolPermission.SHELL}
+    )
+    assert provider.closed
+    serialized = json.dumps(response)
+    assert "never-return-this" not in serialized
+    assert "command" not in serialized
+    assert "environment" not in serialized
+    assert "url" not in serialized
+
+
+def test_mcp_health_timeout_cancels_and_closes_hung_provider(monkeypatch, tmp_path):
+    config = MCPServerConfig(
+        name="hung",
+        transport=MCPTransport.STDIO,
+        command=("provider-with-secret-argument",),
+    )
+    registry = MCPRegistry([config])
+
+    class HungProvider:
+        cancelled = False
+        closed = False
+
+        async def initialize(self):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.cancelled = True
+
+        async def list_tools(self):
+            raise AssertionError("unreachable secret")
+
+        async def close(self):
+            self.closed = True
+
+    provider = HungProvider()
+    monkeypatch.setattr(MCPRegistry, "create_provider", lambda *_args, **_kwargs: provider)
+    monkeypatch.setattr(server, "_mcp_registry", registry)
+    monkeypatch.setattr(server, "_MCP_HEALTH_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(server, "_MCP_HEALTH_CLOSE_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(server, "mio_home", lambda: tmp_path / "mio-home")
+
+    async def bounded_call():
+        return await asyncio.wait_for(server.mcp_health(), timeout=0.5)
+
+    response = asyncio.run(bounded_call())
+
+    assert response["status"] == "degraded"
+    assert response["data"][0]["status"] == "timeout"
+    assert response["data"][0]["reason"] == "probe_timeout"
+    assert provider.cancelled
+    assert provider.closed
+    assert "secret" not in json.dumps(response)
+
+
+def test_mcp_health_caps_response_rows(monkeypatch):
+    configs = [
+        MCPServerConfig(
+            name=f"disabled-{index}",
+            transport=MCPTransport.STDIO,
+            command=("provider",),
+            enabled=False,
+        )
+        for index in range(3)
+    ]
+    monkeypatch.setattr(server, "_mcp_registry", MCPRegistry(configs))
+    monkeypatch.setattr(server, "_MCP_HEALTH_MAX_SERVERS", 2)
+
+    response = asyncio.run(server.mcp_health())
+
+    assert len(response["data"]) == 2
+    assert response["summary"]["omitted"] == 1
+    assert response["status"] == "degraded"
+
+
+def test_mcp_health_is_single_flight_concurrency_bounded_and_shielded(
+    monkeypatch,
+    tmp_path,
+):
+    configs = [
+        MCPServerConfig(
+            name=f"local-{index}",
+            transport=MCPTransport.STDIO,
+            command=("provider",),
+        )
+        for index in range(6)
+    ]
+    state = {
+        "active": 0,
+        "max_active": 0,
+        "factory_calls": 0,
+        "close_calls": 0,
+        "started": None,
+    }
+
+    class ReadyProvider:
+        async def initialize(self):
+            state["active"] += 1
+            state["max_active"] = max(state["max_active"], state["active"])
+            state["started"].set()
+            try:
+                await asyncio.sleep(0.02)
+            finally:
+                state["active"] -= 1
+
+        async def list_tools(self):
+            return {"tools": []}
+
+        async def close(self):
+            state["close_calls"] += 1
+
+    def create_provider(*_args, **_kwargs):
+        state["factory_calls"] += 1
+        return ReadyProvider()
+
+    monkeypatch.setattr(MCPRegistry, "create_provider", create_provider)
+    monkeypatch.setattr(server, "_mcp_registry", MCPRegistry(configs))
+    monkeypatch.setattr(server, "_MCP_HEALTH_CONCURRENCY", 2)
+    monkeypatch.setattr(server, "_MCP_HEALTH_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(server, "_MCP_HEALTH_CLOSE_TIMEOUT_S", 0.02)
+    monkeypatch.setattr(server, "mio_home", lambda: tmp_path / "mio-home")
+
+    async def exercise():
+        state["started"] = asyncio.Event()
+        callers = [asyncio.create_task(server.mcp_health()) for _ in range(10)]
+        await asyncio.wait_for(state["started"].wait(), timeout=0.1)
+
+        # Cancelling the request that happened to create the batch must not
+        # cancel the shared probe still awaited by the other nine callers.
+        callers[0].cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await callers[0]
+        return await asyncio.gather(*callers[1:])
+
+    responses = asyncio.run(exercise())
+
+    assert all(response == responses[0] for response in responses)
+    assert responses[0]["summary"]["ready"] == len(configs)
+    assert state["factory_calls"] == len(configs)
+    assert state["close_calls"] == len(configs)
+    assert state["max_active"] == 2
+
+
+def test_mcp_health_close_timeout_allows_cancellation_safe_cleanup(monkeypatch, tmp_path):
+    config = MCPServerConfig(
+        name="slow-close",
+        transport=MCPTransport.STDIO,
+        command=("provider",),
+    )
+    state = {"close_cancelled": False, "close_finished": False}
+
+    class SlowCloseProvider:
+        async def initialize(self):
+            return {}
+
+        async def list_tools(self):
+            return {"tools": []}
+
+        async def close(self):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                state["close_cancelled"] = True
+                # Mirrors StdioProvider: cancellation starts a final bounded
+                # process reap instead of abandoning the child.
+                await asyncio.sleep(0.001)
+                state["close_finished"] = True
+
+    monkeypatch.setattr(
+        MCPRegistry,
+        "create_provider",
+        lambda *_args, **_kwargs: SlowCloseProvider(),
+    )
+    monkeypatch.setattr(server, "_mcp_registry", MCPRegistry([config]))
+    monkeypatch.setattr(server, "_MCP_HEALTH_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(server, "_MCP_HEALTH_CLOSE_TIMEOUT_S", 0.005)
+    monkeypatch.setattr(server, "mio_home", lambda: tmp_path / "mio-home")
+
+    response = asyncio.run(asyncio.wait_for(server.mcp_health(), timeout=0.1))
+
+    assert response["status"] == "ready"
+    assert state == {"close_cancelled": True, "close_finished": True}
+
+
+def test_mcp_health_skips_even_loopback_http_without_launching_provider(monkeypatch):
+    config = MCPServerConfig(
+        name="loopback-http",
+        transport=MCPTransport.HTTP,
+        url="http://127.0.0.1:9876/mcp",
+        enabled=True,
+    )
+    monkeypatch.setattr(
+        MCPRegistry,
+        "create_provider",
+        lambda *_args, **_kwargs: pytest.fail("unisolated HTTP provider was launched"),
+    )
+
+    response = asyncio.run(
+        server._probe_mcp_health(config, asyncio.Semaphore(1))
+    )
+
+    assert response["status"] == "skipped"
+    assert response["reason"] == "transport_not_isolated"
 
 
 def test_batch_endpoint_uses_continuous_engine_and_preserves_order(monkeypatch):

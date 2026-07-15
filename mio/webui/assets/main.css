@@ -452,6 +452,27 @@ body.focus-mode .input-area { max-width: 720px; }
 .settings-info { padding: 10px 12px; background: var(--bg-input); border-radius: 8px; font-size: 12px; color: var(--text-secondary); font-family: var(--font-mono); }
 .settings-save { width: 100%; padding: 10px; border: none; border-radius: 8px; background: var(--accent); color: white; font-family: var(--font-sans); font-size: 14px; font-weight: 500; cursor: pointer; transition: background 150ms ease; }
 .settings-save:hover { background: var(--accent-hover); }
+.mcp-health-card { border: 1px solid var(--border); border-radius: 10px; background: var(--bg-input); overflow: hidden; }
+.mcp-health-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 12px; }
+.mcp-health-actions { display: flex; align-items: center; gap: 7px; }
+.mcp-health-summary { margin-top: 3px; color: var(--text-muted); font-size: 11px; }
+.mcp-health-state { padding: 3px 7px; border-radius: 999px; background: var(--bg-hover); color: var(--text-muted); font-family: var(--font-mono); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+.mcp-health-state[data-state="ready"] { background: rgba(34,197,94,.12); color: #22c55e; }
+.mcp-health-state[data-state="degraded"], .mcp-health-state[data-state="error"] { background: rgba(239,68,68,.12); color: #ef4444; }
+.mcp-health-state[data-state="checking"] { background: rgba(59,130,246,.12); color: var(--accent); }
+.mcp-health-retry { border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; background: var(--bg-chat); color: var(--text-secondary); font: 11px var(--font-sans); cursor: pointer; }
+.mcp-health-retry:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.mcp-health-retry:disabled { opacity: .5; cursor: wait; }
+.mcp-health-list { border-top: 1px solid var(--border-subtle); }
+.mcp-health-list:empty { display: none; }
+.mcp-health-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 8px 12px; border-top: 1px solid var(--border-subtle); }
+.mcp-health-row:first-child { border-top: 0; }
+.mcp-health-name { overflow: hidden; color: var(--text-primary); font-size: 12px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.mcp-health-detail { margin-top: 2px; color: var(--text-muted); font: 10px var(--font-mono); }
+.mcp-health-badge { color: var(--text-muted); font: 10px var(--font-mono); text-transform: uppercase; }
+.mcp-health-badge[data-state="ready"] { color: #22c55e; }
+.mcp-health-badge[data-state="unavailable"], .mcp-health-badge[data-state="timeout"] { color: #ef4444; }
+.mcp-health-badge[data-state="skipped"] { color: #f59e0b; }
 
 /* ===== Session search ===== */
 .session-search { margin: 4px 8px 0; padding: 6px 10px; border: 1px solid var(--border-subtle); border-radius: 6px; background: var(--bg-chat); font-family: var(--font-sans); font-size: 12px; color: var(--text-primary); width: calc(100% - 16px); }

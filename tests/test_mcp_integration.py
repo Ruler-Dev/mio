@@ -5,18 +5,40 @@ import json
 import sys
 
 from mio import agent
+from mio.agent_policy import AgentToolPolicy
 from mio.prompt_policy import PromptMode, PromptPolicy
 
 
-def test_native_agent_exposes_bounded_mcp_bridge(monkeypatch):
-    monkeypatch.setattr("mio.mcp.list_mcp_tools", lambda server: {"server": server, "tools": []})
+def test_native_agent_exposes_bounded_mcp_bridge(monkeypatch, tmp_path):
+    captured = []
+
+    def fake_list(server, *, agent_policy=None):
+        captured.append(agent_policy)
+        return {"server": server, "tools": []}
+
+    def fake_call(server, name, arguments, *, agent_policy=None):
+        captured.append(agent_policy)
+        return {"server": server, "tool": name, "result": arguments}
+
+    monkeypatch.setattr("mio.mcp.list_mcp_tools", fake_list)
     monkeypatch.setattr(
         "mio.mcp.call_mcp_tool",
-        lambda server, name, arguments: {"server": server, "tool": name, "result": arguments},
+        fake_call,
     )
-    assert json.loads(agent.tool_list_mcp_tools("ponytail"))["server"] == "ponytail"
-    result = json.loads(agent.tool_call_mcp_tool("ponytail", "instructions", {"mode": "lite"}))
+    policy = AgentToolPolicy.coding_workspace(tmp_path)
+    assert json.loads(agent.tool_list_mcp_tools("ponytail", policy=policy))["server"] == "ponytail"
+    result = json.loads(
+        agent.tool_call_mcp_tool(
+            "ponytail",
+            "instructions",
+            {"mode": "lite"},
+            policy=policy,
+        )
+    )
     assert result["result"] == {"mode": "lite"}
+    assert captured == [policy, policy]
+    assert agent.AGENT_TOOLS["list_mcp_tools"]["inject_policy"] is True
+    assert agent.AGENT_TOOLS["call_mcp_tool"]["inject_policy"] is True
     spec_names = {spec["function"]["name"] for spec in agent.AGENT_TOOLS_SPEC}
     assert {"list_mcp_tools", "call_mcp_tool"} <= spec_names
 

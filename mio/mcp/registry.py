@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable
 
+from mio.agent_policy import AgentToolPolicy
 from mio.mcp.client import HTTPProvider, MCPProvider, StdioProvider
 from mio.mcp.config import (
     MCPConfigError,
@@ -51,6 +52,8 @@ class MCPRegistry:
         granted_permissions: Iterable[MCPPermission | str] = (),
         process_factory=None,
         http_sender=None,
+        agent_policy: AgentToolPolicy | None = None,
+        mio_runtime_root: Path | None = None,
     ) -> MCPProvider:
         """Create a provider after explicit permission grants.
 
@@ -60,7 +63,12 @@ class MCPRegistry:
         config = self.get(name)
         granted = frozenset(MCPPermission(value) for value in granted_permissions)
         if config.transport is MCPTransport.STDIO:
-            kwargs = {"process_factory": process_factory} if process_factory is not None else {}
+            kwargs = {
+                "agent_policy": agent_policy,
+                "mio_runtime_root": mio_runtime_root,
+            }
+            if process_factory is not None:
+                kwargs["process_factory"] = process_factory
             return StdioProvider(config, granted, **kwargs)
         kwargs = {"sender": http_sender} if http_sender is not None else {}
         return HTTPProvider(config, granted, **kwargs)

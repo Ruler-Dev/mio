@@ -5,20 +5,21 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Mio UI</title>
 <script src="/ui/assets/security.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js" integrity="sha384-/TQbtLCAerC3jgaim+N78RZSDYV7ryeoBCVqTuzRrFec2akfBkHS7ACQ3PQhvMVi" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/prism.js" integrity="sha384-DLX96w7/1q8CY3tN4eR0Nn7K1f2GhJ2/A3ZfTKUm7n0J966auAcNt7r9GEYhr8F0" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-python.min.js" integrity="sha384-WJdEkJKrbsqw0evQ4GB6mlsKe5cGTxBOw4KAEIa52ZLB7DDpliGkwdme/HMa5n1m" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-typescript.min.js" integrity="sha384-PeOqKNW/piETaCg8rqKFy+Pm6KEk7e36/5YZE5XO/OaFdO+/Aw3O8qZ9qDPKVUgx" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-jsx.min.js" integrity="sha384-nnKpKrv4RkNTjD3hNwkWsmHW8LBti5JWyAWAgeo8iC4QkFQn2Yn2Kj4mOTTNoI9V" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-tsx.min.js" integrity="sha384-ZzE8Y/KUKzSD+AEsQQvM2PdJSEVs/T/6LE/nSetJ0ReWEE/ZgpKNBSUkTRI3Dc7E" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-bash.min.js" integrity="sha384-9WmlN8ABpoFSSHvBGGjhvB3E/D8UkNB9HpLJjBQFC2VSQsM1odiQDv4NbEo+7l15" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-json.min.js" integrity="sha384-RhrmFFMb0ZCHImjFMpR/UE3VEtIVTCtNrtKQqXCzqXZNJala02N3UbVhi+qzw3CY" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-css.min.js" integrity="sha384-0mV13Neu0xhJFylI+HV43C+XiR13bGSeL7D0/7e6hK7sJgvyvK6HVjeQwmvXTstY" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-sql.min.js" integrity="sha384-/MKWdycCDliku23mP5sYXbZNuXrzgmQO/jsVxwPFn99dVOaXRyKsqDjarqpueGAp" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-rust.min.js" integrity="sha384-JyDgFjMbyrE/TGiEUSXW3CLjQOySrsoiUNAlXTFdIsr/XUfaB7E+eYlR+tGQ9bCO" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-go.min.js" integrity="sha384-YxCco6ByOY5rJ3jD18514fa8w5so07zigIyV6tZa3CWSE5vYrbDSuFkZ5zOknnZ6" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-yaml.min.js" integrity="sha384-AKAiycghK0jDCjD+aavMHzDkLzRR7Yzcwh3+xL/295cvyVMe+cxQfyQC8xxGGcI8" crossorigin="anonymous"></script>
-<link href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet" integrity="sha384-wFjoQjtV1y5jVHbt0p35Ui8aV8GVpEZkyF99OXWqP/eNJDU93D3Ugxkoyh6Y2I4A" crossorigin="anonymous">
+<!-- Markdown and syntax-highlighting are vendored so the shell boots offline. -->
+<script src="/ui/assets/vendor_marked_12.0.2.min.js"></script>
+<script src="/ui/assets/vendor_prism_1.29.0.js"></script>
+<script src="/ui/assets/vendor_prism_python_1.29.0.min.js"></script>
+<script src="/ui/assets/vendor_prism_typescript_1.29.0.min.js"></script>
+<script src="/ui/assets/vendor_prism_jsx_1.29.0.min.js"></script>
+<script src="/ui/assets/vendor_prism_tsx_1.29.0.min.js"></script>
+<script src="/ui/assets/vendor_prism_bash_1.29.0.min.js"></script>
+<script src="/ui/assets/vendor_prism_json_1.29.0.min.js"></script>
+<script src="/ui/assets/vendor_prism_css_1.29.0.min.js"></script>
+<script src="/ui/assets/vendor_prism_sql_1.29.0.min.js"></script>
+<script src="/ui/assets/vendor_prism_rust_1.29.0.min.js"></script>
+<script src="/ui/assets/vendor_prism_go_1.29.0.min.js"></script>
+<script src="/ui/assets/vendor_prism_yaml_1.29.0.min.js"></script>
+<link href="/ui/assets/vendor_prism_tomorrow_1.29.0.min.css" rel="stylesheet">
 <!-- Modular feature modules. Loaded through a single safe-loader so one
      broken module can never take the main UI down. Opt out entirely by
      appending ?safe=1 to the URL (useful for debugging).
@@ -357,6 +358,24 @@
 
       <div class="settings-section">Model info</div>
       <div class="settings-info" id="settModelInfo">Loading...</div>
+
+      <div class="settings-section">Local MCP</div>
+      <div class="settings-field">
+        <div class="mcp-health-card" id="mcpHealthCard" aria-live="polite" aria-busy="false">
+          <div class="mcp-health-head">
+            <div>
+              <div class="settings-label">Provider health</div>
+              <div class="mcp-health-summary" id="mcpHealthSummary">Not checked yet</div>
+            </div>
+            <div class="mcp-health-actions">
+              <span class="mcp-health-state" id="mcpHealthState" data-state="idle">Idle</span>
+              <button class="mcp-health-retry" id="mcpHealthRetry" type="button" onclick="refreshMcpHealth()">Retry</button>
+            </div>
+          </div>
+          <div class="mcp-health-list" id="mcpHealthList"></div>
+        </div>
+        <div class="settings-hint">Checks enabled local providers only. Credentials and remote endpoints are never probed or displayed.</div>
+      </div>
 
       <div class="settings-section">Response style</div>
       <div class="settings-field">
@@ -7404,6 +7423,117 @@ async function switchTier(tier) {
 }
 
 // ===== Settings panel =====
+let _mcpHealthPromise = null;
+
+function renderMcpHealth(payload) {
+  const summary = payload && typeof payload.summary === 'object' ? payload.summary : {};
+  const rows = Array.isArray(payload?.data) ? payload.data.slice(0, 32) : [];
+  const state = document.getElementById('mcpHealthState');
+  const summaryEl = document.getElementById('mcpHealthSummary');
+  const list = document.getElementById('mcpHealthList');
+  const overall = ['ready', 'degraded', 'idle', 'empty'].includes(payload?.status)
+    ? payload.status : 'degraded';
+  const overallLabels = { ready: 'Healthy', degraded: 'Attention', idle: 'Idle', empty: 'Empty' };
+  state.dataset.state = overall;
+  state.textContent = overallLabels[overall];
+
+  const configured = Number(summary.configured) || 0;
+  const ready = Number(summary.ready) || 0;
+  const issues = (Number(summary.unavailable) || 0) + (Number(summary.timeout) || 0);
+  const qualifiers = [];
+  if (Number(summary.skipped)) qualifiers.push(`${Number(summary.skipped)} safely skipped`);
+  if (Number(summary.disabled)) qualifiers.push(`${Number(summary.disabled)} disabled`);
+  if (issues) qualifiers.push(`${issues} need attention`);
+  if (Number(summary.omitted)) qualifiers.push(`${Number(summary.omitted)} omitted by limit`);
+  summaryEl.textContent = configured
+    ? `${ready} of ${configured} ready${qualifiers.length ? ' · ' + qualifiers.join(' · ') : ''}`
+    : 'No MCP providers configured';
+
+  const statusLabels = {
+    ready: 'Ready', unavailable: 'Unavailable', timeout: 'Timeout',
+    disabled: 'Disabled', skipped: 'Not probed',
+  };
+  const reasonLabels = {
+    probe_timeout: 'probe timed out', permission_denied: 'permission denied',
+    protocol_error: 'protocol error', provider_unavailable: 'provider unavailable',
+    probe_failed: 'probe failed', remote_not_probed: 'remote provider',
+    credentials_not_probed: 'credentials protected',
+    transport_not_isolated: 'transport cannot be isolated',
+  };
+  list.replaceChildren();
+  rows.forEach(row => {
+    const rowState = Object.prototype.hasOwnProperty.call(statusLabels, row?.status)
+      ? row.status : 'unavailable';
+    const wrapper = document.createElement('div');
+    wrapper.className = 'mcp-health-row';
+    const copy = document.createElement('div');
+    const name = document.createElement('div');
+    name.className = 'mcp-health-name';
+    name.textContent = typeof row?.name === 'string' ? row.name.slice(0, 80) : 'Unnamed provider';
+    const detail = document.createElement('div');
+    detail.className = 'mcp-health-detail';
+    const detailParts = [];
+    if (['stdio', 'http', 'sse'].includes(row?.transport)) detailParts.push(row.transport.toUpperCase());
+    if (Number.isInteger(row?.tool_count) && row.tool_count >= 0) detailParts.push(`${row.tool_count} tools`);
+    if (Number.isFinite(row?.latency_ms) && row.latency_ms >= 0) detailParts.push(`${Math.round(row.latency_ms)} ms`);
+    if (Object.prototype.hasOwnProperty.call(reasonLabels, row?.reason)) detailParts.push(reasonLabels[row.reason]);
+    detail.textContent = detailParts.join(' · ');
+    copy.append(name, detail);
+    const badge = document.createElement('span');
+    badge.className = 'mcp-health-badge';
+    badge.dataset.state = rowState;
+    badge.textContent = statusLabels[rowState];
+    wrapper.append(copy, badge);
+    list.appendChild(wrapper);
+  });
+}
+
+function renderMcpHealthError() {
+  const state = document.getElementById('mcpHealthState');
+  state.dataset.state = 'error';
+  state.textContent = 'Error';
+  document.getElementById('mcpHealthSummary').textContent = 'Health check unavailable. Retry when the local server is ready.';
+  document.getElementById('mcpHealthList').replaceChildren();
+}
+
+async function refreshMcpHealth() {
+  if (_mcpHealthPromise) return _mcpHealthPromise;
+  const card = document.getElementById('mcpHealthCard');
+  const state = document.getElementById('mcpHealthState');
+  const retry = document.getElementById('mcpHealthRetry');
+  card.setAttribute('aria-busy', 'true');
+  state.dataset.state = 'checking';
+  state.textContent = 'Checking';
+  retry.disabled = true;
+  retry.textContent = 'Checking…';
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 16000);
+  const request = (async () => {
+    try {
+      const response = await fetch('/v1/mcp/health', {
+        method: 'POST',
+        headers: { Accept: 'application/json' },
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error('health request failed');
+      renderMcpHealth(await response.json());
+    } catch (error) {
+      renderMcpHealthError();
+    } finally {
+      clearTimeout(timeout);
+      card.setAttribute('aria-busy', 'false');
+      retry.disabled = false;
+      retry.textContent = 'Retry';
+    }
+  })();
+  _mcpHealthPromise = request;
+  try {
+    await request;
+  } finally {
+    if (_mcpHealthPromise === request) _mcpHealthPromise = null;
+  }
+}
+
 function openSettings() {
   const ov = document.getElementById('settingsOverlay');
   ov.classList.add('open');
@@ -7423,6 +7553,7 @@ function openSettings() {
   refreshMemoryList();
   refreshPromptList();
   refreshCacheStats();
+  refreshMcpHealth();
 }
 
 // ===== Cache management =====

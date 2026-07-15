@@ -33,7 +33,7 @@
             <div class="mio-sov-onboard-ico">↗</div>
             <strong>Network calls</strong>
             <p>When a web skill needs the internet (search, fetch, HuggingFace), the footer bar lights up and logs the host. You can audit every call.</p>
-            <button data-act="noop" class="muted">Keep an eye on the footer →</button>
+            <button data-act="network">Open network monitor</button>
           </div>
           <div>
             <div class="mio-sov-onboard-ico">📦</div>
@@ -68,11 +68,19 @@
     ov.querySelector('[data-act="done"]').addEventListener("click", () => {
       const restricted = ov.querySelector("#mio-sov-restricted").checked;
       if (restricted) localStorage.setItem("mio.restricted", "1");
-      localStorage.setItem(KEY, "1");
-      ov.remove();
+      dismiss();
     });
     ov.querySelector('[data-act="reveal"]').addEventListener("click", async () => {
       try { await fetch("/ui/api/reveal", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: "~/.mio" }) }); } catch {}
+    });
+    ov.querySelector('[data-act="network"]').addEventListener("click", () => {
+      dismiss();
+      // The persistent sovereignty footer owns the audited host list. Opening
+      // its real control keeps onboarding and the live monitor in sync.
+      requestAnimationFrame(() => {
+        const networkMonitor = document.querySelector(".mio-sovereignty .mio-sov-net");
+        if (networkMonitor) networkMonitor.click();
+      });
     });
     ov.querySelector('[data-act="export"]').addEventListener("click", async () => {
       try {

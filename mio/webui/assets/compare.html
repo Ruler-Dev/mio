@@ -18,6 +18,11 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; ba
 .input-row { padding: 12px 24px; border-bottom: 1px solid var(--border); display: flex; gap: 10px; align-items: center; }
 .input-row input[type=text] { flex: 1; background: var(--input); border: 1px solid var(--border); color: var(--text); padding: 10px 14px; border-radius: 8px; font-size: 14px; font-family: inherit; }
 .input-row button { background: var(--accent); color: #fff; border: 0; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 13px; }
+.input-row button:disabled { opacity: .45; cursor: not-allowed; }
+.compare-status { padding: 8px 24px; border-bottom: 1px solid var(--border); color: var(--muted); background: var(--panel); font-size: 12px; }
+.compare-status[data-kind=warning] { color: #fbbf24; }
+.compare-status[data-kind=error] { color: #f87171; }
+.compare-status[hidden] { display: none; }
 .columns { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; flex: 1; overflow: hidden; background: var(--border); }
 .col { background: var(--bg); display: flex; flex-direction: column; overflow: hidden; }
 .col-head { padding: 8px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; background: var(--panel); }
@@ -37,8 +42,9 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; ba
 </div>
 <div class="input-row">
   <input id="prompt" type="text" placeholder="Ask both models the same thing…">
-  <button onclick="go()">▶ Run</button>
+  <button id="run-btn" onclick="go()" disabled>▶ Run</button>
 </div>
+<div class="compare-status" id="compare-status" role="status" aria-live="polite" hidden></div>
 <div class="columns">
   <div class="col">
     <div class="col-head">
@@ -60,23 +66,91 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; ba
 <script>
 let TIERS = [];
 
+function setCompareStatus(message, kind = 'info') {
+  const status = document.getElementById('compare-status');
+  status.textContent = message;
+  status.dataset.kind = kind;
+  status.hidden = !message;
+}
+
+function fillTierSelect(select) {
+  select.replaceChildren();
+  if (!TIERS.length) {
+    const option = document.createElement('option');
+    option.textContent = 'No models available';
+    option.disabled = true;
+    option.selected = true;
+    select.appendChild(option);
+    return;
+  }
+  TIERS.forEach(tier => {
+    const option = document.createElement('option');
+    option.value = tier;
+    option.textContent = tier;
+    select.appendChild(option);
+  });
+}
+
+function validateComparison(changedSide = '') {
+  const left = document.getElementById('tier-l');
+  const right = document.getElementById('tier-r');
+  const runButton = document.getElementById('run-btn');
+  if (!TIERS.length) {
+    left.disabled = true;
+    right.disabled = true;
+    runButton.disabled = true;
+    setCompareStatus('No models are available. Load a model before starting a comparison.', 'error');
+    return false;
+  }
+  if (TIERS.length === 1) {
+    left.disabled = true;
+    right.disabled = true;
+    runButton.disabled = true;
+    setCompareStatus(`Only ${TIERS[0]} is available. Load a second model for a meaningful comparison.`, 'warning');
+    return false;
+  }
+
+  left.disabled = false;
+  right.disabled = false;
+  runButton.disabled = false;
+  if (left.value === right.value) {
+    const changed = changedSide === 'r' ? right : left;
+    const other = changed === left ? right : left;
+    other.value = TIERS.find(tier => tier !== changed.value) || '';
+    setCompareStatus(`Adjusted the ${other === left ? 'left' : 'right'} model: both sides must be distinct.`, 'warning');
+  } else {
+    setCompareStatus('');
+  }
+  return left.value !== right.value;
+}
+
 async function loadTiers() {
   try {
-    const d = await fetch('/v1/models').then(r => r.json());
-    TIERS = (d.data || []).map(m => m.id.replace(/^mio-/, ''));
-  } catch (e) { TIERS = ['small', 'medium', 'large', 'large-moe']; }
-  const mk = (sel, def) => {
-    sel.innerHTML = TIERS.map(t => `<option value="${t}">${t}</option>`).join('');
-    sel.value = def;
-  };
-  mk(document.getElementById('tier-l'), TIERS[0] || 'medium');
-  mk(document.getElementById('tier-r'), TIERS[TIERS.length-1] || 'large-moe');
+    const response = await fetch('/v1/models');
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    const data = await response.json();
+    TIERS = [...new Set((data.data || [])
+      .map(model => typeof model.id === 'string' ? model.id.replace(/^mio-/, '') : '')
+      .filter(Boolean))];
+  } catch (error) {
+    TIERS = [];
+    setCompareStatus('Could not load the model list. Check the Mio server and retry this page.', 'error');
+  }
+  const left = document.getElementById('tier-l');
+  const right = document.getElementById('tier-r');
+  fillTierSelect(left);
+  fillTierSelect(right);
+  if (TIERS.length) {
+    left.value = TIERS[0];
+    right.value = TIERS[TIERS.length - 1];
+  }
+  validateComparison();
 }
 loadTiers();
 
 function go() {
   const prompt = document.getElementById('prompt').value.trim();
-  if (!prompt) return;
+  if (!prompt || !validateComparison()) return;
   run('l');
   run('r');
 }
@@ -125,6 +199,8 @@ function escapeHTML(s) {
 document.getElementById('prompt').addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); go(); }
 });
+document.getElementById('tier-l').addEventListener('change', () => validateComparison('l'));
+document.getElementById('tier-r').addEventListener('change', () => validateComparison('r'));
 </script>
 </body>
 </html>

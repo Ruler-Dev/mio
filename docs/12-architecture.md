@@ -70,7 +70,7 @@ metrics, validation, scheduling, and user-data persistence.
 | KV compression | `mio/polarquant/`, `mio/turboquant/` | Quantized cache formats, kernels, attention adapters and patching. |
 | API | `mio/server.py`, `mio/dashboard.py`, `mio/tool_calls.py` | OpenAI-compatible endpoints, SSE, metrics and tool-call normalization. |
 | Context | `mio/compactor.py`, `mio/prefix_cache.py`, `mio/cache_store.py` | Prompt compaction and reusable conversation state. |
-| Native agent | `mio/agent.py`, `mio/validator.py` | REPL, filesystem/shell tools, policy prompts and optional code validation. |
+| Native agent | `mio/agent.py`, `mio/agent_policy.py`, `mio/validator.py` | REPL, explicit tool capabilities, confined filesystem/shell execution, policy prompts and optional code validation. |
 | Web app | `mio/webui/router.py`, `mio/webui/mio_ui.html`, `mio/webui/assets/` | Chat, artifacts, projects, workflows, settings and browser UX. |
 | Skills | `mio/webui/skills*.py` | Built-in tools and the Mio user-skill catalog. |
 | Automation | `mio/webui/scheduler.py`, `mio/webui/webhooks.py`, `mio/webui/flow_runner.py` | Local scheduled prompts, webhook templates and workflow execution. |
@@ -285,9 +285,33 @@ backend.
 
 The native agent owns conversation history and the interactive tool loop. It
 exposes bounded filesystem inspection/editing, search, shell execution and
-project status tools. Tool results are appended as structured messages before
-the next model turn. Optional validation runs syntax and configured linters on
-generated code.
+project status tools. Authority is supplied by a trusted `AgentToolPolicy`, not
+by model arguments: read, write, shell, and network are independent
+capabilities, and omitted policy defaults to read-only. Path operations walk
+declared roots through no-follow directory descriptors and atomic writes so
+traversal, prefix collisions, symlink swaps, and hard-link mutation do not
+escape the workspace.
+
+The native CLI explicitly grants read/write/shell to its selected workspace,
+preferring the nearest Git root and refusing filesystem root, home, and broad
+system/volume roots without an unsafe acknowledgement. Operators can add named
+roots or network authority explicitly for one session.
+Shell execution remains a real `/bin/zsh -c` environment for pipes, redirects,
+and scripts, but is wrapped in Mio's inherited macOS process sandbox. The
+sandbox denies user/mounted-volume reads outside declared roots, denies all
+out-of-root writes, strips credentials and injection variables from the child
+environment, and denies network unless the trusted caller grants it
+separately. The default-deny profile also blocks unrelated Mach/XPC, Apple
+Events, IOKit, process inspection/signals, repository startup files, inherited
+stdin, and descendant session/process-group detachment. Unsupported hosts fail
+closed. A fail-closed preflight walks every writable/read-only sandbox root and
+rejects hard-linked files or uninspectable directories before launch. Commands
+have aggregate/per-call bounds, hard CPU/file/open-descriptor ceilings,
+timeout/output caps, and audit records contain a command digest rather than the
+command text.
+
+Tool results are appended as structured messages before the next model turn.
+Optional validation runs syntax and configured linters on generated code.
 
 Instruction skills are not registered as hundreds of independent function
 schemas. Mio exposes catalog search and bounded skill reading so the model can
@@ -316,18 +340,40 @@ policy and grants. The native agent and Web UI expose bounded generic
 `list_mcp_tools`/`call_mcp_tool` bridges. `/v1/mcp/servers` remains a
 declaration/status endpoint and never launches or calls a provider.
 
+`POST /v1/mcp/health` is the separate operational probe used by Settings. It
+is a POST with the WebUI session/CSRF boundary because initializing a provider
+is side effectful; GET cannot trigger it. The endpoint only initializes
+enabled, local, unauthenticated providers, with fixed concurrency, timeout,
+provider-count, and output bounds. Each stdio provider runs with a dedicated
+least-authority health workspace and exact data/read-only runtime roots.
+Remote, authenticated and unisolatable HTTP/SSE entries are reported as
+skipped. Its response is deliberately redacted: no command, URL, environment,
+header, tool name, secret, or raw provider error crosses the API.
+
 Provider enablement and model consent are separate layers. The Web UI marks
 both MCP bridges as sensitive orchestration: model auto-use requires an exact
 operator grant and the same per-request grant, while a direct sensitive run
 also requires confirmation. Public read-only Web UI tools are the only
 automatic default.
 
+For the native agent, MCP declarations are additionally checked against the
+active `AgentToolPolicy`: filesystem/read, write, process, and network
+requirements map conservatively to READ, WRITE, SHELL, and NETWORK, while
+secret injection and literal credential-like environment values are always
+rejected. Stdio provider processes inherit the agent sandbox. Workspace and
+declared provider-data roots receive only mapped capabilities; executable and
+package roots are read-only, and provider process groups are killed/reaped even
+if the leader exits first. HTTP/SSE transports fail closed in the native-agent
+bridge because their external process cannot be confined by this boundary.
+
 ## 14. HTTP server
 
 `mio/server.py` implements model listing, health, metrics, tier lifecycle,
 single and streaming chat completions and batch requests. It mounts the WebUI
-router only when requested. A live console panel consumes the same generation
-metrics recorded for HTTP responses.
+router only when requested. The live console and standalone dashboard consume
+the same completed `GenerationMetrics` boundary. A thread-safe bounded bridge
+publishes schema-v1 snapshots over WebSocket, drops stale queued snapshots
+rather than blocking inference, and reconnects the browser after disconnects.
 
 The safe default is loopback binding. The server refuses a non-loopback host
 unless `--unsafe-remote-bind` or `MIO_UNSAFE_REMOTE_BIND=1` explicitly
@@ -342,6 +388,11 @@ backend router provides sessions, projects, attachments, artifacts, skills,
 RAG, workflows, schedules, webhooks and chat streaming. Persistent user data
 lives under `~/.mio`; repository code and user content are deliberately
 separate.
+
+The main shell vendors Marked 12.0.2 and Prism 1.29.0 in the Python package,
+so its Markdown/code boot path is offline and does not trust a runtime CDN.
+The compare surface requires two distinct loaded models. Settings exposes the
+bounded MCP health endpoint with DOM-safe status rendering and explicit retry.
 
 Security boundaries are enforced server-side:
 
@@ -367,9 +418,12 @@ rather than depending on accidental top-level `let` bindings.
 
 ## 16. Automations and flows
 
-Schedules and webhooks persist as JSON/JSONL under `~/.mio`. The scheduler is
-an in-process asyncio task started with the WebUI lifecycle. Each run resolves
-an available tier, streams a bounded response and records its result.
+Schedules and webhooks persist as JSON/JSONL under `~/.mio`. Their collection
+stores, together with prompts, memory, and projects, use schema validation and
+locked atomic read/modify/write transactions. Corrupt state fails closed and
+remains untouched for recovery. The scheduler is an in-process asyncio task
+started with the WebUI lifecycle. Each run resolves an available tier, streams
+a bounded response and records its result.
 
 Flow execution validates a graph, topologically orders ready nodes and dispatches
 typed handlers such as LLM calls, skills, transforms, conditionals, RAG and
@@ -399,8 +453,8 @@ retry/backoff or intra-flow parallelism.
 | Installed skills | `~/.mio/skills/` | Agent Skills directories + lock metadata |
 | Mio-managed tools | `~/.mio/tools/`, `~/.mio/bin/` | Isolated runtimes/binaries |
 | LLM Wiki | `~/.mio/wiki/` | Markdown + indexes/log |
-| Sessions/projects/prompts | `~/.mio/` | JSON |
-| Schedules/webhooks/runs | `~/.mio/` | JSON/JSONL |
+| Sessions/projects/prompts/memory | `~/.mio/` | JSON; collection mutations are validated, locked, and atomic |
+| Schedules/webhooks/runs | `~/.mio/` | JSON/JSONL; schedule/webhook collections are validated, locked, and atomic |
 | RAG metadata | `~/.mio/rag.sqlite` | SQLite |
 | Downloaded models | repository `models/`, `spd/` by default | HF/MLX checkpoint files |
 | Benchmark evidence | `benchmarks/results/` | Versioned JSON |

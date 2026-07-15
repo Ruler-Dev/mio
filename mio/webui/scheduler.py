@@ -31,9 +31,10 @@ import datetime as _dt
 import json
 import re
 import uuid
+from typing import Any
 
 from mio.paths import mio_home
-from mio.persistence import atomic_write_json
+from mio.persistence import atomic_update_json
 
 PIMIO_DIR = mio_home()
 PIMIO_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -43,6 +44,10 @@ _SCHED_LOG = PIMIO_DIR / "schedules-log.jsonl"
 _manager_ref = None  # set by configure()/init()
 _gpu_lock_ref = None
 _task: asyncio.Task[None] | None = None
+
+
+class ScheduleStoreError(ValueError):
+    """The persisted schedule envelope is structurally invalid."""
 
 
 def _cadence_int(value, *, field: str, minimum: int, maximum: int) -> int:
@@ -191,23 +196,54 @@ async def shutdown() -> None:
             task.cancel()
 
 
+def _validate_schedule_store(value: Any) -> list[dict]:
+    """Validate the collection envelope while isolating bad cadences later."""
+    if not isinstance(value, list):
+        raise ValueError("schedules store must contain a JSON array")
+    seen: set[str] = set()
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise ValueError(f"schedule record {index} must be a JSON object")
+        schedule_id = item.get("id")
+        if not isinstance(schedule_id, str) or not schedule_id:
+            raise ValueError(f"schedule record {index} must have a non-empty id")
+        if schedule_id in seen:
+            raise ValueError(f"schedules store contains duplicate id {schedule_id!r}")
+        seen.add(schedule_id)
+    return value
+
+
 def load_schedules() -> list[dict]:
-    if not _SCHED_FILE.exists():
+    try:
+        value = json.loads(_SCHED_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
         return []
     try:
-        return json.loads(_SCHED_FILE.read_text()) or []
-    except Exception:
-        return []
+        return _validate_schedule_store(value)
+    except ValueError as exc:
+        raise ScheduleStoreError(str(exc)) from exc
+
+
+def _update_schedules(update) -> list[dict]:
+    def transaction(current: Any) -> list[dict]:
+        try:
+            items = _validate_schedule_store(current)
+        except ValueError as exc:
+            raise ScheduleStoreError(str(exc)) from exc
+        replacement = update([dict(item) for item in items])
+        return _validate_schedule_store(replacement)
+
+    return atomic_update_json(_SCHED_FILE, transaction, default_factory=list)
 
 
 def save_schedules(items: list[dict]) -> None:
-    atomic_write_json(_SCHED_FILE, items)
+    replacement = _validate_schedule_store(items)
+    _update_schedules(lambda _current: replacement)
 
 
 def create_schedule(name: str, prompt: str, cadence: dict | None,
                     tier: str | None = None, enabled: bool = True) -> dict:
     cadence = validate_cadence(cadence)
-    items = load_schedules()
     entry = {
         "id": str(uuid.uuid4())[:8],
         "name": name or "schedule",
@@ -219,14 +255,14 @@ def create_schedule(name: str, prompt: str, cadence: dict | None,
         "last_run": None,
         "last_result": None,
     }
-    items.append(entry)
-    save_schedules(items)
+    _update_schedules(lambda items: [*items, entry])
     return {"ok": True, "id": entry["id"], "schedule": entry}
 
 
 def delete_schedule(sched_id: str) -> dict:
-    items = [s for s in load_schedules() if s["id"] != sched_id]
-    save_schedules(items)
+    _update_schedules(
+        lambda items: [item for item in items if item.get("id") != sched_id]
+    )
     return {"ok": True}
 
 
@@ -234,13 +270,25 @@ def update_schedule(sched_id: str, updates: dict) -> dict:
     updates = dict(updates or {})
     if "cadence" in updates:
         updates["cadence"] = validate_cadence(updates["cadence"])
-    items = load_schedules()
-    for s in items:
-        if s["id"] == sched_id:
-            s.update({k: v for k, v in updates.items() if k in
-                      ("name", "prompt", "tier", "cadence", "enabled")})
-            save_schedules(items)
-            return {"ok": True, "schedule": s}
+    updated: dict[str, Any] = {}
+
+    def apply(items: list[dict]) -> list[dict]:
+        for schedule in items:
+            if schedule.get("id") == sched_id:
+                schedule.update(
+                    {
+                        key: value
+                        for key, value in updates.items()
+                        if key in ("name", "prompt", "tier", "cadence", "enabled")
+                    }
+                )
+                updated["schedule"] = dict(schedule)
+                break
+        return items
+
+    _update_schedules(apply)
+    if "schedule" in updated:
+        return {"ok": True, "schedule": updated["schedule"]}
     return {"error": "not found"}
 
 
@@ -368,17 +416,24 @@ async def _run_due_schedules(now: _dt.datetime) -> None:
             )
             continue
         completed_at = now.isoformat(timespec="seconds")
-        current = load_schedules()
-        matched = next(
-            (item for item in current if item.get("id") == scheduled.get("id")),
-            None,
-        )
+        completed: dict[str, Any] = {}
+
+        def merge_result(current: list[dict]) -> list[dict]:
+            matched = next(
+                (item for item in current if item.get("id") == scheduled.get("id")),
+                None,
+            )
+            if matched is not None:
+                matched["last_run"] = completed_at
+                matched["last_result"] = result
+                completed["schedule"] = dict(matched)
+            return current
+
+        _update_schedules(merge_result)
+        matched = completed.get("schedule")
         if matched is None:
             # Deleted while running: record no new state and never resurrect.
             continue
-        matched["last_run"] = completed_at
-        matched["last_result"] = result
-        save_schedules(current)
         _append_log(
             {
                 "id": matched["id"],

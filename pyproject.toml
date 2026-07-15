@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Local MLX inference and agent stack for Apple Silicon with DSpark/DFlash speculative decoding"
 requires-python = ">=3.10"
 license = "MIT"
+license-files = ["THIRD_PARTY_NOTICES.md"]
 # One install = full experience. All UI / skill / multimodal libraries are
 # included so `pip install -e .` gives you everything in one shot. Skill-side
 # imports are try/except-gated anyway, so a missing system binary (e.g.

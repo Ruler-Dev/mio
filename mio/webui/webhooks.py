@@ -29,7 +29,7 @@ import time
 from typing import Any
 
 from mio.paths import mio_home
-from mio.persistence import atomic_write_json
+from mio.persistence import atomic_update_json
 
 PIMIO_DIR = mio_home()
 PIMIO_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -51,17 +51,57 @@ _SENSITIVE_KEY = re.compile(
 )
 
 
+class WebhookStoreError(ValueError):
+    """The persisted webhook envelope is structurally invalid."""
+
+
+def _validate_webhook_store(value: Any) -> list[dict]:
+    if not isinstance(value, list):
+        raise ValueError("webhooks store must contain a JSON array")
+    seen: set[str] = set()
+    for index, hook in enumerate(value):
+        if not isinstance(hook, dict):
+            raise ValueError(f"webhook record {index} must be a JSON object")
+        slug = hook.get("slug")
+        if not isinstance(slug, str) or not slug:
+            raise ValueError(f"webhook record {index} must have a non-empty slug")
+        if slug in seen:
+            raise ValueError(f"webhooks store contains duplicate slug {slug!r}")
+        if not isinstance(hook.get("prompt"), str):
+            raise ValueError(f"webhook record {index} must have a text prompt")
+        authentication = hook.get("secret_hash") or hook.get("secret")
+        if authentication is not None and not isinstance(authentication, str):
+            raise ValueError(f"webhook record {index} must have authentication data")
+        seen.add(slug)
+    return value
+
+
 def load_webhooks() -> list[dict]:
-    if not _WEBHOOKS_FILE.exists():
+    try:
+        value = json.loads(_WEBHOOKS_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
         return []
     try:
-        return json.loads(_WEBHOOKS_FILE.read_text()) or []
-    except Exception:
-        return []
+        return _validate_webhook_store(value)
+    except ValueError as exc:
+        raise WebhookStoreError(str(exc)) from exc
+
+
+def _update_webhooks(update) -> list[dict]:
+    def transaction(current: Any) -> list[dict]:
+        try:
+            hooks = _validate_webhook_store(current)
+        except ValueError as exc:
+            raise WebhookStoreError(str(exc)) from exc
+        replacement = update([dict(hook) for hook in hooks])
+        return _validate_webhook_store(replacement)
+
+    return atomic_update_json(_WEBHOOKS_FILE, transaction, default_factory=list)
 
 
 def save_webhooks(hooks: list[dict]) -> None:
-    atomic_write_json(_WEBHOOKS_FILE, hooks)
+    replacement = _validate_webhook_store(hooks)
+    _update_webhooks(lambda _current: replacement)
 
 
 def _hash_secret(secret: str) -> str:
@@ -122,8 +162,6 @@ def create_webhook(slug: str, prompt: str, tier: str | None = None,
         raise ValueError("secret exceeds the 1 KiB limit")
     if tier is not None and not isinstance(tier, str):
         raise ValueError("tier must be text")
-    hooks = load_webhooks()
-    existing = next((h for h in hooks if h["slug"] == slug), None)
     entry = {
         "slug": slug,
         "prompt": prompt,
@@ -131,19 +169,24 @@ def create_webhook(slug: str, prompt: str, tier: str | None = None,
         "secret_hash": _hash_secret(secret),
         "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
-    if existing:
-        entry["created"] = existing.get("created") or entry["created"]
-        existing.pop("secret", None)
-        existing.update(entry)
-    else:
-        hooks.append(entry)
-    save_webhooks(hooks)
+    def upsert(hooks: list[dict]) -> list[dict]:
+        existing = next((hook for hook in hooks if hook.get("slug") == slug), None)
+        if existing:
+            entry["created"] = existing.get("created") or entry["created"]
+            existing.pop("secret", None)
+            existing.update(entry)
+        else:
+            hooks.append(entry)
+        return hooks
+
+    _update_webhooks(upsert)
     return {"ok": True, "slug": slug, "url": f"/ui/api/webhook/{slug}"}
 
 
 def delete_webhook(slug: str) -> dict:
-    hooks = [h for h in load_webhooks() if h["slug"] != slug]
-    save_webhooks(hooks)
+    _update_webhooks(
+        lambda hooks: [hook for hook in hooks if hook.get("slug") != slug]
+    )
     return {"ok": True}
 
 

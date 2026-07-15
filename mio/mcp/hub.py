@@ -17,8 +17,9 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
+from mio.agent_policy import AgentToolPermission, AgentToolPolicy
 from mio.mcp.client import MCPError, MCPProtocolError, MCPProvider
-from mio.mcp.config import MCPPermission, MCPServerConfig
+from mio.mcp.config import MCPPermission, MCPServerConfig, MCPTransport
 from mio.mcp.registry import MCPRegistry, load_registry
 
 MAX_ARGUMENT_BYTES = 1024 * 1024
@@ -27,6 +28,47 @@ MAX_BRIDGE_OUTPUT_BYTES = 4 * 1024 * 1024
 
 class MCPHubError(MCPError):
     pass
+
+
+_MCP_AGENT_PERMISSION_MAP: Mapping[MCPPermission, AgentToolPermission | None] = {
+    MCPPermission.READ: AgentToolPermission.READ,
+    MCPPermission.FILESYSTEM_READ: AgentToolPermission.READ,
+    MCPPermission.WRITE: AgentToolPermission.WRITE,
+    MCPPermission.FILESYSTEM_WRITE: AgentToolPermission.WRITE,
+    MCPPermission.PROCESS: AgentToolPermission.SHELL,
+    MCPPermission.NETWORK: AgentToolPermission.NETWORK,
+    # Native AgentToolPolicy intentionally has no secrets capability. A model
+    # cannot turn an environment-backed MCP credential into an implicit grant.
+    MCPPermission.SECRETS: None,
+}
+
+
+def _enforce_agent_ceiling(config: MCPServerConfig, agent_policy: AgentToolPolicy) -> None:
+    """Reject MCP authority not represented in the trusted agent policy."""
+
+    if not isinstance(agent_policy, AgentToolPolicy):
+        raise MCPHubError("native-agent MCP access requires an AgentToolPolicy")
+    if config.transport is not MCPTransport.STDIO:
+        raise MCPHubError(
+            f"native-agent MCP server {config.name!r} must use a confined stdio transport"
+        )
+
+    required: set[AgentToolPermission] = set()
+    for permission in config.permissions:
+        agent_permission = _MCP_AGENT_PERMISSION_MAP[permission]
+        if agent_permission is None:
+            raise MCPHubError(
+                f"MCP server {config.name!r} requires secrets, which native-agent "
+                "policies never grant"
+            )
+        required.add(agent_permission)
+
+    missing = required - agent_policy.permissions
+    if missing:
+        names = ", ".join(sorted(permission.value for permission in missing))
+        raise MCPHubError(
+            f"MCP server {config.name!r} exceeds native-agent policy: {names} not granted"
+        )
 
 
 @dataclass(frozen=True)
@@ -38,7 +80,12 @@ class MCPHubPolicy:
     allow_authenticated: bool = False
     explicit_grants: Mapping[str, frozenset[MCPPermission]] = field(default_factory=dict)
 
-    def grants_for(self, config: MCPServerConfig) -> frozenset[MCPPermission]:
+    def grants_for(
+        self,
+        config: MCPServerConfig,
+        *,
+        agent_policy: AgentToolPolicy | None = None,
+    ) -> frozenset[MCPPermission]:
         if not config.enabled:
             raise MCPHubError(f"MCP server {config.name!r} is disabled")
 
@@ -66,19 +113,53 @@ class MCPHubPolicy:
         if missing:
             names = ", ".join(sorted(permission.value for permission in missing))
             raise MCPHubError(f"MCP server {config.name!r} still needs grants: {names}")
-        return granted
+        if agent_policy is not None:
+            _enforce_agent_ceiling(config, agent_policy)
+        # Explicit grants authorize declared capabilities; they must not become
+        # extra authority handed to the provider implementation.
+        return config.permissions
 
 
-ProviderFactory = Callable[[str, MCPServerConfig, frozenset[MCPPermission]], MCPProvider]
+ProviderFactory = Callable[..., MCPProvider]
 
 
 def _default_provider_factory(
     name: str,
     config: MCPServerConfig,
     granted: frozenset[MCPPermission],
+    agent_policy: AgentToolPolicy | None = None,
 ) -> MCPProvider:
     registry = MCPRegistry([config])
-    return registry.create_provider(name, granted_permissions=granted)
+    return registry.create_provider(
+        name,
+        granted_permissions=granted,
+        agent_policy=agent_policy,
+    )
+
+
+AgentPolicyFingerprint = tuple[tuple[str, ...], tuple[str, ...], int, int, float] | None
+
+
+def _agent_policy_fingerprint(agent_policy: AgentToolPolicy | None) -> AgentPolicyFingerprint:
+    if agent_policy is None:
+        return None
+    return (
+        tuple(str(root) for root in agent_policy.workspace_roots),
+        tuple(sorted(permission.value for permission in agent_policy.permissions)),
+        agent_policy.output_limit_chars,
+        agent_policy.file_limit_chars,
+        float(agent_policy.command_timeout_s),
+    )
+
+
+def _factory_accepts_agent_policy(factory: ProviderFactory) -> bool:
+    """Keep legacy three-argument test/integration factories compatible."""
+
+    try:
+        inspect.signature(factory).bind("server", object(), frozenset(), None)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 class MCPHub:
@@ -97,8 +178,12 @@ class MCPHub:
         self._tool_cache_ttl_s = max(0.0, float(tool_cache_ttl_s))
         self._max_output_bytes = max(1024, min(int(max_output_bytes), MAX_BRIDGE_OUTPUT_BYTES))
         self._providers: dict[str, MCPProvider] = {}
+        self._provider_fingerprints: dict[str, AgentPolicyFingerprint] = {}
         self._provider_locks: dict[str, asyncio.Lock] = {}
-        self._tools_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+        self._tools_cache: dict[
+            str,
+            tuple[float, AgentPolicyFingerprint, list[dict[str, Any]]],
+        ] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._loop_ready = threading.Event()
@@ -169,11 +254,16 @@ class MCPHub:
             raise MCPHubError(f"MCP result exceeds bridge output limit ({limit} bytes)")
         return value
 
-    async def _provider(self, server: str) -> MCPProvider:
+    async def _provider(
+        self,
+        server: str,
+        agent_policy: AgentToolPolicy | None = None,
+    ) -> MCPProvider:
         config = self.registry.get(server)
-        granted = self.policy.grants_for(config)
+        granted = self.policy.grants_for(config, agent_policy=agent_policy)
+        fingerprint = _agent_policy_fingerprint(agent_policy)
         provider = self._providers.get(server)
-        if provider is not None:
+        if provider is not None and self._provider_fingerprints.get(server) == fingerprint:
             return provider
         lock = self._provider_locks.get(server)
         if lock is None:
@@ -181,9 +271,17 @@ class MCPHub:
             self._provider_locks[server] = lock
         async with lock:
             provider = self._providers.get(server)
-            if provider is not None:
+            if provider is not None and self._provider_fingerprints.get(server) == fingerprint:
                 return provider
-            created = self._provider_factory(server, config, granted)
+            if provider is not None:
+                self._providers.pop(server, None)
+                self._provider_fingerprints.pop(server, None)
+                self._tools_cache.pop(server, None)
+                await provider.close()
+            if _factory_accepts_agent_policy(self._provider_factory):
+                created = self._provider_factory(server, config, granted, agent_policy)
+            else:
+                created = self._provider_factory(server, config, granted)
             provider = await created if inspect.isawaitable(created) else created
             try:
                 await provider.initialize()
@@ -191,35 +289,59 @@ class MCPHub:
                 await provider.close()
                 raise
             self._providers[server] = provider
+            self._provider_fingerprints[server] = fingerprint
             return provider
 
-    async def _list_tools(self, server: str) -> list[dict[str, Any]]:
-        self.policy.grants_for(self.registry.get(server))
+    async def _list_tools(
+        self,
+        server: str,
+        agent_policy: AgentToolPolicy | None = None,
+    ) -> list[dict[str, Any]]:
+        self.policy.grants_for(self.registry.get(server), agent_policy=agent_policy)
         loop = asyncio.get_running_loop()
+        fingerprint = _agent_policy_fingerprint(agent_policy)
         cached = self._tools_cache.get(server)
-        if cached and cached[0] > loop.time():
-            return cached[1]
-        provider = await self._provider(server)
+        if cached and cached[0] > loop.time() and cached[1] == fingerprint:
+            return cached[2]
+        provider = await self._provider(server, agent_policy)
         payload = await provider.list_tools()
         tools = payload.get("tools") if isinstance(payload, dict) else None
         if not isinstance(tools, list) or any(not isinstance(tool, dict) for tool in tools):
             raise MCPHubError("MCP tools/list returned an invalid payload")
         self._bounded(server, tools)
-        self._tools_cache[server] = (loop.time() + self._tool_cache_ttl_s, tools)
+        self._tools_cache[server] = (
+            loop.time() + self._tool_cache_ttl_s,
+            fingerprint,
+            tools,
+        )
         return tools
 
-    def list_tools(self, server: str) -> dict[str, Any]:
-        tools = self._run(self._list_tools(server), self._timeout_for(server))
+    def list_tools(
+        self,
+        server: str,
+        *,
+        agent_policy: AgentToolPolicy | None = None,
+    ) -> dict[str, Any]:
+        tools = self._run(
+            self._list_tools(server, agent_policy),
+            self._timeout_for(server),
+        )
         result = {"server": server, "tools": tools}
         self._bounded(server, result)
         return json.loads(json.dumps(result, ensure_ascii=False))
 
-    async def _call_tool(self, server: str, name: str, arguments: Mapping[str, Any]) -> Any:
-        tools = await self._list_tools(server)
+    async def _call_tool(
+        self,
+        server: str,
+        name: str,
+        arguments: Mapping[str, Any],
+        agent_policy: AgentToolPolicy | None = None,
+    ) -> Any:
+        tools = await self._list_tools(server, agent_policy)
         known_names = {str(tool.get("name")) for tool in tools}
         if name not in known_names:
             raise MCPHubError(f"MCP tool {name!r} is not advertised by server {server!r}")
-        provider = await self._provider(server)
+        provider = await self._provider(server, agent_policy)
         try:
             return await provider.call_tool(name, arguments)
         except MCPProtocolError:
@@ -228,7 +350,14 @@ class MCPHub:
             await self._drop_provider(server)
             raise
 
-    def call_tool(self, server: str, name: str, arguments: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def call_tool(
+        self,
+        server: str,
+        name: str,
+        arguments: Mapping[str, Any] | None = None,
+        *,
+        agent_policy: AgentToolPolicy | None = None,
+    ) -> dict[str, Any]:
         if not isinstance(name, str) or not name:
             raise MCPHubError("MCP tool name is required")
         arguments = dict(arguments or {})
@@ -238,7 +367,10 @@ class MCPHub:
             raise MCPHubError("MCP tool arguments must be JSON serializable") from exc
         if arg_bytes > MAX_ARGUMENT_BYTES:
             raise MCPHubError(f"MCP tool arguments exceed {MAX_ARGUMENT_BYTES} bytes")
-        result = self._run(self._call_tool(server, name, arguments), self._timeout_for(server))
+        result = self._run(
+            self._call_tool(server, name, arguments, agent_policy),
+            self._timeout_for(server),
+        )
         return self._bounded(server, {"server": server, "tool": name, "result": result})
 
     async def _drop_provider(self, server: str) -> None:
@@ -248,6 +380,7 @@ class MCPHub:
             self._provider_locks[server] = lock
         async with lock:
             provider = self._providers.pop(server, None)
+            self._provider_fingerprints.pop(server, None)
             self._tools_cache.pop(server, None)
             if provider is not None:
                 await provider.close()
@@ -313,16 +446,31 @@ def configure_default_hub(registry: MCPRegistry) -> MCPHub:
     return created
 
 
-def list_mcp_tools(server: str) -> dict[str, Any]:
+def list_mcp_tools(
+    server: str,
+    *,
+    agent_policy: AgentToolPolicy | None = None,
+) -> dict[str, Any]:
     try:
-        return get_default_hub().list_tools(server)
+        return get_default_hub().list_tools(server, agent_policy=agent_policy)
     except (MCPError, ValueError) as exc:
         return {"server": server, "error": f"{type(exc).__name__}: {exc}"}
 
 
-def call_mcp_tool(server: str, name: str, arguments: Mapping[str, Any] | None = None) -> dict[str, Any]:
+def call_mcp_tool(
+    server: str,
+    name: str,
+    arguments: Mapping[str, Any] | None = None,
+    *,
+    agent_policy: AgentToolPolicy | None = None,
+) -> dict[str, Any]:
     try:
-        return get_default_hub().call_tool(server, name, arguments)
+        return get_default_hub().call_tool(
+            server,
+            name,
+            arguments,
+            agent_policy=agent_policy,
+        )
     except (MCPError, ValueError) as exc:
         return {"server": server, "tool": name, "error": f"{type(exc).__name__}: {exc}"}
 

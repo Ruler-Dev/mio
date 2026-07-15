@@ -25,7 +25,8 @@ executable skills, flows, schedules, webhooks, and generated-code artifacts.
 ## Core UX features
 
 ### Chat
-- Full GFM markdown rendering (marked.js) with Prism.js syntax highlighting for Python, TS, JSX, Rust, Go, SQL, YAML, JSON, CSS, Bash
+
+- Full GFM markdown rendering with vendored Marked 12.0.2 and Prism 1.29.0 assets; Python, TS, JSX, Rust, Go, SQL, YAML, JSON, CSS, and Bash highlighting works without a CDN at application boot. Optional sandboxed artifact renderers may still load their own libraries on demand
 - Multi-round tool-use loop (up to 5 rounds per turn) — model can chain `web_search` → `fetch_url` → `generate_chart` → emit artifact
 - Live streaming with per-message metrics (tok/s, acceptance, prefill)
 - Session persistence (`~/.mio/sessions/*.json`) with auto-titles
@@ -53,7 +54,7 @@ executable skills, flows, schedules, webhooks, and generated-code artifacts.
 | `Esc` | Close overlays / artifact panel / stop voice / focus mode |
 | `Enter` | Send (Shift+Enter newline) |
 
-Slash commands: `/weather /chart /pdf /docx /xlsx /pptx /qr /ical /resume /invoice /mindmap /timeline /math /map /diagram /3d /search /new /settings /theme /export /export-json /import /clear /fullscreen /voice /convo /screenshot /ambient /focus /gallery /workspace /save /stop /help`.
+Slash commands: `/weather /chart /pdf /docx /xlsx /pptx /qr /ical /resume /invoice /mindmap /timeline /math /map /diagram /3d /search /new /settings /theme /export /export-json /import /clear /fullscreen /voice /convo /screenshot /ambient /focus /gallery /workspace /save /stop /dashboard /compare /help`.
 
 ### Power features
 
@@ -70,6 +71,13 @@ Slash commands: `/weather /chart /pdf /docx /xlsx /pptx /qr /ical /resume /invoi
 - **Live workspace** (`/workspace`): File System Access API picks a folder with R/W scope; `/save` drops current artifact there
 - **Wake Lock**: acquired at send, released at done — screen stays awake during long generations
 - **Notifications**: browser ping when a reply finishes if the tab is hidden
+- **Side-by-side compare** (`/compare`): operates only when two distinct loaded
+  models are available; zero/one-model states are explicit and cannot submit a
+  fake or self-comparison
+- **MCP health in Settings**: shows redacted readiness, latency, and tool count
+  for bounded probes of local unauthenticated providers, with a manual Retry
+  action; every stdio probe is sandboxed, while remote, authenticated and
+  unisolatable HTTP/SSE providers are never contacted by this view
 
 ### Flow Mode
 
@@ -193,6 +201,11 @@ discovered alongside them. Skills are searched through `list_mio_skills` and
 loaded on demand through `read_mio_skill`; reading instructions never executes
 bundled repository code. See [14 — External skills](14-external-skills.md).
 
+Prompts, persistent memory, projects, schedules, and webhooks are mutated with
+locked atomic JSON transactions. Schema or JSON corruption returns HTTP 409
+and leaves the original file untouched; it is never converted silently into
+an empty collection by a later write.
+
 ## Security boundaries
 
 - session identifiers and storage paths are validated server-side;
@@ -201,6 +214,8 @@ bundled repository code. See [14 — External skills](14-external-skills.md).
 - HTTP request bodies are capped globally at 32 MiB;
 - uploads are read in chunks and capped at 25 MiB;
 - rendered chat/Markdown passes through Mio's sanitizer;
+- the main shell loads its Marked/Prism runtime from versioned package assets,
+  not a boot-time CDN;
 - executable artifacts use sandboxed iframes without `allow-same-origin`;
 - external URL fetches reject private/non-global destinations and revalidate
   DNS and redirects;
@@ -232,6 +247,9 @@ remain release work.
 | `POST /ui/api/config` | Update config (caveman, temp, sys prompt, max_tokens) |
 | `GET/POST/DELETE /ui/api/sessions[/id]` | Chat persistence |
 | `GET /ui/api/model-info` | Active tier, VRAM, context |
+| `POST /v1/mcp/health` | CSRF-protected, redacted and bounded health probe for eligible local MCP providers |
+| `GET /ui/compare` | Distinct-loaded-model side-by-side comparison |
+| `GET /dashboard` / `WS /ws/metrics` | Live schema-v1 inference metrics and reconnecting dashboard |
 | `POST /ui/api/tier` | Switch tier |
 | `POST /ui/api/upload` | File attachment (multipart) |
 | `GET /ui/api/search?q=…` | Global cross-chat search |

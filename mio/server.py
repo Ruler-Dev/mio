@@ -10,14 +10,27 @@ import uuid
 import threading
 from collections import deque
 from contextlib import asynccontextmanager
+from dataclasses import replace
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from mio.agent_policy import AgentToolPermission, AgentToolPolicy
 from mio.model_manager import ModelManager
-from mio.mcp import MCPRegistry, load_registry
+from mio.mcp import (
+    MCPError,
+    MCPPermission,
+    MCPPermissionError,
+    MCPProtocolError,
+    MCPRegistry,
+    MCPServerConfig,
+    MCPTransport,
+    load_registry,
+)
+from mio.paths import mio_home
 from mio.prompt_policy import PromptMode, PromptPolicy, apply_prompt_policy
 from mio.router import TandemRouter
 from mio.web_security import (
@@ -40,6 +53,22 @@ _validate_enabled: bool = False
 _caveman_level: str = "full"
 _prompt_policy = PromptPolicy()
 _mcp_registry: MCPRegistry | None = None
+# Health probes are deliberately stricter than ordinary MCP calls. The UI must
+# never turn an unusually large registry or a hung provider into an unbounded
+# request, and health responses never echo provider configuration or errors.
+_MCP_HEALTH_MAX_SERVERS = 32
+_MCP_HEALTH_CONCURRENCY = 8
+_MCP_HEALTH_TIMEOUT_S = 3.0
+_MCP_HEALTH_CLOSE_TIMEOUT_S = 0.5
+_MCP_HEALTH_MAX_OUTPUT_BYTES = 256 * 1024
+# One health batch is shared by every concurrent request on the serving event
+# loop.  The lock also makes sequential TestClient/event-loop lifecycles safe:
+# an asyncio Task is never awaited from a loop other than the one that owns it.
+_MCP_HEALTH_FLIGHTS_LOCK = threading.Lock()
+_MCP_HEALTH_FLIGHTS: dict[
+    asyncio.AbstractEventLoop,
+    asyncio.Task[dict[str, Any]],
+] = {}
 # Context auto-compaction thresholds (set by start_server)
 _compact_threshold: float = 0.75
 _compact_target: float = 0.50
@@ -341,6 +370,7 @@ async def _lifespan(_application: FastAPI):
     finally:
         # Stop the producer before tearing down tools it could otherwise call.
         try:
+            await _cancel_mcp_health_flight()
             await asyncio.to_thread(_cancel_stream_producers)
             await scheduler.shutdown()
         finally:
@@ -434,6 +464,16 @@ class _ServeStats:
             "cache_n": cache_n,
             "snippet": snippet,
         })
+        # The standalone dashboard is fed from the same completion boundary as
+        # the serve console.  The dashboard collector owns the cross-thread
+        # handoff, so this remains safe when ``record`` is invoked by a worker.
+        try:
+            from mio.dashboard import record_generation
+
+            record_generation(gen_metrics, wall_s=wall_s, tier=tier)
+        except Exception:
+            # Telemetry must never turn a successful inference into an error.
+            pass
 
     # ---- Aggregate getters (for live panel renderer) ----
     def avg_decode_tps(self) -> float:
@@ -989,6 +1029,274 @@ async def list_mcp_servers() -> dict:
             item["environment"] = {key: "<redacted>" for key in item["environment"]}
         data.append(item)
     return {"object": "list", "data": data}
+
+
+def _mcp_health_item(config: MCPServerConfig) -> dict[str, Any]:
+    """Return the fixed, non-sensitive portion of an MCP health record."""
+    return {
+        "name": config.name,
+        "transport": config.transport.value,
+        "enabled": bool(config.enabled),
+        "local": config.is_local,
+        "authenticated": config.uses_auth,
+    }
+
+
+def _mcp_health_failure(exc: BaseException) -> tuple[str, str]:
+    """Map provider failures to stable codes without returning exception text."""
+    if isinstance(exc, TimeoutError):
+        return "timeout", "probe_timeout"
+    if isinstance(exc, MCPPermissionError):
+        return "unavailable", "permission_denied"
+    if isinstance(exc, MCPProtocolError):
+        return "unavailable", "protocol_error"
+    if isinstance(exc, (MCPError, OSError)):
+        return "unavailable", "provider_unavailable"
+    return "unavailable", "probe_failed"
+
+
+def _mcp_health_agent_policy(config: MCPServerConfig) -> AgentToolPolicy:
+    """Build a least-authority stdio policy for provider discovery only."""
+
+    runtime = mio_home()
+    try:
+        runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
+        canonical_runtime = runtime.resolve(strict=True)
+        health_root = runtime / "mcp-health"
+        prospective_root = health_root.resolve(strict=False)
+        prospective_root.relative_to(canonical_runtime)
+        if prospective_root == canonical_runtime:
+            raise ValueError("health workspace must be a strict Mio child")
+        health_root.mkdir(mode=0o700, parents=False, exist_ok=True)
+        canonical_health_root = health_root.resolve(strict=True)
+        canonical_health_root.relative_to(canonical_runtime)
+        canonical_health_root.chmod(0o700)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise MCPPermissionError("cannot prepare isolated MCP health workspace") from exc
+
+    permission_map: dict[MCPPermission, AgentToolPermission | None] = {
+        MCPPermission.READ: AgentToolPermission.READ,
+        MCPPermission.FILESYSTEM_READ: AgentToolPermission.READ,
+        MCPPermission.WRITE: AgentToolPermission.WRITE,
+        MCPPermission.FILESYSTEM_WRITE: AgentToolPermission.WRITE,
+        MCPPermission.PROCESS: AgentToolPermission.SHELL,
+        MCPPermission.NETWORK: AgentToolPermission.NETWORK,
+        MCPPermission.SECRETS: None,
+    }
+    permissions: set[AgentToolPermission] = set()
+    for permission in config.permissions:
+        mapped = permission_map[permission]
+        if mapped is None:
+            raise MCPPermissionError("MCP health never receives credential authority")
+        permissions.add(mapped)
+    return AgentToolPolicy(
+        workspace_roots=(Path(canonical_health_root),),
+        permissions=frozenset(permissions),
+        output_limit_chars=10_000,
+        file_limit_chars=1_048_576,
+        command_timeout_s=min(config.timeout_s, max(0.01, _MCP_HEALTH_TIMEOUT_S)),
+    )
+
+
+def _observe_mcp_health_task(task: asyncio.Task[Any]) -> None:
+    """Consume a detached cleanup/flight result so it cannot warn at exit."""
+    try:
+        task.exception()
+    except asyncio.CancelledError:
+        pass
+
+
+async def _close_mcp_health_provider(provider: Any) -> None:
+    """Close a probe provider without releasing its concurrency slot early.
+
+    ``StdioProvider.close`` owns the bounded TERM/KILL sequence and deliberately
+    delays cancellation until the child has been reaped. ``wait_for`` may thus
+    exceed this nominal timeout for that bounded termination and final reap;
+    keeping the await here prevents later probes from exceeding the process
+    concurrency bound.
+    """
+    timeout = max(0.001, float(_MCP_HEALTH_CLOSE_TIMEOUT_S))
+    try:
+        await asyncio.wait_for(provider.close(), timeout)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        pass
+
+
+async def _probe_mcp_health(
+    config: MCPServerConfig,
+    semaphore: asyncio.Semaphore,
+) -> dict[str, Any]:
+    """Initialize one safe provider briefly and return a redacted health row."""
+    item = _mcp_health_item(config)
+    if not config.enabled:
+        return {**item, "status": "disabled"}
+    if not config.is_local:
+        return {**item, "status": "skipped", "reason": "remote_not_probed"}
+    if config.uses_auth:
+        return {**item, "status": "skipped", "reason": "credentials_not_probed"}
+    if config.transport is not MCPTransport.STDIO:
+        return {**item, "status": "skipped", "reason": "transport_not_isolated"}
+
+    async with semaphore:
+        started = time.monotonic()
+        provider = None
+        try:
+            # Apply the health budget inside the transport as well. In
+            # particular, this bounds urllib's socket timeout even if the
+            # outer coroutine is cancelled while its worker thread is active.
+            transport_timeout = min(
+                config.timeout_s,
+                max(0.01, _MCP_HEALTH_TIMEOUT_S / 2),
+            )
+            # Discovery is observational even when the provider advertises
+            # mutating or networked tools. Do not hand those capabilities to
+            # startup code merely because an operator requested health.
+            probe_permissions = config.permissions & frozenset(
+                {
+                    MCPPermission.READ,
+                    MCPPermission.FILESYSTEM_READ,
+                }
+            )
+            probe_config = replace(
+                config,
+                timeout_s=transport_timeout,
+                max_output_bytes=min(config.max_output_bytes, _MCP_HEALTH_MAX_OUTPUT_BYTES),
+                permissions=probe_permissions,
+            )
+            probe_registry = MCPRegistry([probe_config])
+            provider = probe_registry.create_provider(
+                probe_config.name,
+                granted_permissions=probe_config.permissions,
+                agent_policy=_mcp_health_agent_policy(probe_config),
+            )
+
+            async def inspect_provider() -> Any:
+                await provider.initialize()
+                return await provider.list_tools()
+
+            payload = await asyncio.wait_for(inspect_provider(), _MCP_HEALTH_TIMEOUT_S)
+            tools = payload.get("tools") if isinstance(payload, dict) else None
+            if not isinstance(tools, list):
+                raise MCPProtocolError("MCP tools/list returned an invalid payload")
+            return {
+                **item,
+                "status": "ready",
+                "tool_count": len(tools),
+                "latency_ms": max(0, round((time.monotonic() - started) * 1000)),
+            }
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Every ordinary provider failure is reduced to a stable code.
+            status, reason = _mcp_health_failure(exc)
+            return {
+                **item,
+                "status": status,
+                "reason": reason,
+                "latency_ms": max(0, round((time.monotonic() - started) * 1000)),
+            }
+        finally:
+            if provider is not None:
+                await _close_mcp_health_provider(provider)
+
+
+async def _collect_mcp_health() -> dict[str, Any]:
+    """Build one bounded health snapshot for all concurrent HTTP callers."""
+    if _mcp_registry is None:
+        return {
+            "object": "mcp.health",
+            "status": "empty",
+            "summary": {"configured": 0, "reported": 0, "omitted": 0},
+            "data": [],
+        }
+
+    registry = _mcp_registry
+    configs = registry.list()
+    selected = configs[:_MCP_HEALTH_MAX_SERVERS]
+    semaphore = asyncio.Semaphore(max(1, int(_MCP_HEALTH_CONCURRENCY)))
+    data = await asyncio.gather(
+        *(_probe_mcp_health(config, semaphore) for config in selected)
+    )
+    counts = {
+        status: sum(item["status"] == status for item in data)
+        for status in ("ready", "unavailable", "timeout", "disabled", "skipped")
+    }
+    omitted = max(0, len(configs) - len(selected))
+    if not data:
+        overall = "empty"
+    elif counts["unavailable"] or counts["timeout"] or omitted:
+        overall = "degraded"
+    elif counts["ready"]:
+        overall = "ready"
+    else:
+        overall = "idle"
+    return {
+        "object": "mcp.health",
+        "status": overall,
+        "summary": {
+            "configured": len(configs),
+            "reported": len(data),
+            "omitted": omitted,
+            **counts,
+        },
+        "probe": {
+            "timeout_ms": round(_MCP_HEALTH_TIMEOUT_S * 1000),
+            "max_servers": _MCP_HEALTH_MAX_SERVERS,
+        },
+        "data": data,
+    }
+
+
+def _finish_mcp_health_flight(
+    loop: asyncio.AbstractEventLoop,
+    task: asyncio.Task[dict[str, Any]],
+) -> None:
+    """Forget a completed batch without racing a newly created replacement."""
+    with _MCP_HEALTH_FLIGHTS_LOCK:
+        if _MCP_HEALTH_FLIGHTS.get(loop) is task:
+            _MCP_HEALTH_FLIGHTS.pop(loop, None)
+    _observe_mcp_health_task(task)
+
+
+def _mcp_health_flight() -> asyncio.Task[dict[str, Any]]:
+    """Return the serving loop's existing probe batch or atomically start it."""
+    loop = asyncio.get_running_loop()
+    with _MCP_HEALTH_FLIGHTS_LOCK:
+        task = _MCP_HEALTH_FLIGHTS.get(loop)
+        if task is None or task.done():
+            task = loop.create_task(_collect_mcp_health(), name="mio-mcp-health")
+            _MCP_HEALTH_FLIGHTS[loop] = task
+            task.add_done_callback(
+                lambda completed, owner=loop: _finish_mcp_health_flight(owner, completed)
+            )
+        return task
+
+
+async def _cancel_mcp_health_flight() -> None:
+    """Cancel and join the current loop's batch during application shutdown."""
+    loop = asyncio.get_running_loop()
+    with _MCP_HEALTH_FLIGHTS_LOCK:
+        task = _MCP_HEALTH_FLIGHTS.pop(loop, None)
+    if task is None or task.done():
+        return
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+@app.post("/v1/mcp/health")
+async def mcp_health() -> dict[str, Any]:
+    """Return a shared, redacted and resource-bounded MCP health snapshot.
+
+    Remote and credential-bearing providers are never contacted. Concurrent
+    callers on the server loop share one probe batch, and cancelling one HTTP
+    request cannot cancel work still awaited by other callers. The POST route
+    is intentionally protected by the WebUI CSRF session because a probe can
+    launch local provider processes; declarations remain available through the
+    side-effect-free GET endpoint.
+    """
+    return await asyncio.shield(_mcp_health_flight())
 
 
 @app.post("/v1/chat/completions")
@@ -1601,7 +1909,12 @@ async def dashboard():
 @app.websocket("/ws/metrics")
 async def ws_metrics(websocket):
     from mio.dashboard import websocket_metrics
-    await websocket_metrics(websocket)
+
+    def manager_status() -> dict | None:
+        manager = _manager
+        return manager.status() if manager is not None else None
+
+    await websocket_metrics(websocket, manager_status_provider=manager_status)
 
 
 # --- Batch ---

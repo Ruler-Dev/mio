@@ -87,8 +87,13 @@ from engine startup. See [15 — MCP](15-mcp.md).
 Use the measured dense tier explicitly:
 
 ```bash
-mio --tier large
+mio --tier large --workspace .
 ```
+
+The agent displays its selected roots and capabilities. It prefers the nearest
+Git root, grants READ/WRITE/SHELL there, and keeps network disabled unless the
+session explicitly adds `--agent-network`. Use repeatable `--agent-root` only
+for additional directories the agent is meant to inspect or modify.
 
 Other entry points:
 

@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
+import platform
+import signal
+from pathlib import Path
 
 import pytest
 
+from mio.agent_policy import AgentToolPermission, AgentToolPolicy, sandboxed_command
 from mio.mcp import (
     MCPConfigError,
     MCPPermission,
@@ -17,6 +22,16 @@ from mio.mcp import (
 from mio.mcp.client import HTTPResponse, StdioProvider, _default_http_sender
 from mio.mcp.config import builtin_configs, default_config_path
 from mio.mcp.hub import MCPHub, MCPHubError, MCPHubPolicy
+
+
+def _agent_policy(
+    workspace: Path,
+    permissions: set[AgentToolPermission],
+) -> AgentToolPolicy:
+    return AgentToolPolicy(
+        workspace_roots=(workspace,),
+        permissions=frozenset(permissions),
+    )
 
 
 def test_local_servers_default_enabled_remote_and_auth_opt_in():
@@ -380,6 +395,122 @@ def test_hub_rechecks_policy_before_serving_cached_tool_schema():
         hub.close()
 
 
+def test_native_agent_policy_is_a_conservative_ceiling_for_every_mcp_permission(tmp_path):
+    config = MCPServerConfig(
+        name="capabilities",
+        transport=MCPTransport.STDIO,
+        command=("fake",),
+        permissions=frozenset(
+            {
+                MCPPermission.READ,
+                MCPPermission.WRITE,
+                MCPPermission.FILESYSTEM_READ,
+                MCPPermission.FILESYSTEM_WRITE,
+                MCPPermission.NETWORK,
+            }
+        ),
+    )
+    fake = _FakeProvider()
+    factory_calls = []
+    hub = MCPHub(
+        MCPRegistry([config]),
+        provider_factory=lambda *args: factory_calls.append(args) or fake,
+    )
+    all_permissions = {
+        AgentToolPermission.READ,
+        AgentToolPermission.WRITE,
+        AgentToolPermission.SHELL,
+        AgentToolPermission.NETWORK,
+    }
+    try:
+        for missing in sorted(all_permissions, key=lambda item: item.value):
+            policy = _agent_policy(tmp_path, all_permissions - {missing})
+            with pytest.raises(MCPHubError, match=rf"{missing.value} not granted"):
+                hub.list_tools("capabilities", agent_policy=policy)
+            assert factory_calls == []
+
+        full_policy = _agent_policy(tmp_path, all_permissions)
+        assert hub.list_tools("capabilities", agent_policy=full_policy)["tools"][0]["name"] == "echo"
+        assert len(factory_calls) == 1
+
+        # A less-privileged caller cannot reuse a provider/schema cached by a
+        # more-privileged agent invocation.
+        with pytest.raises(MCPHubError, match="network not granted"):
+            hub.list_tools(
+                "capabilities",
+                agent_policy=_agent_policy(
+                    tmp_path,
+                    all_permissions - {AgentToolPermission.NETWORK},
+                ),
+            )
+    finally:
+        hub.close()
+
+
+def test_native_agent_policy_never_grants_mcp_secrets(tmp_path):
+    config = MCPServerConfig(
+        name="credentialed",
+        transport=MCPTransport.STDIO,
+        command=("fake",),
+        enabled=True,
+        environment_env={"TOKEN": "MCP_TEST_TOKEN"},
+    )
+    factory_calls = []
+    hub = MCPHub(
+        MCPRegistry([config]),
+        policy=MCPHubPolicy(
+            allow_authenticated=True,
+            explicit_grants={config.name: config.permissions},
+        ),
+        provider_factory=lambda *args: factory_calls.append(args) or _FakeProvider(),
+    )
+    policy = _agent_policy(
+        tmp_path,
+        {
+            AgentToolPermission.READ,
+            AgentToolPermission.WRITE,
+            AgentToolPermission.SHELL,
+            AgentToolPermission.NETWORK,
+        },
+    )
+    try:
+        with pytest.raises(MCPHubError, match="requires secrets"):
+            hub.list_tools("credentialed", agent_policy=policy)
+    finally:
+        hub.close()
+    assert factory_calls == []
+
+
+def test_native_agent_denies_http_provider_even_with_network_grant(tmp_path):
+    config = MCPServerConfig(
+        name="remote",
+        transport=MCPTransport.HTTP,
+        url="https://example.test/mcp",
+        enabled=True,
+    )
+    factory_calls = []
+    hub = MCPHub(
+        MCPRegistry([config]),
+        policy=MCPHubPolicy(
+            allow_remote=True,
+            explicit_grants={
+                config.name: frozenset(
+                    {MCPPermission.NETWORK, MCPPermission.WRITE}
+                )
+            },
+        ),
+        provider_factory=lambda *args: factory_calls.append(args) or _FakeProvider(),
+    )
+    try:
+        policy = _agent_policy(tmp_path, {AgentToolPermission.NETWORK})
+        with pytest.raises(MCPHubError, match="confined stdio transport"):
+            hub.list_tools("remote", agent_policy=policy)
+    finally:
+        hub.close()
+
+    assert factory_calls == []
+
+
 def test_hub_checks_advertised_name_and_result_limit():
     config = MCPServerConfig(
         name="fake",
@@ -461,3 +592,407 @@ async def test_default_http_sender_disables_redirects(monkeypatch):
     )
     assert response.status == 302
     assert captured["handler"].redirect_request(None, None, 302, "", {}, "http://evil.test") is None
+
+
+@pytest.mark.asyncio
+async def test_native_agent_stdio_uses_narrow_sandbox_and_sanitized_environment(
+    monkeypatch,
+    tmp_path,
+):
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "mio-runtime"
+    workspace.mkdir()
+    runtime.mkdir()
+    runtime_bin = runtime / "bin"
+    runtime_bin.mkdir()
+    executable = runtime_bin / "provider"
+    executable.write_text("test", encoding="utf-8")
+    monkeypatch.setenv("HF_TOKEN", "must-not-leak")
+    captured = {}
+    process = _Process([b'{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}\n'])
+
+    def fake_sandbox(command, policy, *, read_only_roots=()):
+        captured["sandbox_command"] = command
+        captured["sandbox_policy"] = policy
+        captured["read_only_roots"] = tuple(read_only_roots)
+        return ["sandbox-wrapper", *command], {
+            "PATH": "/safe/bin",
+            "HOME": str(workspace),
+            "TMPDIR": str(workspace),
+            "ZDOTDIR": "/var/empty",
+        }
+
+    async def factory(*command, **kwargs):
+        captured["launched_command"] = command
+        captured["kwargs"] = kwargs
+        return process
+
+    monkeypatch.setattr("mio.mcp.client.sandboxed_command", fake_sandbox)
+    config = MCPServerConfig(
+        name="native",
+        transport=MCPTransport.STDIO,
+        command=(str(executable), "serve"),
+        permissions=frozenset({MCPPermission.READ}),
+        environment={"PROVIDER_MODE": "readonly"},
+    )
+    agent_policy = _agent_policy(
+        workspace,
+        {
+            AgentToolPermission.READ,
+            AgentToolPermission.WRITE,
+            AgentToolPermission.SHELL,
+            AgentToolPermission.NETWORK,
+        },
+    )
+    provider = MCPRegistry([config]).create_provider(
+        "native",
+        granted_permissions=config.permissions,
+        process_factory=factory,
+        agent_policy=agent_policy,
+        mio_runtime_root=runtime,
+    )
+
+    assert await provider.list_tools() == {"tools": []}
+    assert captured["sandbox_command"] == [str(executable), "serve"]
+    assert captured["launched_command"] == ("sandbox-wrapper", str(executable), "serve")
+    child_policy = captured["sandbox_policy"]
+    assert child_policy.workspace_roots == (workspace.resolve(),)
+    assert captured["read_only_roots"] == (runtime_bin.resolve(),)
+    assert child_policy.permissions == frozenset(
+        {AgentToolPermission.READ, AgentToolPermission.SHELL}
+    )
+    assert captured["kwargs"]["start_new_session"] is True
+    environment = captured["kwargs"]["env"]
+    assert environment["PATH"] == "/safe/bin"
+    assert environment["HOME"] == str(workspace.resolve())
+    assert environment["TMPDIR"] == str(workspace.resolve())
+    assert environment["MIO_HOME"] == str(runtime.resolve())
+    assert environment["PROVIDER_MODE"] == "readonly"
+    assert "HF_TOKEN" not in environment
+    assert captured["kwargs"]["cwd"] == str(workspace.resolve())
+    await provider.close()
+
+
+def test_native_agent_stdio_rejects_reserved_environment_override(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "mio-runtime"
+    workspace.mkdir()
+    runtime.mkdir()
+    monkeypatch.setattr(
+        "mio.mcp.client.sandboxed_command",
+        lambda command, _policy, **_kwargs: (command, {"PATH": "/safe/bin"}),
+    )
+    config = MCPServerConfig(
+        name="native",
+        transport=MCPTransport.STDIO,
+        command=("provider",),
+        environment={"PYTHONPATH": str(tmp_path / "injection")},
+    )
+    provider = StdioProvider(
+        config,
+        config.permissions,
+        agent_policy=_agent_policy(workspace, {AgentToolPermission.SHELL}),
+        mio_runtime_root=runtime,
+    )
+
+    with pytest.raises(MCPPermissionError, match="reserved variable 'PYTHONPATH'"):
+        provider._launch_spec()
+
+
+@pytest.mark.parametrize(
+    ("environment", "message"),
+    [
+        ({"OPENAI_API_KEY": "literal-secret"}, "literal credential 'OPENAI_API_KEY'"),
+        ({"PROXY_URL": "https://user:password@example.test"}, "URL cannot contain userinfo"),
+    ],
+)
+def test_native_agent_stdio_rejects_literal_credentials(
+    monkeypatch,
+    tmp_path,
+    environment,
+    message,
+):
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "mio-runtime"
+    workspace.mkdir()
+    runtime.mkdir()
+    sandbox_calls = 0
+
+    def fake_sandbox(command, _policy, **_kwargs):
+        nonlocal sandbox_calls
+        sandbox_calls += 1
+        return command, {"PATH": "/safe/bin"}
+
+    monkeypatch.setattr("mio.mcp.client.sandboxed_command", fake_sandbox)
+    config = MCPServerConfig(
+        name="native",
+        transport=MCPTransport.STDIO,
+        command=("provider",),
+        environment=environment,
+    )
+    provider = StdioProvider(
+        config,
+        config.permissions,
+        agent_policy=_agent_policy(workspace, {AgentToolPermission.SHELL}),
+        mio_runtime_root=runtime,
+    )
+
+    with pytest.raises(MCPPermissionError, match=message):
+        provider._launch_spec()
+    assert sandbox_calls == 1
+
+
+def test_hub_recreates_provider_when_native_agent_policy_fingerprint_changes(tmp_path):
+    first_workspace = tmp_path / "first"
+    second_workspace = tmp_path / "second"
+    first_workspace.mkdir()
+    second_workspace.mkdir()
+    config = MCPServerConfig(name="fake", transport=MCPTransport.STDIO, command=("fake",))
+    providers = []
+    received_policies = []
+
+    def factory(_name, _config, _granted, agent_policy):
+        provider = _FakeProvider()
+        providers.append(provider)
+        received_policies.append(agent_policy)
+        return provider
+
+    first_policy = _agent_policy(first_workspace, {AgentToolPermission.SHELL})
+    second_policy = _agent_policy(second_workspace, {AgentToolPermission.SHELL})
+    hub = MCPHub(MCPRegistry([config]), provider_factory=factory, tool_cache_ttl_s=60)
+    try:
+        assert hub.list_tools("fake", agent_policy=first_policy)["tools"]
+        assert hub.list_tools("fake", agent_policy=second_policy)["tools"]
+        assert hub.list_tools("fake", agent_policy=second_policy)["tools"]
+    finally:
+        hub.close()
+
+    assert received_policies == [first_policy, second_policy]
+    assert len(providers) == 2
+    assert providers[0].close_calls == 1
+    assert providers[1].close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_stdio_close_finishes_kill_and_reap_before_propagating_cancellation():
+    import asyncio
+
+    class BlockingProcess(_Process):
+        def __init__(self):
+            super().__init__([])
+            self.terminated = asyncio.Event()
+            self.reaped = asyncio.Event()
+            self.killed = False
+            self.wait_calls = 0
+
+        def terminate(self):
+            self.terminated.set()
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+            self.reaped.set()
+
+        async def wait(self):
+            self.wait_calls += 1
+            await self.reaped.wait()
+            return self.returncode
+
+    process = BlockingProcess()
+    config = MCPServerConfig(
+        name="test",
+        transport=MCPTransport.STDIO,
+        command=("fake",),
+        timeout_s=0.01,
+    )
+    provider = StdioProvider(config, config.permissions)
+    provider._process = process
+
+    close_task = asyncio.create_task(provider.close())
+    await process.terminated.wait()
+    close_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await close_task
+
+    assert provider._process is None
+    assert process.killed is True
+    assert process.reaped.is_set()
+    assert process.wait_calls >= 2
+
+
+def test_builtin_native_agent_launch_specs_separate_data_and_code_roots(monkeypatch, tmp_path):
+    runtime = tmp_path / "mio"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    release = runtime / "tools" / "mcp-releases" / "current" / "headroom"
+    headroom_executable = release / "bin" / "headroom"
+    headroom_executable.parent.mkdir(parents=True)
+    headroom_executable.write_text("test", encoding="utf-8")
+    runtime_bin = runtime / "bin"
+    runtime_bin.mkdir(parents=True)
+    (runtime_bin / "headroom").symlink_to(headroom_executable)
+    ponytail_root = runtime / "tools" / "sources" / "ponytail" / "ponytail-mcp"
+    ponytail_root.mkdir(parents=True)
+    (ponytail_root / "index.js").write_text("test", encoding="utf-8")
+    (ponytail_root.parent / "hooks").mkdir()
+
+    monkeypatch.setenv("MIO_HOME", str(runtime))
+    captured = []
+
+    def fake_sandbox(command, policy, *, read_only_roots=()):
+        captured.append((tuple(command), policy, tuple(read_only_roots)))
+        return ["sandbox", *command], {"PATH": "/safe/bin"}
+
+    monkeypatch.setattr("mio.mcp.client.sandboxed_command", fake_sandbox)
+    configs = {config.name: config for config in builtin_configs()}
+    permissions = {
+        AgentToolPermission.READ,
+        AgentToolPermission.WRITE,
+        AgentToolPermission.SHELL,
+        AgentToolPermission.NETWORK,
+    }
+    agent_policy = _agent_policy(workspace, permissions)
+
+    for name in ("headroom", "llm-wiki", "ponytail"):
+        StdioProvider(
+            configs[name],
+            configs[name].permissions,
+            agent_policy=agent_policy,
+            mio_runtime_root=runtime,
+        )._launch_spec()
+
+    (
+        (headroom_command, headroom_policy, headroom_read_only),
+        (wiki_command, wiki_policy, wiki_read_only),
+        (ponytail_command, ponytail_policy, ponytail_read_only),
+    ) = captured
+
+    assert headroom_command[0] == str(headroom_executable.resolve())
+    assert wiki_command == configs["llm-wiki"].command
+    assert ponytail_command[-1] == str((ponytail_root / "index.js").resolve())
+    assert headroom_policy.workspace_roots == (workspace.resolve(), (runtime / "headroom").resolve())
+    assert headroom_read_only == (release.resolve(),)
+    assert wiki_policy.workspace_roots == (workspace.resolve(), (runtime / "wiki").resolve())
+    assert Path(__file__).resolve().parents[1] in wiki_read_only
+    assert ponytail_policy.workspace_roots == (workspace.resolve(), (runtime / "config").resolve())
+    assert ponytail_read_only == (ponytail_root.parent.resolve(),)
+    assert runtime.resolve() not in {
+        *headroom_policy.workspace_roots,
+        *headroom_read_only,
+        *wiki_policy.workspace_roots,
+        *wiki_read_only,
+        *ponytail_policy.workspace_roots,
+        *ponytail_read_only,
+    }
+    assert (runtime / "headroom" / "config").is_dir()
+    assert (runtime / "wiki").is_dir()
+    assert (runtime / "config").is_dir()
+
+
+@pytest.mark.skipif(platform.system() != "Darwin", reason="Apple sandbox profile test")
+def test_sandbox_profile_never_grants_write_to_mcp_code_roots(tmp_path):
+    workspace = tmp_path / "workspace"
+    code_root = tmp_path / "runtime-code"
+    workspace.mkdir()
+    code_root.mkdir()
+    (code_root / "provider.py").write_text("pass", encoding="utf-8")
+    policy = _agent_policy(
+        workspace,
+        {
+            AgentToolPermission.READ,
+            AgentToolPermission.WRITE,
+            AgentToolPermission.SHELL,
+        },
+    )
+
+    command, _environment = sandboxed_command(
+        ["/usr/bin/true"],
+        policy,
+        read_only_roots=(code_root,),
+    )
+    profile = command[2]
+    allow_write_lines = [
+        line for line in profile.splitlines() if line.startswith("(allow file-write*")
+    ]
+    deny_write_lines = [
+        line for line in profile.splitlines() if line.startswith("(deny file-write*")
+    ]
+    assert all(str(code_root.resolve()) not in line for line in allow_write_lines)
+    assert any(str(code_root.resolve()) in line for line in deny_write_lines)
+
+
+@pytest.mark.asyncio
+async def test_stdio_reaps_dead_leader_group_before_replacing_process(monkeypatch):
+    class DeadProcess(_Process):
+        def __init__(self):
+            super().__init__([])
+            self.pid = 424242
+            self.returncode = 0
+            self.waited = False
+
+        async def wait(self):
+            self.waited = True
+            return self.returncode
+
+    old_process = DeadProcess()
+    new_process = _Process([b'{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}\n'])
+    factory_calls = 0
+
+    async def factory(*_command, **_kwargs):
+        nonlocal factory_calls
+        factory_calls += 1
+        return new_process
+
+    signals = []
+    monkeypatch.setattr(
+        "mio.mcp.client.os.killpg",
+        lambda pid, sent_signal: signals.append((pid, sent_signal)),
+    )
+    config = MCPServerConfig(name="test", transport=MCPTransport.STDIO, command=("fake",))
+    provider = StdioProvider(config, config.permissions, process_factory=factory)
+    provider._process = old_process
+
+    assert await provider.list_tools() == {"tools": []}
+    assert old_process.waited is True
+    assert (old_process.pid, signal.SIGKILL) in signals
+    assert factory_calls == 1
+    await provider.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+@pytest.mark.asyncio
+async def test_stdio_close_kills_real_child_group_after_leader_exits(tmp_path):
+    import asyncio
+
+    pid_file = tmp_path / "child.pid"
+    process = await asyncio.create_subprocess_exec(
+        "/bin/sh",
+        "-c",
+        '/bin/sleep 30 </dev/null >/dev/null 2>&1 & echo $! > "$PID_FILE"; exit 0',
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+        env={"PATH": "/usr/bin:/bin", "PID_FILE": str(pid_file)},
+        start_new_session=True,
+    )
+    assert await process.wait() == 0
+    child_pid = int(pid_file.read_text(encoding="utf-8").strip())
+    config = MCPServerConfig(name="test", transport=MCPTransport.STDIO, command=("fake",))
+    provider = StdioProvider(config, config.permissions)
+    provider._process = process
+
+    try:
+        await provider.close()
+        for _ in range(100):
+            try:
+                os.kill(child_pid, 0)
+            except ProcessLookupError:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("background child survived provider.close()")
+    finally:
+        try:
+            os.kill(child_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass

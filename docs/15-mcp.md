@@ -25,6 +25,20 @@ mio mcp list
 The server also exposes declarations at `GET /v1/mcp/servers`. That endpoint
 never starts or calls a provider.
 
+Settings uses the distinct CSRF-protected `POST /v1/mcp/health` endpoint. GET
+is intentionally unavailable because a health request can launch local
+processes. The POST briefly initializes only enabled, local, unauthenticated
+providers, with at most 32 reported servers, concurrency 8, a 3-second probe
+timeout, a 256 KiB response budget per provider, and a bounded close. Remote
+and credential-bearing entries are reported as skipped and are never
+contacted; local HTTP/SSE is also skipped because its external process cannot
+be confined. Each eligible stdio probe runs in a dedicated least-authority
+workspace with exact writable data/read-only runtime roots. The response
+includes only stable status/reason codes, latency, and tool count; it omits
+commands, URLs, environment, headers, tool names, credentials, and raw
+exception text. A failed optional provider degrades the panel but does not
+block Mio startup or inference.
+
 ## What “enabled by default” means
 
 Enabled means an unauthenticated local provider is eligible in Mio's registry,
@@ -38,14 +52,34 @@ mean:
 - remote, authenticated, or undeclared permissions are granted;
 - an optional missing executable prevents the inference engine from starting.
 
-Providers are created lazily on the first `list_mcp_tools` or `call_mcp_tool`.
+Providers are created lazily on the first `list_mcp_tools` or `call_mcp_tool`,
+or briefly by an explicit `/v1/mcp/health` request when they meet that
+endpoint's local/no-auth/stdio policy. Listing declarations never starts them.
 The generic bridge discovers the provider schema before a call, rejects tools
 the provider did not advertise, caps argument/result bytes, applies timeouts,
 caches discovery briefly, and closes child processes at shutdown. Remote or
 credential-bearing providers require explicit policy and per-server grants.
 
+The Settings panel has a manual Retry control for the bounded health probe. It
+does not grant MCP use, call any advertised tool, or change provider
+enablement. The probe strips write and network permissions, retaining only
+declared read access plus its confined stdio process launch; health visibility
+and model consent remain separate controls.
+
 The native agent includes the generic bridges and uses the default local hub
-policy. Mio UI adds a stricter layer: `list_mcp_tools` and `call_mcp_tool` are
+policy. Every native-agent discovery/call is also checked against its active
+`AgentToolPolicy`: MCP read/filesystem-read requires READ, write/filesystem-
+write requires WRITE, process requires SHELL, network requires NETWORK, and
+secret injection is never available to the model. A cached provider/schema is
+rechecked for every caller, so a less privileged turn cannot reuse a broader
+grant. Every stdio provider is launched under Mio's inherited OS sandbox with
+the exact agent roots, exact writable provider-data roots, and separate
+read-only executable/package roots. Literal credential-like environment
+values are rejected, and the entire process group is reaped on failure,
+timeout, cancellation, or clean leader exit. HTTP/SSE fails closed for the
+native agent because an external provider cannot inherit this confinement.
+
+Mio UI adds a stricter layer: `list_mcp_tools` and `call_mcp_tool` are
 classified as sensitive orchestration and are omitted from the model tool set
 unless their exact names are present both in `MIO_WEBUI_SKILL_GRANTS` and in
 that WebSocket request's `skill_grants`. A direct sensitive UI invocation also

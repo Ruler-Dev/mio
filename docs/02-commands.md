@@ -14,6 +14,9 @@ mio --context 32k
 mio --tq4
 mio --mpath 2
 mio --tandem
+mio --workspace .
+mio --agent-root ../shared-read-write
+mio --agent-network
 mio "inspect the current repository"
 ```
 
@@ -25,11 +28,20 @@ mio "inspect the current repository"
 | `--context SIZE` | override context (`32k`, `131072`, and similar forms) |
 | `--tq4` | select TQ4 and disable mutually exclusive PQ for this process |
 | `--mpath K` | set BMP path count |
+| `--workspace PATH` | set the primary agent root (default: nearest Git root, otherwise current directory) |
+| `--agent-root PATH` | add an explicit workspace root; repeatable |
+| `--agent-network` | grant shell/MCP network authority for this agent session |
+| `--unsafe-broad-workspace` | explicitly permit `/`, home, or another broad root that Mio otherwise refuses |
 | `prompt` | optional initial task |
 
 The native agent exposes filesystem/shell tools and Mio's
-`list_mio_skills`/`read_mio_skill` catalog tools. Run it only in a workspace
-whose files and commands it is allowed to inspect or modify.
+`list_mio_skills`/`read_mio_skill` catalog tools. Its CLI trust boundary grants
+READ/WRITE/SHELL only to the displayed roots. A real no-startup-file zsh runs
+inside Mio's default-deny macOS process sandbox; network remains a separate
+grant. Mio refuses account home, filesystem root, and broad system/volume roots unless the
+unsafe acknowledgement is explicit. Before launch, Mio rejects hard-linked
+regular files anywhere below the sandbox roots so an allowed pathname cannot
+alias an outside inode. Library callers without a policy are read-only.
 
 Current slash commands include `/model`, `/tier`, `/context`, `/caveman`,
 `/ponytail`, `/tq`, `/status`, `/models`, `/configure`, `/clear`, `/help`, and

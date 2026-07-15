@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
+import html
+import math
+import os
+import selectors
+import signal
 import subprocess
+import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from rich.console import Console
@@ -13,9 +21,23 @@ from rich.prompt import Prompt
 from mio.config import MioConfig
 from mio.engine import MioEngine
 from mio.model_manager import ModelManager
+from mio.agent_policy import (
+    AgentPathViolation,
+    AgentPermissionDenied,
+    AgentToolPermission,
+    AgentToolPolicy,
+    cap_tool_output,
+    is_broad_workspace_root,
+    read_workspace_text,
+    resolve_workspace_path,
+    sandboxed_command,
+    write_workspace_text,
+)
 from mio.prompt_policy import PromptMode, PromptPolicy, apply_prompt_policy
 
 console = Console()
+_MAX_TOOL_CALLS_PER_TURN = 32
+_MAX_TOOL_RESULT_CHARS_PER_TURN = 100_000
 
 # --- System Prompts ---
 
@@ -24,7 +46,9 @@ You have access to local coding, Mio skill-catalog, and permission-gated Mio MCP
 When the user asks you to write or modify code, do it directly. Be precise and concise.
 Always show the code you write or modify.
 When running bash commands, show the command and its output.
-If you encounter an error, fix it and retry."""
+If you encounter an error, fix it and retry.
+File tools are confined to declared workspace roots. Write, edit, and shell
+tools work only when the trusted caller explicitly granted their capability."""
 
 CAVEMAN_ULTRA = """
 COMMUNICATION MODE: ULTRA TERSE.
@@ -54,60 +78,430 @@ CAVEMAN_LEVELS = {
 
 # --- Tool Execution ---
 
-def tool_bash(command: str) -> str:
-    """Execute a shell command and return output."""
-    try:
-        result = subprocess.run(
-            command, shell=True, capture_output=True, text=True, timeout=30,
+def _default_read_policy() -> AgentToolPolicy:
+    """Compatibility boundary for direct, unprivileged read-tool callers."""
+
+    workspace = Path.cwd().resolve()
+    if is_broad_workspace_root(workspace):
+        return AgentToolPolicy(
+            workspace_roots=(workspace,),
+            permissions=frozenset(),
         )
-        output = result.stdout
-        if result.stderr:
-            output += "\n" + result.stderr
-        return output.strip() or "(no output)"
+    return AgentToolPolicy.read_only(workspace)
+
+
+def _policy_or_read_only(policy: AgentToolPolicy | None) -> AgentToolPolicy:
+    return policy if policy is not None else _default_read_policy()
+
+
+def _audit_target_for_command(command: str, argv: list[str] | None = None) -> str:
+    executable = Path(argv[0]).name if argv else "invalid"
+    digest = hashlib.sha256(command.encode("utf-8", errors="replace")).hexdigest()[:32]
+    return f"{executable} sha256:{digest}"
+
+
+def _capped(policy: AgentToolPolicy, text: str) -> str:
+    return cap_tool_output(text, policy.output_limit_chars)
+
+
+@dataclass(frozen=True)
+class _BoundedCommandResult:
+    output: str
+    returncode: int
+    timed_out: bool = False
+    output_exceeded: bool = False
+
+
+def _terminate_process_group(process: subprocess.Popen, *, grace_s: float = 0.05) -> None:
+    """Terminate the complete session created for one model-selected command."""
+
+    group_existed = False
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+        group_existed = True
+    except ProcessLookupError:
+        pass
+    except OSError:
+        pass
+    if group_existed and grace_s > 0:
+        time.sleep(grace_s)
+    if group_existed:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            pass
+    try:
+        process.wait(timeout=1.0)
     except subprocess.TimeoutExpired:
-        return "(command timed out after 30s)"
+        try:
+            process.kill()
+        except OSError:
+            pass
+        process.wait(timeout=1.0)
+
+
+def _run_bounded_process(
+    argv: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    timeout_s: float,
+    output_limit_chars: int,
+) -> _BoundedCommandResult:
+    """Run a command with bounded memory, input, lifetime, and descendants."""
+
+    max_output_bytes = max(128, output_limit_chars * 4)
+    process = subprocess.Popen(
+        argv,
+        shell=False,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        cwd=cwd,
+        env=env,
+        start_new_session=True,
+        close_fds=True,
+        bufsize=0,
+    )
+    if process.stdout is None:  # pragma: no cover - guaranteed by PIPE
+        _terminate_process_group(process)
+        raise RuntimeError("command output pipe was not created")
+
+    descriptor = process.stdout.fileno()
+    os.set_blocking(descriptor, False)
+    selector = selectors.DefaultSelector()
+    selector.register(descriptor, selectors.EVENT_READ)
+    captured = bytearray()
+    timed_out = False
+    output_exceeded = False
+    deadline = time.monotonic() + timeout_s
+
+    def drain_available() -> bool:
+        """Drain available bytes; return False after EOF."""
+
+        nonlocal output_exceeded
+        while True:
+            try:
+                chunk = os.read(descriptor, 65_536)
+            except BlockingIOError:
+                return True
+            if not chunk:
+                return False
+            remaining = max_output_bytes - len(captured)
+            if remaining > 0:
+                captured.extend(chunk[:remaining])
+            if len(chunk) > remaining:
+                output_exceeded = True
+                return True
+            if len(chunk) < 65_536:
+                return True
+
+    try:
+        while True:
+            remaining_s = deadline - time.monotonic()
+            if remaining_s <= 0:
+                timed_out = True
+                break
+            events = selector.select(timeout=min(0.05, remaining_s))
+            for _key, _mask in events:
+                if not drain_available():
+                    try:
+                        selector.unregister(descriptor)
+                    except KeyError:
+                        pass
+            if output_exceeded:
+                break
+            if process.poll() is not None:
+                # A non-interactive shell can exit while a background job still
+                # owns the pipe. Cleanup below kills that whole process group.
+                drain_available()
+                break
+    finally:
+        _terminate_process_group(process)
+        # Capture any final bytes already in the pipe without waiting for more.
+        drain_available()
+        selector.close()
+        process.stdout.close()
+
+    output = bytes(captured).decode("utf-8", errors="replace")
+    return _BoundedCommandResult(
+        output=output,
+        returncode=int(process.returncode if process.returncode is not None else -1),
+        timed_out=timed_out,
+        output_exceeded=output_exceeded,
+    )
+
+
+def _shell_argv(command: str, *, timeout_s: float) -> list[str]:
+    """Build a no-startup-file zsh with inherited hard resource ceilings."""
+
+    cpu_seconds = max(1, math.ceil(timeout_s) + 2)
+    wrapper = (
+        "ulimit -S -c 0 && ulimit -H -c 0 && "
+        "ulimit -S -n 256 && ulimit -H -n 256 && "
+        "ulimit -S -f 524288 && ulimit -H -f 524288 && "
+        f"ulimit -S -t {cpu_seconds} && ulimit -H -t {cpu_seconds} && "
+        'exec /bin/zsh -df +o BG_NICE -c "$1"'
+    )
+    return ["/bin/zsh", "-dfc", wrapper, "mio-agent-command", command]
+
+
+def _command_response(result: _BoundedCommandResult, policy: AgentToolPolicy) -> str:
+    suffix = ""
+    if result.timed_out:
+        suffix = f"(command timed out after {policy.command_timeout_s:g}s)"
+    elif result.output_exceeded:
+        suffix = "(command stopped: output limit exceeded)"
+    body = result.output.strip()
+    if suffix:
+        if len(suffix) >= policy.output_limit_chars:
+            return cap_tool_output(suffix, policy.output_limit_chars)
+        available = max(0, policy.output_limit_chars - len(suffix) - (1 if body else 0))
+        body = cap_tool_output(body, available) if available else ""
+        return cap_tool_output(
+            f"{body}\n{suffix}".strip(),
+            policy.output_limit_chars,
+        )
+    return cap_tool_output(body or "(no output)", policy.output_limit_chars)
+
+
+def tool_bash(command: str, *, policy: AgentToolPolicy | None = None) -> str:
+    """Execute a real shell inside an inherited workspace sandbox."""
+
+    active_policy = _policy_or_read_only(policy)
+    target = _audit_target_for_command(str(command))
+    try:
+        active_policy.require(AgentToolPermission.SHELL)
+        if not isinstance(command, str) or not command.strip():
+            raise ValueError("command must be a non-empty string")
+        shell_argv = _shell_argv(command, timeout_s=active_policy.command_timeout_s)
+        target = _audit_target_for_command(command, shell_argv)
+        sandboxed_argv, command_env = sandboxed_command(shell_argv, active_policy)
+        result = _run_bounded_process(
+            sandboxed_argv,
+            cwd=active_policy.primary_workspace,
+            env=command_env,
+            timeout_s=active_policy.command_timeout_s,
+            output_limit_chars=active_policy.output_limit_chars,
+        )
+        response = _command_response(result, active_policy)
+        outcome = "ok" if result.returncode == 0 else "nonzero"
+        if result.timed_out:
+            outcome = "timeout"
+        elif result.output_exceeded:
+            outcome = "output_limit"
+        active_policy.audit(
+            operation="bash",
+            permission=AgentToolPermission.SHELL,
+            target=target,
+            allowed=True,
+            outcome=outcome,
+            detail=f"returncode={result.returncode}; output_chars={len(response)}",
+        )
+        return response
+    except (AgentPermissionDenied, AgentPathViolation) as exc:
+        active_policy.audit(
+            operation="bash",
+            permission=AgentToolPermission.SHELL,
+            target=target,
+            allowed=False,
+            outcome="denied",
+            detail=str(exc),
+        )
+        return _capped(active_policy, f"(permission denied: {exc})")
     except Exception as e:
-        return f"(error: {e})"
+        active_policy.audit(
+            operation="bash",
+            permission=AgentToolPermission.SHELL,
+            target=target,
+            allowed=True,
+            outcome="error",
+            detail=f"{type(e).__name__}: {e}",
+        )
+        return cap_tool_output(f"(error: {e})", active_policy.output_limit_chars)
 
 
-def tool_read(path: str) -> str:
+def tool_read(path: str, *, policy: AgentToolPolicy | None = None) -> str:
     """Read a file and return its contents."""
+    active_policy = _policy_or_read_only(policy)
+    target = str(path)
     try:
-        p = Path(path).expanduser()
-        if not p.exists():
-            return f"(file not found: {path})"
-        content = p.read_text(errors="replace")
-        if len(content) > 10000:
-            return content[:10000] + f"\n... (truncated, {len(content)} chars total)"
-        return content
+        active_policy.require(AgentToolPermission.READ)
+        resolved = resolve_workspace_path(path, active_policy)
+        target = str(resolved.absolute)
+        content, truncated = read_workspace_text(
+            resolved,
+            max_chars=active_policy.output_limit_chars,
+        )
+        response = cap_tool_output(
+            content + ("\n... (output truncated)" if truncated else ""),
+            active_policy.output_limit_chars,
+        )
+        active_policy.audit(
+            operation="read",
+            permission=AgentToolPermission.READ,
+            target=target,
+            allowed=True,
+            outcome="ok",
+            detail=f"output_chars={len(response)}; truncated={str(truncated).lower()}",
+        )
+        return response
+    except FileNotFoundError:
+        active_policy.audit(
+            operation="read",
+            permission=AgentToolPermission.READ,
+            target=target,
+            allowed=True,
+            outcome="not_found",
+        )
+        return _capped(active_policy, f"(file not found: {path})")
+    except (AgentPermissionDenied, AgentPathViolation) as exc:
+        active_policy.audit(
+            operation="read",
+            permission=AgentToolPermission.READ,
+            target=target,
+            allowed=False,
+            outcome="denied",
+            detail=str(exc),
+        )
+        return _capped(active_policy, f"(permission denied reading {path}: {exc})")
     except Exception as e:
-        return f"(error reading {path}: {e})"
+        active_policy.audit(
+            operation="read",
+            permission=AgentToolPermission.READ,
+            target=target,
+            allowed=True,
+            outcome="error",
+            detail=f"{type(e).__name__}: {e}",
+        )
+        return _capped(active_policy, f"(error reading {path}: {e})")
 
 
-def tool_write(path: str, content: str) -> str:
+def tool_write(
+    path: str,
+    content: str,
+    *,
+    policy: AgentToolPolicy | None = None,
+) -> str:
     """Write content to a file."""
+    active_policy = _policy_or_read_only(policy)
+    target = str(path)
     try:
-        p = Path(path).expanduser()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content)
-        return f"(written {len(content)} chars to {path})"
+        active_policy.require(AgentToolPermission.WRITE)
+        if not isinstance(content, str):
+            raise TypeError("content must be a string")
+        if len(content) > active_policy.file_limit_chars:
+            raise AgentPathViolation("content exceeds the file-size policy limit")
+        resolved = resolve_workspace_path(path, active_policy)
+        target = str(resolved.absolute)
+        write_workspace_text(resolved, content)
+        active_policy.audit(
+            operation="write",
+            permission=AgentToolPermission.WRITE,
+            target=target,
+            allowed=True,
+            outcome="ok",
+            detail=f"content_chars={len(content)}",
+        )
+        return _capped(active_policy, f"(written {len(content)} chars to {path})")
+    except (AgentPermissionDenied, AgentPathViolation) as exc:
+        active_policy.audit(
+            operation="write",
+            permission=AgentToolPermission.WRITE,
+            target=target,
+            allowed=False,
+            outcome="denied",
+            detail=str(exc),
+        )
+        return _capped(active_policy, f"(permission denied writing {path}: {exc})")
     except Exception as e:
-        return f"(error writing {path}: {e})"
+        active_policy.audit(
+            operation="write",
+            permission=AgentToolPermission.WRITE,
+            target=target,
+            allowed=True,
+            outcome="error",
+            detail=f"{type(e).__name__}: {e}",
+        )
+        return _capped(active_policy, f"(error writing {path}: {e})")
 
 
-def tool_edit(path: str, old: str, new: str) -> str:
+def tool_edit(
+    path: str,
+    old: str,
+    new: str,
+    *,
+    policy: AgentToolPolicy | None = None,
+) -> str:
     """Replace a substring in a file."""
+    active_policy = _policy_or_read_only(policy)
+    target = str(path)
+    required_permission = AgentToolPermission.WRITE
     try:
-        p = Path(path).expanduser()
-        if not p.exists():
-            return f"(file not found: {path})"
-        text = p.read_text()
+        active_policy.require(required_permission)
+        required_permission = AgentToolPermission.READ
+        active_policy.require(required_permission)
+        resolved = resolve_workspace_path(path, active_policy)
+        target = str(resolved.absolute)
+        text, truncated = read_workspace_text(
+            resolved,
+            max_chars=active_policy.file_limit_chars,
+        )
+        if truncated:
+            raise AgentPathViolation("file exceeds the editable-size policy limit")
         if old not in text:
-            return f"(old_string not found in {path})"
-        p.write_text(text.replace(old, new, 1))
-        return f"(edited {path}: 1 replacement)"
+            active_policy.audit(
+                operation="edit",
+                permission=AgentToolPermission.WRITE,
+                target=target,
+                allowed=True,
+                outcome="old_string_not_found",
+            )
+            return _capped(active_policy, f"(old_string not found in {path})")
+        replacement = text.replace(old, new, 1)
+        if len(replacement) > active_policy.file_limit_chars:
+            raise AgentPathViolation("edited file exceeds the file-size policy limit")
+        write_workspace_text(resolved, replacement)
+        active_policy.audit(
+            operation="edit",
+            permission=AgentToolPermission.WRITE,
+            target=target,
+            allowed=True,
+            outcome="ok",
+            detail="replacements=1",
+        )
+        return _capped(active_policy, f"(edited {path}: 1 replacement)")
+    except FileNotFoundError:
+        active_policy.audit(
+            operation="edit",
+            permission=AgentToolPermission.WRITE,
+            target=target,
+            allowed=True,
+            outcome="not_found",
+        )
+        return _capped(active_policy, f"(file not found: {path})")
+    except (AgentPermissionDenied, AgentPathViolation) as exc:
+        active_policy.audit(
+            operation="edit",
+            permission=required_permission,
+            target=target,
+            allowed=False,
+            outcome="denied",
+            detail=str(exc),
+        )
+        return _capped(active_policy, f"(permission denied editing {path}: {exc})")
     except Exception as e:
-        return f"(error editing {path}: {e})"
+        active_policy.audit(
+            operation="edit",
+            permission=AgentToolPermission.WRITE,
+            target=target,
+            allowed=True,
+            outcome="error",
+            detail=f"{type(e).__name__}: {e}",
+        )
+        return _capped(active_policy, f"(error editing {path}: {e})")
 
 
 def tool_list_mio_skills(
@@ -136,60 +530,104 @@ def tool_read_mio_skill(name: str, max_chars: int = 32_000) -> str:
     return json.dumps(read_mio_skill(name=name, max_chars=max_chars), ensure_ascii=False)
 
 
-def tool_list_mcp_tools(server: str) -> str:
+def tool_list_mcp_tools(
+    server: str,
+    *,
+    policy: AgentToolPolicy | None = None,
+) -> str:
     """Discover tools on one enabled local Mio MCP server."""
     import json
 
     from mio.mcp import list_mcp_tools
 
-    return json.dumps(list_mcp_tools(server), ensure_ascii=False)
+    active_policy = _policy_or_read_only(policy)
+    return json.dumps(
+        list_mcp_tools(server, agent_policy=active_policy),
+        ensure_ascii=False,
+    )
 
 
-def tool_call_mcp_tool(server: str, name: str, arguments: dict | None = None) -> str:
+def tool_call_mcp_tool(
+    server: str,
+    name: str,
+    arguments: dict | None = None,
+    *,
+    policy: AgentToolPolicy | None = None,
+) -> str:
     """Call one advertised tool on an enabled local Mio MCP server."""
     import json
 
     from mio.mcp import call_mcp_tool
 
-    return json.dumps(call_mcp_tool(server, name, arguments or {}), ensure_ascii=False)
+    active_policy = _policy_or_read_only(policy)
+    return json.dumps(
+        call_mcp_tool(
+            server,
+            name,
+            arguments or {},
+            agent_policy=active_policy,
+        ),
+        ensure_ascii=False,
+    )
 
 
 # Tool registry used by the native agent's tool-use loop.
 AGENT_TOOLS = {
-    "bash":  {"fn": tool_bash,  "args": ["command"]},
-    "read":  {"fn": tool_read,  "args": ["path"]},
-    "write": {"fn": tool_write, "args": ["path", "content"]},
-    "edit":  {"fn": tool_edit,  "args": ["path", "old", "new"]},
+    "bash": {
+        "fn": tool_bash,
+        "args": ["command"],
+        "permission": AgentToolPermission.SHELL,
+    },
+    "read": {
+        "fn": tool_read,
+        "args": ["path"],
+        "permission": AgentToolPermission.READ,
+    },
+    "write": {
+        "fn": tool_write,
+        "args": ["path", "content"],
+        "permission": AgentToolPermission.WRITE,
+    },
+    "edit": {
+        "fn": tool_edit,
+        "args": ["path", "old", "new"],
+        "permission": AgentToolPermission.WRITE,
+    },
     "list_mio_skills": {
         "fn": tool_list_mio_skills,
         "args": ["query", "tag", "source", "limit"],
     },
     "read_mio_skill": {"fn": tool_read_mio_skill, "args": ["name", "max_chars"]},
-    "list_mcp_tools": {"fn": tool_list_mcp_tools, "args": ["server"]},
+    "list_mcp_tools": {
+        "fn": tool_list_mcp_tools,
+        "args": ["server"],
+        "inject_policy": True,
+    },
     "call_mcp_tool": {
         "fn": tool_call_mcp_tool,
         "args": ["server", "name", "arguments"],
+        "inject_policy": True,
     },
 }
 
 AGENT_TOOLS_SPEC = [
     {"type": "function", "function": {
         "name": "bash",
-        "description": "Run a shell command and return stdout+stderr. Use for listing files, running tests, git, curl, etc. 30s timeout.",
+        "description": "Run a zsh command (including pipes, redirections, and scripts) in an inherited workspace sandbox. Requires the caller's shell grant; network needs a separate caller grant; output and runtime are capped.",
         "parameters": {"type": "object", "properties": {
             "command": {"type": "string", "description": "Shell command to run"},
         }, "required": ["command"]},
     }},
     {"type": "function", "function": {
         "name": "read",
-        "description": "Read a file's contents (truncated at 10000 chars). Use absolute paths or ~.",
+        "description": "Read a regular, non-symlink file inside a caller-allowed workspace. Output is capped by policy.",
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string"},
         }, "required": ["path"]},
     }},
     {"type": "function", "function": {
         "name": "write",
-        "description": "Create or overwrite a file with `content`. Parent directories are created automatically. Use for creating new files from scratch.",
+        "description": "Atomically create or overwrite a non-symlink file inside a caller-allowed workspace. Requires the caller's write grant.",
         "parameters": {"type": "object", "properties": {
             "path":    {"type": "string"},
             "content": {"type": "string"},
@@ -197,7 +635,7 @@ AGENT_TOOLS_SPEC = [
     }},
     {"type": "function", "function": {
         "name": "edit",
-        "description": "Replace a substring in an existing file. Fails if `old` isn't present. Use for surgical edits instead of rewriting the whole file.",
+        "description": "Replace a substring in a confined regular file. Requires the caller's read and write grants.",
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string"},
             "old":  {"type": "string", "description": "Exact substring to replace"},
@@ -498,11 +936,16 @@ def run_agent(
     tier: str = "large-moe",
     initial_prompt: str | None = None,
     prompt_policy: PromptPolicy | None = None,
+    tool_policy: AgentToolPolicy | None = None,
 ) -> None:
     """Run the interactive coding agent."""
+    # Library callers that omit a policy are intentionally read-only. The
+    # native CLI passes its named coding policy explicitly at the trust edge.
+    declared_tool_policy = tool_policy or _default_read_policy()
     state = {
         "tier": tier,
         "prompt_policy": prompt_policy or PromptPolicy(),
+        "tool_policy": declared_tool_policy,
         "messages": [],
     }
 
@@ -569,6 +1012,9 @@ def _process_user_input(
 
     # Build system prompt (selected policy + hint that tools are real)
     prompt_policy = state.get("prompt_policy", PromptPolicy())
+    tool_policy = state.get("tool_policy")
+    if not isinstance(tool_policy, AgentToolPolicy):
+        tool_policy = _default_read_policy()
     system_prompt = AGENT_SYSTEM_PROMPT
 
     # Initial messages
@@ -586,6 +1032,8 @@ def _process_user_input(
 
     MAX_ROUNDS = 5
     assistant_text_accum: list[str] = []
+    tool_calls_used = 0
+    tool_result_chars = 0
 
     for round_idx in range(MAX_ROUNDS):
         console.print("[bold green]Mio[/bold green]: ", end="")
@@ -629,19 +1077,45 @@ def _process_user_input(
             except Exception:
                 args = {}
             spec = AGENT_TOOLS.get(name)
-            if not spec:
+            tool_calls_used += 1
+            if tool_calls_used > _MAX_TOOL_CALLS_PER_TURN:
+                result = "(tool call budget exhausted for this turn)"
+            elif tool_result_chars >= _MAX_TOOL_RESULT_CHARS_PER_TURN:
+                result = "(tool result budget exhausted for this turn)"
+            elif not spec:
                 result = f"(unknown tool: {name})"
             else:
                 try:
                     kwargs = {k: args[k] for k in spec["args"] if k in args}
+                    if "permission" in spec or spec.get("inject_policy"):
+                        kwargs["policy"] = tool_policy
                     result = spec["fn"](**kwargs)
                 except Exception as e:
                     result = f"(tool error: {type(e).__name__}: {e})"
-            preview = ", ".join(repr(args.get(k, ""))[:40] for k in (spec["args"] if spec else []))
-            console.print(f"[dim cyan]  ◆ {name}({preview}) → {str(result)[:120]}[/dim cyan]")
+            remaining_result_chars = max(
+                0,
+                _MAX_TOOL_RESULT_CHARS_PER_TURN - tool_result_chars,
+            )
+            per_call_limit = min(tool_policy.output_limit_chars, remaining_result_chars)
+            result = (
+                cap_tool_output(str(result), per_call_limit)
+                if per_call_limit
+                else "(tool result budget exhausted for this turn)"
+            )
+            tool_result_chars += len(result)
+            preview = ", ".join(k for k in (spec["args"] if spec else []) if k in args)
+            console.print(
+                f"  ◆ {name}({preview}) → {str(result)[:120]}",
+                style="dim cyan",
+                markup=False,
+            )
+            safe_name = html.escape(str(name), quote=True)
+            safe_result = html.escape(str(result), quote=False)
             current_messages.append({
                 "role": "user",
-                "content": f"<tool_response name=\"{name}\">{result}</tool_response>",
+                "content": (
+                    f'<tool_response name="{safe_name}">{safe_result}</tool_response>'
+                ),
             })
 
     console.print()

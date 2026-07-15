@@ -131,7 +131,7 @@ applications.
 
 ```bash
 # Native coding agent. The first persisted active tier is used unless set.
-mio --tier large
+mio --tier large --workspace .
 
 # Headless chat.
 mio chat --tier large --prompt-mode none
@@ -142,6 +142,24 @@ mio serve --tier large
 # API plus browser UI at http://127.0.0.1:9090/ui.
 mio serve --tier large --webui
 ```
+
+Native agent file and shell tools are governed by Mio's own tool policy. The
+CLI grants its displayed workspace read/write/shell access and preserves a real
+`zsh` for pipes, redirects, and scripts needed by agent ecosystems such as
+Hermes or OpenClaw. Child commands run inside a workspace-confined inherited
+macOS default-deny sandbox with a sanitized environment, bounded descendants,
+timeout/output caps, and network disabled unless `--agent-network` grants it
+for that session. A fail-closed hard-link preflight prevents allowed pathnames
+from aliasing outside inodes. `--agent-root` adds a deliberate extra root;
+home, `/`, and broad system/volume roots require
+`--unsafe-broad-workspace`. Library callers that omit a policy are read-only;
+the model cannot expand its own roots or permissions.
+
+The main chat shell also serves its versioned Marked/Prism runtime locally, so
+Markdown and code highlighting do not need a CDN at boot. Optional artifact
+renderers may still load their separately sandboxed libraries on demand. The
+redistributed asset licenses are retained in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 The server binds to `127.0.0.1` by default and refuses a non-loopback address
 unless `--unsafe-remote-bind` (or `MIO_UNSAFE_REMOTE_BIND=1`) is supplied.
@@ -213,6 +231,13 @@ mio mcp enable ponytail
 mio serve --mcp-config ~/.mio/mcp.json
 ```
 
+Mio UI Settings reports provider readiness through the CSRF-protected
+`POST /v1/mcp/health`. The POST boundary matters because a probe can launch a
+local provider process. It contacts only enabled local unauthenticated
+stdio providers under fixed budgets and a dedicated least-authority sandbox;
+remote, authenticated and unisolatable HTTP/SSE entries are skipped. Commands,
+URLs, tool names, secrets, and raw errors are never returned to the browser.
+
 The built-in presets are:
 
 - `llm-wiki`: Mio's local Karpathy-style evidence wiki;
@@ -263,7 +288,10 @@ instead of receiving one schema per managed skill on every request. The 916
 figure is the installer-verified count at the pinned reviewed revisions, not a
 hard-coded live total: unmanaged Mio-local skills may make discovery return a
 different number. Repository code is not executed during reading; executable
-runners require a separate explicit trust path. See
+runners require a separate explicit trust path. When an authorized Mio agent
+does need a skill's shell workflow, it receives the same real-zsh semantics
+inside the agent workspace sandbox; shell, network, and extra roots remain
+separate trusted-caller grants. See
 [docs/14-external-skills.md](docs/14-external-skills.md).
 
 ## Cache modes and speculative paths

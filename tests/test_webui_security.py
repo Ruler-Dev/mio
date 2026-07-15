@@ -236,8 +236,26 @@ def test_markdown_and_artifact_renderers_use_local_security_boundary():
     top_level_head = shell.split("<!-- Modular feature modules", 1)[0]
     parser = _RemoteAssetParser()
     parser.feed(top_level_head)
-    assert parser.remote_assets
-    assert all(asset.get("integrity", "").startswith("sha384-") for asset in parser.remote_assets)
+    assert parser.remote_assets == []
+    vendored = [
+        "vendor_marked_12.0.2.min.js",
+        "vendor_prism_1.29.0.js",
+        "vendor_prism_python_1.29.0.min.js",
+        "vendor_prism_typescript_1.29.0.min.js",
+        "vendor_prism_jsx_1.29.0.min.js",
+        "vendor_prism_tsx_1.29.0.min.js",
+        "vendor_prism_bash_1.29.0.min.js",
+        "vendor_prism_json_1.29.0.min.js",
+        "vendor_prism_css_1.29.0.min.js",
+        "vendor_prism_sql_1.29.0.min.js",
+        "vendor_prism_rust_1.29.0.min.js",
+        "vendor_prism_go_1.29.0.min.js",
+        "vendor_prism_yaml_1.29.0.min.js",
+        "vendor_prism_tomorrow_1.29.0.min.css",
+    ]
+    for name in vendored:
+        assert f'/ui/assets/{name}' in top_level_head
+        assert (root / "mio/webui/assets" / name).stat().st_size > 0
 
 
 class _RemoteAssetParser(HTMLParser):
@@ -318,6 +336,10 @@ def _security_test_app(
     @application.post("/v1/mutate")
     async def api_mutate():
         return {"native": True}
+
+    @application.post("/v1/mcp/health")
+    async def mcp_health_probe():
+        return {"probed": True}
 
     @application.post("/v1/read-body")
     async def api_read_body(request: Request):
@@ -518,6 +540,33 @@ def test_cross_origin_browser_v1_mutation_is_denied_but_native_client_is_allowed
         "/v1/mutate",
         headers={"Origin": "http://127.0.0.1:9090", "Sec-Fetch-Site": "same-origin"},
     ).json() == {"native": True}
+
+
+def test_side_effectful_mcp_health_probe_requires_webui_csrf_session():
+    reset_web_security_state()
+    client = TestClient(_security_test_app(), base_url="http://127.0.0.1:9090")
+
+    # A drive-by page cannot trigger provider process launches through an
+    # image/no-CORS GET or an unauthenticated form POST.
+    assert client.get("/v1/mcp/health").status_code == 405
+    assert client.post("/v1/mcp/health").status_code == 403
+    assert client.post(
+        "/v1/mcp/health",
+        headers={"Origin": "https://attacker.example", "Sec-Fetch-Site": "cross-site"},
+    ).status_code == 403
+
+    assert client.get("/ui").status_code == 200
+    csrf = client.cookies.get("mio_csrf")
+    assert csrf
+    response = client.post(
+        "/v1/mcp/health",
+        headers={
+            "X-Mio-CSRF-Token": csrf,
+            "Origin": "http://127.0.0.1:9090",
+            "Sec-Fetch-Site": "same-origin",
+        },
+    )
+    assert response.json() == {"probed": True}
 
 
 def test_explicit_cors_origin_can_call_api_but_does_not_broaden_other_origins(monkeypatch):
@@ -826,19 +875,24 @@ def test_all_webui_javascript_has_valid_syntax(tmp_path):
         if result.returncode:
             failures.append(f"{path.name}: {result.stderr}")
 
-    collector = _InlineScriptCollector()
-    collector.feed((root / "mio/webui/mio_ui.html").read_text())
-    assert collector.scripts, "no inline scripts found"
-    for index, source in enumerate(collector.scripts):
-        path = tmp_path / f"inline-{index}.js"
-        path.write_text(source)
-        result = subprocess.run(
-            ["node", "--check", str(path)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode:
-            failures.append(f"mio_ui.html script {index}: {result.stderr}")
+    html_pages = [
+        root / "mio/webui/mio_ui.html",
+        root / "mio/webui/assets/compare.html",
+    ]
+    for page in html_pages:
+        collector = _InlineScriptCollector()
+        collector.feed(page.read_text())
+        assert collector.scripts, f"no inline scripts found in {page.name}"
+        for index, source in enumerate(collector.scripts):
+            path = tmp_path / f"{page.stem}-inline-{index}.js"
+            path.write_text(source)
+            result = subprocess.run(
+                ["node", "--check", str(path)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode:
+                failures.append(f"{page.name} script {index}: {result.stderr}")
 
     assert failures == []

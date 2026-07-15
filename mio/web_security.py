@@ -581,7 +581,12 @@ class WebSecurityMiddleware:
             scope.setdefault("state", {})["mio_ui_session"] = new_session[0]
             scope["state"]["mio_csrf_token"] = new_session[1]
 
-        protected = method in _UNSAFE_METHODS and path.startswith("/ui/api/")
+        # MCP health is operational rather than observational: probing can
+        # launch local provider processes. Keep it behind the same WebUI CSRF
+        # session as mutations even though its stable API path is under /v1.
+        protected = method in _UNSAFE_METHODS and (
+            path.startswith("/ui/api/") or path == "/v1/mcp/health"
+        )
         browser_signaled = any(
             _header_values(scope, header)
             for header in ("origin", "referer", "sec-fetch-site")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 
 def _add_prompt_policy_arguments(
@@ -121,6 +122,33 @@ def _configured_tier_name(config, requested: str | None = None) -> str:
     if "large-moe" in config.tiers:
         return "large-moe"
     return next(iter(config.tiers), "large-moe")
+
+
+def _agent_workspace_root(
+    requested: str | None,
+    *,
+    unsafe_broad: bool,
+) -> Path:
+    """Resolve a narrow agent root, preferring the nearest VCS boundary."""
+
+    from mio.agent_policy import is_broad_workspace_root
+
+    candidate = Path(requested).expanduser() if requested else Path.cwd()
+    candidate = candidate.resolve(strict=True)
+    if not candidate.is_dir():
+        raise ValueError(f"agent workspace is not a directory: {candidate}")
+    if requested is None:
+        for directory in (candidate, *candidate.parents):
+            if (directory / ".git").exists():
+                candidate = directory
+                break
+
+    if is_broad_workspace_root(candidate) and not unsafe_broad:
+        raise ValueError(
+            f"refusing broad agent workspace {candidate}; choose --workspace PROJECT "
+            "or acknowledge it with --unsafe-broad-workspace"
+        )
+    return candidate
 
 
 def main() -> None:
@@ -340,6 +368,27 @@ def main() -> None:
         type=str,
         default=None,
         help="Override context window for agent mode: '8k', '32k', '128k', etc., or a raw integer.",
+    )
+    parser.add_argument(
+        "--workspace",
+        default=None,
+        help="Agent workspace root (default: nearest Git root, otherwise current directory).",
+    )
+    parser.add_argument(
+        "--agent-root",
+        action="append",
+        default=[],
+        help="Additional agent workspace root (repeatable; trusted caller grant).",
+    )
+    parser.add_argument(
+        "--agent-network",
+        action="store_true",
+        help="Allow network access from the native agent shell/MCP policy for this session.",
+    )
+    parser.add_argument(
+        "--unsafe-broad-workspace",
+        action="store_true",
+        help="Allow /, home, or another broad system root as the agent workspace.",
     )
     _add_prompt_policy_arguments(parser, dest_prefix="agent_")
     parser.add_argument("prompt", nargs="*", default=[], help="Initial prompt for agent mode")
@@ -744,6 +793,7 @@ def _cmd_status(args) -> None:
 def _cmd_native_agent(args) -> None:
     """Launch the Mio coding agent."""
     from mio.agent import run_agent
+    from mio.agent_policy import AgentToolPolicy
     from mio.config import load_config
     from mio.model_manager import ModelManager
 
@@ -764,9 +814,29 @@ def _cmd_native_agent(args) -> None:
     _apply_mpath_flag(config, config.active_tiers, getattr(args, "mpath", 1))
     _apply_context_flag(config, config.active_tiers, _parse_context(getattr(args, "context", None)))
 
+    unsafe_broad = bool(getattr(args, "unsafe_broad_workspace", False))
+    workspace = _agent_workspace_root(
+        getattr(args, "workspace", None),
+        unsafe_broad=unsafe_broad,
+    )
+    additional_roots = tuple(
+        _agent_workspace_root(root, unsafe_broad=unsafe_broad)
+        for root in (getattr(args, "agent_root", None) or [])
+    )
+    tool_policy = AgentToolPolicy.coding_workspace(
+        workspace,
+        additional_roots=additional_roots,
+        allow_network=bool(getattr(args, "agent_network", False)),
+    )
+
     manager = ModelManager(config)
     console_import = __import__("rich.console", fromlist=["Console"])
     c = console_import.Console()
+    capabilities = ", ".join(
+        sorted(permission.value for permission in tool_policy.permissions)
+    )
+    roots = ", ".join(str(root) for root in tool_policy.workspace_roots)
+    c.print(f"[dim]Agent policy: {capabilities}; roots: {roots}[/dim]")
     c.print(f"[dim]Loading {tier} tier...[/dim]")
     manager.load_active_tiers()
 
@@ -777,6 +847,9 @@ def _cmd_native_agent(args) -> None:
         tier=tier,
         initial_prompt=initial,
         prompt_policy=getattr(args, "prompt_policy", None),
+        # Agent mode is an explicit coding trust boundary. Other run_agent()
+        # callers remain read-only unless they declare their own policy.
+        tool_policy=tool_policy,
     )
     manager.unload_all()
 

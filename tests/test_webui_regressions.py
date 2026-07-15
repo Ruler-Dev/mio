@@ -16,6 +16,48 @@ import pytest
 from mio.webui import router, scheduler, webhooks
 
 
+def test_sovereignty_onboarding_opens_the_real_network_monitor():
+    asset = Path(__file__).parents[1] / "mio" / "webui" / "assets" / "onboarding_sovereignty.js"
+    source = asset.read_text(encoding="utf-8")
+
+    assert 'data-act="noop"' not in source
+    assert 'data-act="network"' in source
+    assert 'document.querySelector(".mio-sovereignty .mio-sov-net")' in source
+    assert "networkMonitor.click();" in source
+
+
+def test_compare_requires_two_distinct_real_models():
+    page = Path(__file__).parents[1] / "mio" / "webui" / "assets" / "compare.html"
+    source = page.read_text(encoding="utf-8")
+
+    assert "TIERS.length === 1" in source
+    assert "left.value === right.value" in source
+    assert "both sides must be distinct" in source
+    assert "runButton.disabled = true" in source
+    assert "['small', 'medium', 'large', 'large-moe']" not in source
+    assert "if (!prompt || !validateComparison()) return;" in source
+
+
+def test_settings_mcp_health_panel_is_retryable_and_uses_safe_dom_rendering():
+    root = Path(__file__).parents[1]
+    shell = (root / "mio" / "webui" / "mio_ui.html").read_text(encoding="utf-8")
+    css = (root / "mio" / "webui" / "assets" / "main.css").read_text(encoding="utf-8")
+    health_ui = shell.split("function renderMcpHealth(payload)", 1)[1].split(
+        "function openSettings()", 1
+    )[0]
+
+    assert 'id="mcpHealthRetry"' in shell
+    assert "fetch('/v1/mcp/health'" in health_ui
+    assert "method: 'POST'" in health_ui
+    assert "list.replaceChildren();" in health_ui
+    assert "name.textContent" in health_ui
+    assert ".innerHTML" not in health_ui
+    assert "retry.disabled = true" in health_ui
+    assert "refreshMcpHealth();" in shell.split("function openSettings()", 1)[1]
+    assert ".mcp-health-card" in css
+    assert '.mcp-health-state[data-state="degraded"]' in css
+
+
 def test_emoji_button_uses_parent_prepend_instead_of_descendant_insert_before():
     asset = Path(__file__).parents[1] / "mio" / "webui" / "assets" / "emoji.js"
     source = asset.read_text(encoding="utf-8")
