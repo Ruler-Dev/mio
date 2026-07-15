@@ -5,6 +5,7 @@ position-aware path is correct for sparse positions too.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -13,14 +14,21 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from experimental.spec_prefill.sparse_attention import sparse_model_forward  # type: ignore
+from mio.models.registry import _model_path_is_complete
 
 
 @pytest.fixture(scope="module")
 def loaded_qwen3():
     """Load Qwen3-8B once for all tests."""
     from mlx_lm.utils import load
-    target_path = "/Users/ruler/Documents/mio/models/Qwen3-8B-4bit"
-    model, tokenizer = load(target_path)
+
+    default_path = Path(__file__).resolve().parents[2] / "models" / "Qwen3-8B-4bit"
+    target_path = Path(os.environ.get("MIO_QWEN3_TEST_MODEL", default_path)).expanduser()
+    if not _model_path_is_complete(target_path):
+        pytest.skip(
+            "requires a complete Qwen3-8B MLX checkpoint; set MIO_QWEN3_TEST_MODEL"
+        )
+    model, tokenizer = load(str(target_path))
     mx.eval(model.parameters())
     return model, tokenizer
 

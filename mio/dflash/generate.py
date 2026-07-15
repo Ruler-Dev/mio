@@ -19,6 +19,13 @@ from mio.dflash.runtime import (
 
 
 DRAFT_REGISTRY = {
+    # Qwen 3.6 targets
+    "Qwen/Qwen3.6-27B": "z-lab/Qwen3.6-27B-DFlash",
+    "Qwen/Qwen3.6-35B-A3B": "z-lab/Qwen3.6-35B-A3B-DFlash",
+    "mlx-community/Qwen3.6-27B-4bit": "z-lab/Qwen3.6-27B-DFlash",
+    "mlx-community/Qwen3.6-35B-A3B-4bit": "z-lab/Qwen3.6-35B-A3B-DFlash",
+    "Brooooooklyn/Qwen3.6-27B-UD-Q4_K_XL-mlx": "z-lab/Qwen3.6-27B-DFlash",
+    "Brooooooklyn/Qwen3.6-35B-A3B-UD-Q4_K_XL-mlx": "z-lab/Qwen3.6-35B-A3B-DFlash",
     # Original HF repos
     "Qwen/Qwen3.5-4B": "z-lab/Qwen3.5-4B-DFlash",
     "Qwen/Qwen3.5-9B": "z-lab/Qwen3.5-9B-DFlash",

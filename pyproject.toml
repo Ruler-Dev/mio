@@ -10,54 +10,79 @@ license = "MIT"
 # tesseract for OCR) degrades gracefully.
 dependencies = [
     # Inference core
-    "mlx>=0.22.0,<1.0.0",
-    "mlx-lm>=0.21.0,<1.0.0",
-    "mlx-vlm>=0.1.0",           # VLM loader (image-in-prompt Qwen variants)
+    "mlx>=0.32.0,<1.0.0",
+    "mlx-lm>=0.31.3,<1.0.0",
+    "mlx-vlm>=0.6.4,<1.0.0",    # VLM loader (image-in-prompt Qwen variants)
     # API + CLI
-    "fastapi>=0.115.0",
-    "uvicorn>=0.34.0",
-    "pydantic>=2.0",            # imported directly in server.py
-    "python-multipart>=0.0.9",
-    "huggingface-hub>=0.26.0",
-    "rich>=13.0.0",
-    "numpy",
-    "certifi",
+    "fastapi>=0.139.0",
+    "uvicorn>=0.51.0",
+    "pydantic>=2.13.4",         # imported directly in server.py
+    "python-multipart>=0.0.32",
+    "huggingface-hub>=1.23.0",
+    "rich>=15.0.0",
+    "numpy>=2.5.1",
+    "certifi>=2026.6.17",
     # Documents
-    "fpdf2>=2.7",
-    "python-docx>=1.1",
-    "openpyxl>=3.1",
-    "python-pptx>=1.0",
-    "reportlab>=4.2",
-    "pdfplumber>=0.11",
-    "pypdf>=5.0",
-    "markdown>=3.6",
-    "markdownify>=0.13",
+    "fpdf2>=2.8.7",
+    "python-docx>=1.2.0",
+    "openpyxl>=3.1.5",
+    "python-pptx>=1.0.2",
+    "reportlab>=5.0.0",
+    "pdfplumber>=0.11.10",
+    "pypdf>=6.14.2",
+    "markdown>=3.10.2",
+    "markdownify>=1.2.3",
     # Data / dev utilities
-    "matplotlib>=3.9",
-    "pyyaml>=6.0",
-    "pyjwt>=2.9",
-    "jsonpath-ng>=1.6",
-    "sympy>=1.13",
-    "pint>=0.24",
-    "textstat>=0.7",
-    "feedparser>=6.0",
-    "faker>=28.0",
+    "matplotlib>=3.11.0",
+    "pyyaml>=6.0.3",
+    "pyjwt>=2.13.0",
+    "jsonpath-ng>=1.8.0",
+    "sympy>=1.14.0",
+    "pint>=0.25.3",
+    "textstat>=0.7.13",
+    "feedparser>=6.0.12",
+    "faker>=40.31.0",
     "langdetect>=1.0.9",
     # Images / QR / barcodes
-    "pillow>=10.0",
-    "qrcode[pil]>=7.4",
-    "python-barcode>=0.15",
+    "pillow>=12.3.0",
+    "qrcode[pil]>=8.2",
+    "python-barcode>=0.16.1",
     "pytesseract>=0.3.13",      # needs `tesseract` system binary for describe_image OCR
     # Calendar
-    "icalendar>=5.0",
+    "icalendar>=7.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.15.21",
 ]
 
 [project.scripts]
 mio = "mio.main:main"
 
 [build-system]
-requires = ["setuptools>=75.0"]
+requires = ["setuptools>=83.0.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["mio*"]
+
+[tool.setuptools.package-data]
+mio = [
+    "webui/*.html",
+    "webui/assets/*",
+    "webui/assets/data/*",
+    "paroquant/kernels/*.metal",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "experimental/tests"]
+markers = [
+    "model: requires a local model checkpoint",
+]

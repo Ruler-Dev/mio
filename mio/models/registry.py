@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,8 +26,34 @@ def spd_dir() -> Path:
     return _project_root() / "spd"
 
 
+def _model_path_is_complete(local_path: Path) -> bool:
+    """Return whether a local MLX checkpoint has all of its weight shards.
+
+    Hugging Face writes ``config.json`` before the multi-gigabyte weight files.
+    Treating that early file as a completed checkpoint makes interrupted pulls
+    poison tier auto-detection and fail much later inside ``mlx_lm.load``.
+    """
+    if not (local_path / "config.json").is_file():
+        return False
+
+    index_path = local_path / "model.safetensors.index.json"
+    if index_path.is_file():
+        try:
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+            shard_names = set(index.get("weight_map", {}).values())
+        except (OSError, TypeError, ValueError):
+            return False
+        return bool(shard_names) and all(
+            (local_path / name).is_file() and (local_path / name).stat().st_size > 0
+            for name in shard_names
+        )
+
+    weights = list(local_path.glob("*.safetensors"))
+    return bool(weights) and all(path.stat().st_size > 0 for path in weights)
+
+
 def resolve_model_path(local_name: str, kind: str = "target") -> str:
-    """Resolve a model to a local path if it exists, else return as HF repo ID.
+    """Resolve a complete model to a local path, else return its HF reference.
 
     Args:
         local_name: Local directory name (e.g., "Qwen3.5-4B-4bit")
@@ -34,7 +61,7 @@ def resolve_model_path(local_name: str, kind: str = "target") -> str:
     """
     base = models_dir() if kind == "target" else spd_dir()
     local_path = base / local_name
-    if local_path.exists() and (local_path / "config.json").exists():
+    if _model_path_is_complete(local_path):
         return str(local_path)
     return local_name  # Fall back to HF repo ID
 
@@ -193,7 +220,30 @@ KNOWN_MODELS: dict[str, ModelEntry] = {
         max_output_tokens=8192,
         description="Qwen 3.5 35B-A3B Unsloth MLX UD-Q4_K_XL — tool-calls fixed",
     ),
-    # === Qwen 3.6 (same architecture as 3.5 — qwen3_5_moe) ===
+    # === Qwen 3.6 dense (same qwen3_5 text architecture as Qwen 3.5) ===
+    "qwen3.6-27b-unsloth": ModelEntry(
+        target_repo="Brooooooklyn/Qwen3.6-27B-UD-Q4_K_XL-mlx",
+        target_local="Qwen3.6-27B-UD-Q4_K_XL-mlx",
+        draft_repo="z-lab/Qwen3.6-27B-DFlash",
+        draft_local="Qwen3.6-27B-DFlash",
+        adapter="qwen3_5",
+        default_tier="large",
+        context_window=262144,
+        max_output_tokens=8192,
+        description="Qwen 3.6 27B Unsloth MLX UD-Q4_K_XL — 256K ctx native",
+    ),
+    "qwen3.6-27b-4bit": ModelEntry(
+        target_repo="mlx-community/Qwen3.6-27B-4bit",
+        target_local="Qwen3.6-27B-4bit",
+        draft_repo="z-lab/Qwen3.6-27B-DFlash",
+        draft_local="Qwen3.6-27B-DFlash",
+        adapter="qwen3_5",
+        default_tier="large",
+        context_window=262144,
+        max_output_tokens=8192,
+        description="Qwen 3.6 27B 4-bit (mlx-community) — 256K ctx",
+    ),
+    # === Qwen 3.6 MoE (qwen3_5_moe) ===
     "qwen3.6-35b-a3b-unsloth": ModelEntry(
         target_repo="Brooooooklyn/Qwen3.6-35B-A3B-UD-Q4_K_XL-mlx",
         target_local="Qwen3.6-35B-A3B-UD-Q4_K_XL-mlx",
@@ -317,11 +367,11 @@ def _make_tier(name: str, entry_key: str) -> TierConfig:
 
 
 def _entry_is_local(key: str) -> bool:
-    """Return True if both target and draft dirs for a registry key exist locally."""
+    """Return True if both target and draft checkpoints are complete locally."""
     entry = KNOWN_MODELS[key]
-    target = models_dir() / entry.target_local / "config.json"
-    draft = spd_dir() / entry.draft_local / "config.json"
-    return target.exists() and draft.exists()
+    target = models_dir() / entry.target_local
+    draft = spd_dir() / entry.draft_local
+    return _model_path_is_complete(target) and _model_path_is_complete(draft)
 
 
 # Preference order for the large-moe tier:
@@ -338,6 +388,14 @@ _LARGE_MOE_PRIORITY = [
     "qwen3.5-35b-a3b-unsloth",
 ]
 
+# Preference order for the dense large tier. Qwen 3.6 requires both the target
+# and its causal-SWA DFlash draft; an interrupted download safely falls back.
+_LARGE_DENSE_PRIORITY = [
+    "qwen3.6-27b-unsloth",
+    "qwen3.6-27b-4bit",
+    "qwen3.5-27b-unsloth",
+]
+
 
 def _pick_large_moe_key() -> str:
     """Pick the best locally-available large-moe variant; fall back to 3.5."""
@@ -347,12 +405,20 @@ def _pick_large_moe_key() -> str:
     return "qwen3.5-35b-a3b-unsloth"
 
 
+def _pick_large_dense_key() -> str:
+    """Pick the best complete local dense variant; fall back to Qwen 3.5."""
+    for key in _LARGE_DENSE_PRIORITY:
+        if _entry_is_local(key):
+            return key
+    return "qwen3.5-27b-unsloth"
+
+
 # Default tier configurations — use Unsloth MLX Q4_K_XL re-quants for
 # large/medium/large-moe (fixes tool-call degradation from mlx-lm issue #1011).
 # Small tier keeps mlx-community 4bit: no tool-call use case, still fast.
 DEFAULT_TIERS: dict[str, TierConfig] = {
     "large-moe": _make_tier("large-moe", _pick_large_moe_key()),
-    "large": _make_tier("large", "qwen3.5-27b-unsloth"),
+    "large": _make_tier("large", _pick_large_dense_key()),
     "medium": _make_tier("medium", "qwen3.5-9b-unsloth"),
     "small": _make_tier("small", "qwen3.5-4b-4bit"),
 }

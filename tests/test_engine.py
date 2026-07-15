@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from mio.config import TierConfig, MioConfig
 from mio.models.registry import (
     DEFAULT_TIERS, KNOWN_MODELS, SUPPORTED_ADAPTERS,
-    get_supported_models, models_dir, spd_dir, resolve_model_path,
+    _model_path_is_complete, get_supported_models, models_dir, spd_dir, resolve_model_path,
 )
 
 
@@ -93,6 +95,41 @@ def test_resolve_model_path_local_vs_hf():
     # A name that definitely doesn't exist locally → returns as-is (HF fallback)
     result = resolve_model_path("nonexistent-model-xyz", kind="target")
     assert result == "nonexistent-model-xyz"
+
+
+def test_model_path_requires_weight_files(tmp_path):
+    """A config-only or interrupted Hugging Face download is not loadable."""
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    assert not _model_path_is_complete(tmp_path)
+
+    (tmp_path / "model.safetensors").write_bytes(b"weights")
+    assert _model_path_is_complete(tmp_path)
+
+
+def test_model_path_requires_every_indexed_shard(tmp_path):
+    """Indexed checkpoints become complete only after every named shard exists."""
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    index = {
+        "weight_map": {
+            "model.layers.0.weight": "model-00001-of-00002.safetensors",
+            "model.layers.1.weight": "model-00002-of-00002.safetensors",
+        }
+    }
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps(index), encoding="utf-8"
+    )
+    (tmp_path / "model-00001-of-00002.safetensors").write_bytes(b"one")
+    assert not _model_path_is_complete(tmp_path)
+
+    (tmp_path / "model-00002-of-00002.safetensors").write_bytes(b"two")
+    assert _model_path_is_complete(tmp_path)
+
+
+def test_qwen36_dense_dflash_pair_is_registered():
+    entry = KNOWN_MODELS["qwen3.6-27b-unsloth"]
+    assert entry.target_repo == "Brooooooklyn/Qwen3.6-27B-UD-Q4_K_XL-mlx"
+    assert entry.draft_repo == "z-lab/Qwen3.6-27B-DFlash"
+    assert entry.context_window == 262144
 
 
 def test_models_dir_and_spd_dir():
