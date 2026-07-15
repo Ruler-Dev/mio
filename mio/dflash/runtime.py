@@ -1543,7 +1543,13 @@ def generate_baseline_once(
     start_ns = time.perf_counter_ns()
 
     prefill_start_ns = time.perf_counter_ns()
-    logits = target_model(prompt_array, cache=cache)
+    logits, _ = chunked_prefill(
+        target_model,
+        input_ids=prompt_array,
+        cache=cache,
+        capture_layer_ids=set(),
+        only_last_logit=True,
+    )
     mx.eval(logits)
     prefill_ns = time.perf_counter_ns() - prefill_start_ns
     suppress_token_mask = build_suppress_token_mask(int(logits.shape[-1]), suppress_token_ids)
@@ -1602,7 +1608,13 @@ def stream_baseline_generate(
     start_ns = time.perf_counter_ns()
 
     prefill_start_ns = time.perf_counter_ns()
-    logits = target_model(prompt_array, cache=cache)
+    logits, _ = chunked_prefill(
+        target_model,
+        input_ids=prompt_array,
+        cache=cache,
+        capture_layer_ids=set(),
+        only_last_logit=True,
+    )
     mx.eval(logits)
     prefill_ns = time.perf_counter_ns() - prefill_start_ns
     suppress_token_mask = build_suppress_token_mask(int(logits.shape[-1]), suppress_token_ids)

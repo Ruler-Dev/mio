@@ -146,6 +146,7 @@ def generate_bmp_dflash_once(
         input_ids=prompt_array,
         cache=target_cache,
         capture_layer_ids=capture_layer_ids,
+        only_last_logit=True,
     )
     mx.eval(prefill_logits)
     prefill_ns = time.perf_counter_ns() - prefill_start_ns

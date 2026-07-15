@@ -177,6 +177,7 @@ def generate_ddtree_once(
         input_ids=prompt_array,
         cache=target_cache,
         capture_layer_ids=capture_layer_ids,
+        only_last_logit=True,
     )
     _eval_logits_and_captured(prefill_logits, prefill_hidden)
     prefill_ns = time.perf_counter_ns() - prefill_start_ns
