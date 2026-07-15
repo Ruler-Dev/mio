@@ -6,12 +6,10 @@ as tool calls and return structured results for the UI to render.
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass, asdict
 from pathlib import Path
 
 
@@ -1979,75 +1977,63 @@ def execute_skill(name: str, arguments: dict) -> dict:
 
 
 # ============================================================
-# User-defined skills (filesystem convention)
+# Mio-local instruction catalog
 # ============================================================
-# Scan ~/.mio/skills/*/SKILL.md at import time. Each SKILL.md begins
-# with YAML front-matter (name, description, parameters, script) and the
-# named `script` (same dir) is invoked with JSON args on stdin and must
-# write a JSON result to stdout.
-def _load_user_skills() -> None:
-    import re
-    import subprocess
-    from pathlib import Path as _P
-    base = _P.home() / ".mio" / "skills"
-    if not base.exists():
-        return
-    for skill_dir in base.iterdir():
-        if not skill_dir.is_dir():
-            continue
-        md = skill_dir / "SKILL.md"
-        if not md.exists():
-            continue
-        try:
-            raw = md.read_text()
-            m = re.match(r"^---\s*\n(.*?)\n---", raw, re.DOTALL)
-            if not m:
-                continue
-            # Lightweight YAML parse (no dep): key: value or key: {json}
-            meta = {}
-            for line in m.group(1).splitlines():
-                kv = line.split(":", 1)
-                if len(kv) != 2:
-                    continue
-                k, v = kv[0].strip(), kv[1].strip()
-                if (v.startswith("{") and v.endswith("}")) or (v.startswith("[") and v.endswith("]")):
-                    try: v = json.loads(v)
-                    except Exception: pass
-                meta[k] = v
-            name = meta.get("name")
-            if not name:
-                continue
-            script = skill_dir / (meta.get("script") or "run.py")
-            if not script.exists():
-                continue
+# Third-party SKILL.md bundles are intentionally represented by two bounded
+# tools, rather than injecting hundreds of tool schemas into every prompt.
+# Instruction-only skills remain useful; no local runner executes implicitly.
+def _list_mio_skills(
+    query: str = "",
+    tag: str = "",
+    source: str = "",
+    limit: int = 50,
+) -> dict:
+    from mio.skill_catalog import list_mio_skills
 
-            def _make_fn(script_path):
-                def _invoke(**kwargs):
-                    try:
-                        res = subprocess.run(
-                            ["python3", str(script_path)],
-                            input=json.dumps(kwargs), capture_output=True,
-                            text=True, timeout=60, cwd=str(script_path.parent),
-                        )
-                        try:
-                            return json.loads(res.stdout or "{}")
-                        except Exception:
-                            return {"stdout": res.stdout, "stderr": res.stderr, "returncode": res.returncode}
-                    except Exception as e:
-                        return {"error": str(e)}
-                return _invoke
-
-            params = meta.get("parameters") if isinstance(meta.get("parameters"), dict) else {
-                "type": "object", "properties": {}, "required": []
-            }
-            SKILLS[name] = {
-                "function": _make_fn(script),
-                "description": (meta.get("description") or name) + " (user skill)",
-                "parameters": params,
-            }
-        except Exception:
-            continue
+    return list_mio_skills(query=query, tag=tag, source=source, limit=limit)
 
 
-import json  # noqa: E402
-_load_user_skills()
+def _read_mio_skill(name: str, max_chars: int = 32_000) -> dict:
+    from mio.skill_catalog import read_mio_skill
+
+    return read_mio_skill(name=name, max_chars=max_chars)
+
+
+SKILLS["list_mio_skills"] = {
+    "function": _list_mio_skills,
+    "description": (
+        "Search instruction skills installed inside Mio by text, exact tag, or source. "
+        "Returns metadata only and never executes skill code."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Words to match"},
+            "tag": {"type": "string", "description": "Optional exact tag"},
+            "source": {"type": "string", "description": "Optional exact source id"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+        },
+        "required": [],
+    },
+}
+
+SKILLS["read_mio_skill"] = {
+    "function": _read_mio_skill,
+    "description": (
+        "Read one validated Mio-local SKILL.md by installed or unique canonical name. "
+        "This is instruction retrieval only; it never executes a runner."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Skill name returned by list_mio_skills"},
+            "max_chars": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 200000,
+                "default": 32000,
+            },
+        },
+        "required": ["name"],
+    },
+}

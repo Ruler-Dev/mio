@@ -11,6 +11,7 @@
 - [08 — BMP-DFlash](./08-bmp-dflash.md) — Batched Multi-Path speculative decoding
 - [09 — Prefix Cache](./09-prefix-cache.md) — automatic shared-prefix reuse
 - [11 — Mio UI](./11-mio-ui.md) — Web interface: artifacts, skills, weather widget, document generation
+- [14 — External skills](./14-external-skills.md) — Mio-local catalog, pinned provenance, discovery, and execution policy
 
 ## Technical notes / "papers"
 

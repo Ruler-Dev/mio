@@ -21,7 +21,7 @@ console = Console()
 # --- System Prompts ---
 
 AGENT_SYSTEM_PROMPT = """You are Mio, a fast local coding agent running on Apple Silicon.
-You have access to tools: bash (run shell commands), read (read files), write (write files), edit (edit files).
+You have access to tools: bash (run shell commands), read (read files), write (write files), edit (edit files), list_mio_skills (search local instruction skills), read_mio_skill (load one skill's instructions).
 When the user asks you to write or modify code, do it directly. Be precise and concise.
 Always show the code you write or modify.
 When running bash commands, show the command and its output.
@@ -111,12 +111,43 @@ def tool_edit(path: str, old: str, new: str) -> str:
         return f"(error editing {path}: {e})"
 
 
+def tool_list_mio_skills(
+    query: str = "",
+    tag: str = "",
+    source: str = "",
+    limit: int = 50,
+) -> str:
+    """Search Mio-local instruction skills without executing them."""
+    import json
+
+    from mio.skill_catalog import list_mio_skills
+
+    return json.dumps(
+        list_mio_skills(query=query, tag=tag, source=source, limit=limit),
+        ensure_ascii=False,
+    )
+
+
+def tool_read_mio_skill(name: str, max_chars: int = 32_000) -> str:
+    """Read one Mio-local SKILL.md through the confined catalog API."""
+    import json
+
+    from mio.skill_catalog import read_mio_skill
+
+    return json.dumps(read_mio_skill(name=name, max_chars=max_chars), ensure_ascii=False)
+
+
 # Tool registry used by the native agent's tool-use loop.
 AGENT_TOOLS = {
     "bash":  {"fn": tool_bash,  "args": ["command"]},
     "read":  {"fn": tool_read,  "args": ["path"]},
     "write": {"fn": tool_write, "args": ["path", "content"]},
     "edit":  {"fn": tool_edit,  "args": ["path", "old", "new"]},
+    "list_mio_skills": {
+        "fn": tool_list_mio_skills,
+        "args": ["query", "tag", "source", "limit"],
+    },
+    "read_mio_skill": {"fn": tool_read_mio_skill, "args": ["name", "max_chars"]},
 }
 
 AGENT_TOOLS_SPEC = [
@@ -150,6 +181,32 @@ AGENT_TOOLS_SPEC = [
             "old":  {"type": "string", "description": "Exact substring to replace"},
             "new":  {"type": "string", "description": "Replacement"},
         }, "required": ["path", "old", "new"]},
+    }},
+    {"type": "function", "function": {
+        "name": "list_mio_skills",
+        "description": (
+            "Search instruction skills installed inside Mio. Filter by text, exact tag, "
+            "or source. This only lists metadata and never executes skill code."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "Words matched across name, description, and tags"},
+            "tag": {"type": "string", "description": "Optional exact tag"},
+            "source": {"type": "string", "description": "Optional exact source id"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "read_mio_skill",
+        "description": (
+            "Read the validated SKILL.md instructions for one Mio-local skill. "
+            "Call list_mio_skills first when the name is unknown. Never executes the skill."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string", "description": "Installed skill name or unique canonical name"},
+            "max_chars": {
+                "type": "integer", "minimum": 1, "maximum": 200000, "default": 32000,
+            },
+        }, "required": ["name"]},
     }},
 ]
 
