@@ -76,6 +76,20 @@ def _git_revision() -> str:
         return "unknown"
 
 
+def _git_dirty() -> bool | None:
+    try:
+        return bool(
+            subprocess.run(
+                ["git", "status", "--porcelain"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
 def _portable_model_reference(reference: str) -> str:
     """Keep benchmark artifacts portable when a local checkpoint was used."""
 
@@ -252,6 +266,7 @@ def main() -> int:
         "schema_version": 1,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "git_revision": _git_revision(),
+        "git_dirty": _git_dirty(),
         "hardware": {
             "platform": platform.platform(),
             "machine": platform.machine(),
