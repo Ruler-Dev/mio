@@ -82,12 +82,11 @@ def _make_gated_delta_kernel_with_tape(*, has_mask: bool = False, vectorized: bo
             if (thread_index_in_simdgroup == 0) {{
               y[dv_idx] = static_cast<InT>(out);
             }}
+          }} else {{
+            y[dv_idx] = static_cast<InT>(0);
           }}
           if (thread_index_in_simdgroup == 0) {{
             tape_[dv_idx] = delta;
-          }}
-          for (int i = 0; i < n_per_t; ++i) {{
-            state[i] = static_cast<float>(static_cast<InT>(state[i]));
           }}
           q_ += Hk * Dk;
           k_ += Hk * Dk;
@@ -100,7 +99,7 @@ def _make_gated_delta_kernel_with_tape(*, has_mask: bool = False, vectorized: bo
 
         for (int i = 0; i < n_per_t; ++i) {{
           auto s_idx = n_per_t * dk_idx + i;
-          o_state[s_idx] = static_cast<InT>(state[i]);
+          o_state[s_idx] = static_cast<StT>(state[i]);
         }}
     """
 
@@ -191,6 +190,7 @@ def gated_delta_kernel_with_tape(
         return _gated_delta_ops_with_tape(q, k, v, g, beta, state, mask)
 
     input_type = q.dtype
+    state_type = state.dtype
 
     if g.ndim == 4:
         kernel = _gated_delta_tape_kernel_vec
@@ -212,6 +212,7 @@ def gated_delta_kernel_with_tape(
         inputs=inputs,
         template=[
             ("InT", input_type),
+            ("StT", state_type),
             ("Dk", Dk),
             ("Dv", Dv),
             ("Hk", Hk),
@@ -220,7 +221,7 @@ def gated_delta_kernel_with_tape(
         grid=(32, Dv, B * Hv),
         threadgroup=(32, 4, 1),
         output_shapes=[(B, T, Hv, Dv), state.shape, (B, T, Hv, Dv)],
-        output_dtypes=[input_type, input_type, mx.float32],
+        output_dtypes=[input_type, state_type, mx.float32],
     )
 
 
@@ -277,9 +278,6 @@ def _make_tape_replay_kernel(*, has_mask: bool = False, vectorized: bool = False
               auto s_idx = n_per_t * dk_idx + i;
               state[i] = state[i] * {g_access};
               state[i] = state[i] + k_[s_idx] * delta;
-            }}
-            for (int i = 0; i < n_per_t; ++i) {{
-              state[i] = static_cast<float>(static_cast<InT>(state[i]));
             }}
           }}
           tape_ += Hv * Dv;

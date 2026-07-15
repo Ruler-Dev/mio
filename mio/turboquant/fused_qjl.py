@@ -5,7 +5,6 @@ The naive path materializes (B, H, T_kv, D) float32 from (B, H, T_kv, D//32) uin
 the dot product in-register, reducing memory traffic by ~12x.
 """
 
-import math
 
 import mlx.core as mx
 

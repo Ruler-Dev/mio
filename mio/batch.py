@@ -15,6 +15,18 @@ class BatchRequest:
     model: str = "mio-large"
     max_tokens: int | None = None
     temperature: float | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    seed: int | None = None
+    stop: list[str] | None = None
+
+
+@dataclass(frozen=True)
+class _SamplerKey:
+    temperature: float
+    top_p: float
+    top_k: int
+    seed: int | None
 
 
 @dataclass
@@ -23,10 +35,13 @@ class BatchResult:
     text: str
     prompt_tokens: int
     completion_tokens: int
-    generation_tps: float
+    generation_tps: float | None
     time_s: float
     error: str | None = None
     backend: str = "mlx-continuous"
+    metrics_scope: str = "request"
+    batch_size: int = 1
+    batch_generation_tps: float | None = None
 
 
 def process_batch(
@@ -36,45 +51,88 @@ def process_batch(
 ) -> list[BatchResult]:
     """Process requests with shared weights and independent MLX KV caches.
 
-    Requests are grouped by temperature because MLX applies one sampler to an
-    active batch. A one-request group takes Mio's latency-oriented DFlash path;
-    larger groups use :meth:`MioEngine.generate_batch` continuous batching.
+    Requests are grouped by their complete sampler configuration because MLX
+    applies one sampler/RNG stream to an active batch. A one-request group takes
+    Mio's latency path; larger groups use continuous batching. Per-request stop
+    strings remain independent inside either path.
     """
     engine = manager.get_engine(tier)
     if not requests:
         return []
     results: list[BatchResult | None] = [None] * len(requests)
-    groups: dict[float, list[tuple[int, BatchRequest]]] = {}
+    groups: dict[_SamplerKey, list[tuple[int, BatchRequest]]] = {}
     for index, request in enumerate(requests):
-        temperature = (
-            float(request.temperature)
-            if request.temperature is not None
-            else float(engine.tier_config.temperature)
+        key = _SamplerKey(
+            temperature=(
+                float(request.temperature)
+                if request.temperature is not None
+                else 0.0
+            ),
+            top_p=(
+                float(request.top_p)
+                if request.top_p is not None
+                else float(engine.tier_config.top_p)
+            ),
+            top_k=(
+                int(request.top_k)
+                if request.top_k is not None
+                else int(engine.tier_config.top_k)
+            ),
+            seed=None if request.seed is None else int(request.seed),
         )
-        groups.setdefault(temperature, []).append((index, request))
+        groups.setdefault(key, []).append((index, request))
 
-    for temperature, group in groups.items():
+    for sampler_key, group in groups.items():
         start = time.time()
         try:
             generated = engine.generate_batch(
                 [request.messages for _, request in group],
                 max_tokens=[
-                    request.max_tokens or engine.tier_config.max_output_tokens
+                    (
+                        engine.tier_config.max_output_tokens
+                        if request.max_tokens is None
+                        else request.max_tokens
+                    )
                     for _, request in group
                 ],
-                temperature=temperature,
+                temperature=sampler_key.temperature,
+                top_p=sampler_key.top_p,
+                top_k=sampler_key.top_k,
+                seed=sampler_key.seed,
+                stop=[request.stop for _, request in group],
             )
             elapsed = time.time() - start
-            backend = "mlx-continuous" if len(group) > 1 else "dflash-latency"
             for (index, _request), (text, metrics) in zip(group, generated, strict=True):
+                backend = (
+                    "mlx-target-sampling"
+                    if sampler_key.seed is not None and sampler_key.temperature > 0.0
+                    else "mlx-continuous"
+                    if len(group) > 1
+                    else (
+                        "mlx-target-sampling"
+                        if metrics.fallback_reason == "stochastic_sampling_requires_target_only"
+                        else "dflash-latency"
+                    )
+                )
                 results[index] = BatchResult(
                     index=index,
                     text=text,
                     prompt_tokens=metrics.prompt_tokens,
                     completion_tokens=metrics.completion_tokens,
-                    generation_tps=metrics.generation_tps,
+                    generation_tps=(
+                        metrics.generation_tps
+                        if metrics.metrics_scope == "request"
+                        else None
+                    ),
                     time_s=elapsed,
                     backend=backend,
+                    metrics_scope=metrics.metrics_scope,
+                    batch_size=metrics.batch_size,
+                    batch_generation_tps=(
+                        metrics.generation_tps
+                        if metrics.metrics_scope == "batch"
+                        else None
+                    ),
                 )
         except Exception as e:
             elapsed = time.time() - start
@@ -97,7 +155,8 @@ def load_batch_file(path: str) -> list[BatchRequest]:
     """Load batch requests from a JSONL file.
 
     Each line should be a JSON object with "messages" array.
-    Optional: "model", "max_tokens", "temperature".
+    Optional: "model", "max_tokens", "temperature", "top_p", "top_k",
+    "seed", and "stop" (a string or list of strings).
     """
     requests = []
     with open(path) as f:
@@ -113,11 +172,17 @@ def load_batch_file(path: str) -> list[BatchRequest]:
             messages = data.get("messages", [])
             if not messages and "prompt" in data:
                 messages = [{"role": "user", "content": data["prompt"]}]
+            raw_stop = data.get("stop")
+            stop = [raw_stop] if isinstance(raw_stop, str) else raw_stop
             requests.append(BatchRequest(
                 messages=messages,
                 model=data.get("model", "mio-large"),
                 max_tokens=data.get("max_tokens"),
                 temperature=data.get("temperature"),
+                top_p=data.get("top_p"),
+                top_k=data.get("top_k"),
+                seed=data.get("seed"),
+                stop=stop,
             ))
     return requests
 
@@ -132,6 +197,9 @@ def save_batch_results(results: list[BatchResult], path: str) -> None:
                 "prompt_tokens": r.prompt_tokens,
                 "completion_tokens": r.completion_tokens,
                 "generation_tps": r.generation_tps,
+                "batch_generation_tps": r.batch_generation_tps,
+                "metrics_scope": r.metrics_scope,
+                "batch_size": r.batch_size,
                 "time_s": r.time_s,
             }
             if r.error:

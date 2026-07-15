@@ -7,13 +7,20 @@ embedding-based semantic search, swap out FTS5 for a later pass.
 """
 from __future__ import annotations
 
-import os
 import re
 import sqlite3
 import time
 from pathlib import Path
 
-RAG_DB = Path.home() / ".mio" / "rag.sqlite"
+from mio.paths import mio_home
+from mio.webui.safe_files import (
+    UnsafePathError,
+    iter_confined_regular_files,
+    read_text_no_follow,
+    validate_directory,
+)
+
+RAG_DB = mio_home() / "rag.sqlite"
 RAG_DB.parent.mkdir(parents=True, exist_ok=True)
 
 _TEXT_EXTS = {
@@ -55,27 +62,25 @@ def _connect() -> sqlite3.Connection:
 
 
 def _iter_text_files(root: Path):
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS and not d.startswith(".")]
-        for fn in filenames:
-            p = Path(dirpath) / fn
-            if p.suffix.lower() not in _TEXT_EXTS:
-                continue
-            try:
-                if p.stat().st_size > _MAX_FILE_BYTES:
-                    continue
-            except OSError:
-                continue
-            yield p
+    yield from iter_confined_regular_files(
+        root,
+        suffixes=_TEXT_EXTS,
+        recursive=True,
+        skip_directories=_SKIP_DIRS,
+        skip_hidden_directories=True,
+        max_bytes=_MAX_FILE_BYTES,
+    )
 
 
 def index_folder(path: str, label: str | None = None, replace: bool = True) -> dict:
     """Scan `path` recursively for text files and add them to the local
     RAG index. If `replace=True`, prior content for this folder is wiped.
     """
-    root = Path(path).expanduser().resolve()
-    if not root.is_dir():
-        return {"skill": "index_folder", "error": f"not a directory: {root}"}
+    lexical_root = Path(path).expanduser()
+    try:
+        root = validate_directory(lexical_root)
+    except UnsafePathError as exc:
+        return {"skill": "index_folder", "error": str(exc)}
     label = label or root.name
     con = _connect()
     cur = con.cursor()
@@ -91,8 +96,8 @@ def index_folder(path: str, label: str | None = None, replace: bool = True) -> d
     count = 0
     for p in _iter_text_files(root):
         try:
-            text = p.read_text(encoding="utf-8", errors="replace")
-        except Exception:
+            text = read_text_no_follow(p, max_bytes=_MAX_FILE_BYTES)
+        except (OSError, UnsafePathError):
             continue
         title = p.relative_to(root).as_posix()
         cur.execute("INSERT INTO documents (index_id, path, title, body) VALUES (?, ?, ?, ?)",

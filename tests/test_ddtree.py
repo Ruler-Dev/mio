@@ -5,7 +5,6 @@ from __future__ import annotations
 import itertools
 import math
 
-import pytest
 
 from mio.dflash.ddtree import build_ddtree, linear_trajectory_layout, enumerate_paths
 
@@ -23,7 +22,6 @@ def _enumerate_all_prefixes(top_k_tokens, top_k_logprobs, K):
 
 def _brute_force_topB(top_k_tokens, top_k_logprobs, B, K=None):
     """Reference: enumerate all prefixes and return top-B by score (prefix-closed)."""
-    L = len(top_k_tokens)
     if K is None:
         K = min(B, len(top_k_tokens[0]))
     all_prefixes = list(_enumerate_all_prefixes(top_k_tokens, top_k_logprobs, K))

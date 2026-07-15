@@ -153,8 +153,9 @@
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", boot, { once: true });
   } else {
-    // DOM already parsed; let the other asset modules finish registering
-    // this tick before we do the initial switch.
-    setTimeout(boot, 0);
+    // The deterministic loader exposes one promise for the complete module
+    // registry. Wait for it so a persisted non-chat view is registered before
+    // initialView() checks it.
+    (window.Mio.modulesReady || Promise.resolve()).then(boot);
   }
 })();

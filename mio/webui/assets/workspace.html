@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Mio Workspace</title>
+<script src="/ui/assets/security.js"></script>
 <style>
 :root {
   --bg: #0a0a14; --panel: #161621; --border: #2a2a38; --accent: #3b82f6;
@@ -24,8 +25,8 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; ba
 .card .meta { color: var(--muted); font-size: 12px; margin-bottom: 12px; }
 .row { display: flex; gap: 10px; margin-bottom: 10px; align-items: center; }
 .row label { width: 110px; color: var(--muted); font-size: 12px; font-family: ui-monospace,monospace; text-transform: uppercase; letter-spacing: 0.4px; }
-input[type=text], input[type=number], textarea, select { background: var(--input); border: 1px solid var(--border); color: var(--text); padding: 8px 12px; border-radius: 6px; font-size: 13px; font-family: inherit; }
-input[type=text], input[type=number], select { flex: 1; }
+input[type=text], input[type=password], input[type=number], textarea, select { background: var(--input); border: 1px solid var(--border); color: var(--text); padding: 8px 12px; border-radius: 6px; font-size: 13px; font-family: inherit; }
+input[type=text], input[type=password], input[type=number], select { flex: 1; }
 textarea { width: 100%; min-height: 70px; font-family: ui-monospace,monospace; font-size: 12.5px; resize: vertical; }
 button { background: var(--accent); color: #fff; border: 0; padding: 7px 16px; border-radius: 6px; cursor: pointer; font-size: 12.5px; font-weight: 500; }
 button.ghost { background: transparent; border: 1px solid var(--border); color: var(--muted); }
@@ -169,7 +170,7 @@ async function renderWebhooks(c) {
       <h2>New webhook</h2>
       <div class="row"><label>Slug</label><input id="wh-slug" type="text" placeholder="morning-brief"></div>
       <div class="row"><label>Prompt</label><textarea id="wh-prompt" placeholder="Summarize {{topic}} in 3 bullets."></textarea></div>
-      <div class="row"><label>Secret</label><input id="wh-secret" type="text" placeholder="optional shared secret"></div>
+      <div class="row"><label>Secret</label><input id="wh-secret" type="password" minlength="16" required autocomplete="new-password" placeholder="required · at least 16 characters"></div>
       <div class="row"><label></label><button onclick="createWebhook()">Create</button></div>
     </div>
     <h2 style="margin:22px 0 10px">Webhooks</h2>
@@ -177,7 +178,7 @@ async function renderWebhooks(c) {
       <div class="item">
         <div class="top">
           <div>
-            <div class="nm">${escapeHTML(w.slug)} ${w.secret ? '<span class="tag">secret</span>' : ''}</div>
+            <div class="nm">${escapeHTML(w.slug)} ${w.has_secret ? '<span class="tag">authenticated</span>' : '<span class="tag warn">disabled</span>'}</div>
             <div class="sub">POST ${origin}/ui/api/webhook/${escapeHTML(w.slug)}</div>
           </div>
           <div class="actions">
@@ -192,13 +193,21 @@ async function renderWebhooks(c) {
 }
 
 async function createWebhook() {
+  const secret = document.getElementById('wh-secret').value;
+  if (secret.length < 16) {
+    alert('Webhook secret must contain at least 16 characters.');
+    return;
+  }
   const body = {
     slug: document.getElementById('wh-slug').value,
     prompt: document.getElementById('wh-prompt').value,
-    secret: document.getElementById('wh-secret').value || undefined,
+    secret,
   };
   const r = await fetch('/ui/api/webhooks', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) }).then(r => r.json());
-  if (r.error) alert(r.error);
+  if (r.error || r.detail) {
+    alert(r.error || r.detail);
+    return;
+  }
   render();
 }
 async function deleteWebhook(slug) {

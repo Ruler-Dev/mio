@@ -14,8 +14,6 @@ attention forward of each speculator layer.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
-from typing import Any
 
 import mlx.core as mx
 
@@ -106,7 +104,6 @@ def score_prompt_tokens(
     # Build causal mask explicitly so we can re-use it in score capture.
     from mlx_lm.models.base import create_attention_mask
     mask = create_attention_mask(h, None)
-    rope_theta = float(inner.args.rope_theta)
 
     # Per-layer attention pattern aggregator.
     # We compute mean-attention-received per token (mean over T_q axis).

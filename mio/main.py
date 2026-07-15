@@ -5,6 +5,68 @@ from __future__ import annotations
 import argparse
 
 
+def _add_prompt_policy_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    include_no_caveman: bool = False,
+    dest_prefix: str = "",
+) -> None:
+    """Add the modern prompt-policy flags and backwards-compatible aliases."""
+    selector = parser.add_mutually_exclusive_group()
+    selector.add_argument(
+        "--prompt-mode",
+        dest=f"{dest_prefix}prompt_mode",
+        choices=["none", "caveman", "ponytail"],
+        default=None,
+        help="System prompt policy (default: caveman/full).",
+    )
+    selector.add_argument(
+        "--caveman",
+        dest=f"{dest_prefix}caveman",
+        choices=["off", "lite", "full", "ultra"],
+        default=None,
+        help="Legacy Caveman selector; 'off' maps to --prompt-mode none.",
+    )
+    selector.add_argument(
+        "--ponytail",
+        dest=f"{dest_prefix}ponytail",
+        choices=["lite", "full", "ultra"],
+        default=None,
+        help="Ponytail engineering policy level.",
+    )
+    if include_no_caveman:
+        selector.add_argument(
+            "--no-caveman",
+            dest=f"{dest_prefix}no_caveman",
+            action="store_true",
+            help="Legacy alias for --prompt-mode none.",
+        )
+    parser.add_argument(
+        "--prompt-level",
+        dest=f"{dest_prefix}prompt_level",
+        choices=["lite", "full", "ultra"],
+        default=None,
+        help="Level for --prompt-mode caveman or ponytail (default: full).",
+    )
+
+
+def _resolve_prompt_policy_args(args, *, dest_prefix: str = ""):
+    """Resolve CLI flags without importing policy code during shell completion."""
+    from mio.prompt_policy import PromptMode, PromptPolicy
+
+    if getattr(args, f"{dest_prefix}no_caveman", False):
+        return PromptPolicy.resolve(
+            prompt_mode=PromptMode.NONE,
+            prompt_level=getattr(args, f"{dest_prefix}prompt_level", None),
+        )
+    return PromptPolicy.resolve(
+        prompt_mode=getattr(args, f"{dest_prefix}prompt_mode", None),
+        prompt_level=getattr(args, f"{dest_prefix}prompt_level", None),
+        caveman=getattr(args, f"{dest_prefix}caveman", None),
+        ponytail=getattr(args, f"{dest_prefix}ponytail", None),
+    )
+
+
 def _apply_tq4_flag(config, tier_names: list[str], enabled: bool) -> None:
     """Select TQ4 (and disable the mutually exclusive PQ cache)."""
     if not enabled:
@@ -76,7 +138,23 @@ def main() -> None:
     )
     serve_parser.add_argument(
         "--host", type=str, default=None,
-        help="Server host (default: persisted config, otherwise 0.0.0.0)",
+        help="Server host (default: persisted config, otherwise 127.0.0.1)",
+    )
+    serve_parser.add_argument(
+        "--unsafe-remote-bind",
+        action="store_true",
+        help=(
+            "Allow a non-loopback bind without disabling Host/origin checks. A concrete bind "
+            "trusts only that Host:port; a wildcard bind trusts private numeric LAN addresses "
+            "on --port. Use MIO_TRUSTED_HOSTS for LAN hostnames and MIO_CORS_ORIGINS for an "
+            "exact comma-separated cross-origin browser allowlist (wildcards are rejected). "
+            "Mio has no built-in HTTP authentication."
+        ),
+    )
+    serve_parser.add_argument(
+        "--replace-existing",
+        action="store_true",
+        help="Terminate processes already listening on --port before startup (never done by default).",
     )
     serve_parser.add_argument("--tandem", action="store_true", help="Load all tiers for tandem routing")
     serve_parser.add_argument("--tiers", type=str, default=None, help="Comma-separated tiers to load (default: large)")
@@ -85,15 +163,7 @@ def main() -> None:
         help="Single tier to load (default: persisted active tier, otherwise large-moe)",
     )
     serve_parser.add_argument("--validate", action="store_true", help="Enable auto-validation of generated code")
-    serve_parser.add_argument(
-        "--caveman",
-        choices=["off", "lite", "full", "ultra"],
-        default="full",
-        help="Caveman system-prompt level injected into every request (default: full). "
-             "Safe alongside OpenAI function tools — Qwen's chat template emits exact "
-             "tool names, and caveman only shortens narrative prose. Skipped if the "
-             "system prompt declares a Cline/Roo XML protocol (exact-tag match).",
-    )
+    _add_prompt_policy_arguments(serve_parser)
     serve_parser.add_argument("--tq4", action="store_true", help="Enable TurboQuant 4-bit KV cache (default: off)")
     serve_parser.add_argument("--mpath", type=int, default=1, help="Batched Multi-Path DFlash paths K (1 = vanilla DFlash, 2-4 typical)")
     serve_parser.add_argument(
@@ -110,6 +180,12 @@ def main() -> None:
                               help="Disable stage-2 LLM summarization — use only heuristic tool-result truncation")
     serve_parser.add_argument("--webui", action="store_true",
                               help="Enable Mio UI web interface at /ui (disabled by default)")
+    serve_parser.add_argument(
+        "--mcp-config",
+        type=str,
+        default=None,
+        help="Mio MCP config (default: ~/.mio/mcp.json or MIO_MCP_CONFIG).",
+    )
 
     # --- chat ---
     chat_parser = subparsers.add_parser("chat", help="Interactive chat (no tools, no agent)")
@@ -118,7 +194,7 @@ def main() -> None:
         help="Model tier (default: persisted active tier, otherwise large-moe)",
     )
     chat_parser.add_argument("--paro", action="store_true", help="Use PARO quantized models (higher quality, slower)")
-    chat_parser.add_argument("--no-caveman", action="store_true", help="Disable the Caveman Ultra system prompt")
+    _add_prompt_policy_arguments(chat_parser, include_no_caveman=True)
     chat_parser.add_argument("--tq4", action="store_true", help="Enable TurboQuant 4-bit KV cache (default: off)")
     chat_parser.add_argument("--mpath", type=int, default=1, help="Batched Multi-Path DFlash paths K (1 = vanilla DFlash)")
     chat_parser.add_argument(
@@ -158,6 +234,47 @@ def main() -> None:
     # --- menu ---
     subparsers.add_parser("menu", help="Interactive menu")
 
+    # --- mcp ---
+    mcp_parser = subparsers.add_parser("mcp", help="Inspect or configure Mio-owned MCP servers")
+    mcp_parser.add_argument(
+        "mcp_action",
+        nargs="?",
+        choices=[
+            "list", "enable", "disable", "tools", "call",
+            "install-tools", "check", "doctor",
+        ],
+        default="list",
+    )
+    mcp_parser.add_argument("name", nargs="?", help="MCP server name for enable/disable")
+    mcp_parser.add_argument("tool", nargs="?", help="Tool name for the call action")
+    mcp_parser.add_argument("--config", type=str, default=None, help="Override ~/.mio/mcp.json")
+    mcp_parser.add_argument("--args", dest="arguments_json", default="{}", help="JSON object for mcp call")
+    mcp_parser.add_argument(
+        "--grant",
+        action="append",
+        default=[],
+        choices=["read", "write", "process", "network", "filesystem_read", "filesystem_write", "secrets"],
+        help="Explicit permission for remote/authenticated MCPs (repeatable).",
+    )
+    mcp_parser.add_argument("--allow-remote", action="store_true", help="Allow a remote MCP for this command only")
+    mcp_parser.add_argument("--allow-auth", action="store_true", help="Allow credential injection for this command only")
+    mcp_parser.add_argument(
+        "--mio-home",
+        type=str,
+        default=None,
+        help="Override $MIO_HOME for install-tools/check/doctor.",
+    )
+    mcp_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Build a fresh pinned MCP-tool release even when the active release is valid.",
+    )
+    mcp_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit a machine-readable report for install-tools/check/doctor.",
+    )
+
     # --- Top-level flags for agent mode ---
     parser.add_argument("--tandem", action="store_true", help="Agent mode with tandem routing")
     parser.add_argument(
@@ -172,9 +289,21 @@ def main() -> None:
         "--context", type=str, default=None,
         help="Override context window for agent mode: '8k', '32k', '128k', etc., or a raw integer.",
     )
+    _add_prompt_policy_arguments(parser, dest_prefix="agent_")
     parser.add_argument("prompt", nargs="*", default=[], help="Initial prompt for agent mode")
 
     args = parser.parse_args()
+
+    if args.command in {"serve", "chat"}:
+        try:
+            args.prompt_policy = _resolve_prompt_policy_args(args)
+        except ValueError as exc:
+            parser.error(str(exc))
+    elif args.command is None:
+        try:
+            args.prompt_policy = _resolve_prompt_policy_args(args, dest_prefix="agent_")
+        except ValueError as exc:
+            parser.error(str(exc))
 
     if args.command == "serve":
         _cmd_serve(args)
@@ -194,6 +323,8 @@ def main() -> None:
         _cmd_status(args)
     elif args.command == "menu":
         _cmd_menu(args)
+    elif args.command == "mcp":
+        _cmd_mcp(args)
     elif args.command is None:
         # No subcommand → launch native coding agent
         _cmd_native_agent(args)
@@ -228,19 +359,132 @@ def _cmd_serve(args) -> None:
     manager = ModelManager(config)
     manager.load_active_tiers()
     validate = getattr(args, "validate", False)
-    caveman_level = getattr(args, "caveman", "full")
+    prompt_policy = getattr(args, "prompt_policy", None) or _resolve_prompt_policy_args(args)
+    from mio.mcp import load_registry
+
+    mcp_registry = load_registry(getattr(args, "mcp_config", None))
     start_server(
         manager,
         host=config.host,
         port=config.port,
         tandem=config.tandem,
         validate=validate,
-        caveman_level=caveman_level,
+        prompt_policy=prompt_policy,
         compact_threshold=float(getattr(args, "compact_threshold", 0.75)),
         compact_target=float(getattr(args, "compact_target", 0.50)),
         compact_summarize=not getattr(args, "no_compact_summarize", False),
         webui=getattr(args, "webui", False),
+        mcp_registry=mcp_registry,
+        unsafe_remote_bind=getattr(args, "unsafe_remote_bind", False),
+        replace_existing=getattr(args, "replace_existing", False),
     )
+
+
+def _cmd_mcp(args) -> None:
+    """List or toggle Mio's MCP providers without starting or calling them."""
+    from rich.console import Console
+    from rich.table import Table
+
+    from mio.mcp import load_registry
+
+    console = Console()
+    action = getattr(args, "mcp_action", "list")
+    name = getattr(args, "name", None)
+    if action in {"install-tools", "check", "doctor"}:
+        import json
+
+        from mio.mcp.tool_installer import (
+            InstallerError,
+            check_installation,
+            install_mcp_tools,
+        )
+
+        home = getattr(args, "mio_home", None)
+        try:
+            if action == "install-tools":
+                report = install_mcp_tools(
+                    home,
+                    force=bool(getattr(args, "force", False)),
+                    progress=lambda message: console.print(f"[dim]{message}[/dim]"),
+                )
+            else:
+                report = check_installation(home)
+        except InstallerError as exc:
+            report = {"ok": False, "mode": action, "errors": [str(exc)]}
+
+        if getattr(args, "json", False):
+            print(json.dumps(report, indent=2, sort_keys=True))
+        elif report.get("ok"):
+            console.print(
+                f"[green]Mio MCP tools OK[/green] — {report.get('release', 'active release')}"
+            )
+        else:
+            console.print("[red]Mio MCP tool check failed[/red]")
+            for error in report.get("errors", []):
+                console.print(f"  - {error}")
+        if not report.get("ok"):
+            raise SystemExit(1)
+        return
+
+    registry = load_registry(getattr(args, "config", None))
+    if action in {"enable", "disable"}:
+        if not name:
+            raise SystemExit(f"mio mcp {action} requires a server name")
+        config = registry.set_enabled(name, action == "enable")
+        path = registry.save()
+        console.print(f"[green]{config.name}[/green]: {'enabled' if config.enabled else 'disabled'} ({path})")
+        return
+
+    if action in {"tools", "call"}:
+        import json
+
+        from mio.mcp import MCPError, MCPHub, MCPHubPolicy, MCPPermission
+
+        if not name:
+            raise SystemExit(f"mio mcp {action} requires a server name")
+        grants = frozenset(MCPPermission(value) for value in getattr(args, "grant", []))
+        policy = MCPHubPolicy(
+            allow_remote=bool(getattr(args, "allow_remote", False)),
+            allow_authenticated=bool(getattr(args, "allow_auth", False)),
+            explicit_grants={name: grants},
+        )
+        hub = MCPHub(registry, policy=policy)
+        try:
+            if action == "tools":
+                result = hub.list_tools(name)
+            else:
+                tool = getattr(args, "tool", None)
+                if not tool:
+                    raise SystemExit("mio mcp call requires SERVER and TOOL")
+                try:
+                    arguments = json.loads(getattr(args, "arguments_json", "{}"))
+                except json.JSONDecodeError as exc:
+                    raise SystemExit(f"invalid --args JSON: {exc}") from exc
+                if not isinstance(arguments, dict):
+                    raise SystemExit("--args must decode to a JSON object")
+                result = hub.call_tool(name, tool, arguments)
+            console.print_json(data=result)
+        except MCPError as exc:
+            raise SystemExit(f"MCP error: {exc}") from exc
+        finally:
+            hub.close()
+        return
+
+    table = Table(title=f"Mio MCP — {registry.config_path}")
+    table.add_column("server")
+    table.add_column("transport")
+    table.add_column("scope")
+    table.add_column("enabled")
+    table.add_column("permissions")
+    for config in registry.list():
+        table.add_row(
+            config.name,
+            config.transport.value,
+            "local" if config.is_local else "remote",
+            "yes" if config.enabled else "no",
+            ", ".join(sorted(permission.value for permission in config.permissions)),
+        )
+    console.print(table)
 
 
 def _cmd_chat(args) -> None:
@@ -272,13 +516,12 @@ def _cmd_chat(args) -> None:
     manager.load_active_tiers()
     engine = manager.get_engine(tier_name)
 
-    use_caveman = not getattr(args, "no_caveman", False)
-    messages: list[dict] = []
-    if use_caveman:
-        from mio.agent import CAVEMAN_LITE
-        messages.append({"role": "system", "content": CAVEMAN_LITE.strip()})
+    from mio.prompt_policy import apply_prompt_policy
+
+    prompt_policy = getattr(args, "prompt_policy", None) or _resolve_prompt_policy_args(args)
+    messages: list[dict] = apply_prompt_policy([], prompt_policy)
     console.print(
-        f"[green]Ready.[/green] Caveman: {'lite' if use_caveman else 'off'}. "
+        f"[green]Ready.[/green] Prompt policy: {prompt_policy.label}. "
         "Type 'quit' to exit.\n"
     )
     while True:
@@ -475,7 +718,13 @@ def _cmd_native_agent(args) -> None:
     manager.load_active_tiers()
 
     initial = " ".join(args.prompt) if args.prompt else None
-    run_agent(config, manager, tier=tier, initial_prompt=initial)
+    run_agent(
+        config,
+        manager,
+        tier=tier,
+        initial_prompt=initial,
+        prompt_policy=getattr(args, "prompt_policy", None),
+    )
     manager.unload_all()
 
 
@@ -504,13 +753,13 @@ def _cmd_menu(args) -> None:
             break
         elif choice == "3":
             args.tier = "large"
-            args.host = "0.0.0.0"
+            args.host = None
             args.tiers = None
             _cmd_serve(args)
             break
         elif choice == "4":
             args.tandem = True
-            args.host = "0.0.0.0"
+            args.host = None
             args.tiers = None
             _cmd_serve(args)
             break

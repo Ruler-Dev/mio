@@ -10,13 +10,12 @@ Pipeline:
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import mlx.core as mx
 from mlx_lm.models import cache as cache_mod
 
-from experimental.spec_prefill.rope_pos import apply_rope_per_position
 from experimental.spec_prefill.scoring import score_prompt_tokens, select_top_k_tokens
 from experimental.spec_prefill.sparse_attention import (
     sparse_block_forward,

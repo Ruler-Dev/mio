@@ -50,6 +50,7 @@ def generate_bmp_dflash_once(
     # Local imports to keep runtime.py the source of truth for these helpers.
     from mio.dflash.runtime import (
         _arm_target_rollback_with_prefix,
+        _commit_prefix_length,
         _lm_head_logits,
         _prepare_prompt_tokens,
         _target_embed_tokens,
@@ -258,15 +259,20 @@ def generate_bmp_dflash_once(
             if per_row[i] > best:
                 winner = i
                 best = per_row[i]
-        acceptance_len = best
+        raw_acceptance_len = best
         winner_history[-1] = winner
-        acceptance_history.append(acceptance_len)
 
         # ----- Commit winner: filter caches to winning row, then rollback tape -----
         commit_start_ns = time.perf_counter_ns()
-        commit_count = 1 + acceptance_len
         winning_row = path_rows[winner]
-        committed_segment = winning_row[:commit_count]
+        candidate_segment = winning_row[: 1 + raw_acceptance_len]
+        commit_count, stop_hit = _commit_prefix_length(
+            candidate_segment,
+            stop_token_array,
+        )
+        acceptance_len = commit_count - 1
+        acceptance_history.append(acceptance_len)
+        committed_segment = candidate_segment[:commit_count]
 
         # Hidden states of the winner before rollback (for next draft round).
         committed_hidden = extract_context_feature_from_dict(
@@ -296,17 +302,8 @@ def generate_bmp_dflash_once(
         cycles_completed += 1
         commit_ns_total += time.perf_counter_ns() - commit_start_ns
 
-        # Stop token?
-        if stop_token_array is not None:
-            stop_hit = bool(
-                mx.any(
-                    mx.equal(
-                        committed_segment[:, None], stop_token_array[None, :]
-                    )
-                ).item()
-            )
-            if stop_hit:
-                break
+        if stop_hit:
+            break
 
         staged_first = posterior[winner : winner + 1, acceptance_len].reshape(-1)
         mx.eval(staged_first)

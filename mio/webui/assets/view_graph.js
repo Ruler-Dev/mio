@@ -30,7 +30,9 @@
     if (window.cytoscape) return window.cytoscape;
     await new Promise((res, rej) => {
       const s = document.createElement("script");
-      s.src = "https://cdn.jsdelivr.net/npm/cytoscape@3.30/dist/cytoscape.min.js";
+      s.src = "https://cdn.jsdelivr.net/npm/cytoscape@3.30.4/dist/cytoscape.min.js";
+      s.integrity = "sha384-H3uzGzTfGHUAumB8+s4GEdfFwzAceN9wCCndN8AXubWKFIPuBSWKKtWDx7RhSf/z";
+      s.crossOrigin = "anonymous";
       s.onload = res; s.onerror = rej;
       document.head.appendChild(s);
     });

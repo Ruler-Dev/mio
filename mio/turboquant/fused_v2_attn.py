@@ -13,7 +13,6 @@ to avoid materializing score/weight matrices.
 Supports 3-bit and 4-bit affine quantization (mx.quantize format).
 """
 
-import math
 
 import mlx.core as mx
 

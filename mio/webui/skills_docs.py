@@ -11,17 +11,21 @@ All outputs land in ~/Downloads.
 
 from __future__ import annotations
 
+import io
 import time
 from pathlib import Path
+
+from mio.webui.safe_files import (
+    UnsafePathError,
+    downloads_input_path,
+    downloads_output_path,
+    open_binary_no_follow,
+)
 
 
 def _output_path(filename: str | None, ext: str) -> Path:
     fn = filename or f"mio-{int(time.time())}{ext}"
-    if not fn.endswith(ext):
-        fn = fn + ext
-    p = Path.home() / "Downloads" / fn
-    p.parent.mkdir(exist_ok=True)
-    return p
+    return downloads_output_path(fn, ext)
 
 
 # ---------------------------------------------------------------------------
@@ -33,64 +37,64 @@ def _output_path(filename: str | None, ext: str) -> Path:
 
 _OFFICE_PRESETS: dict = {
     # Blues
-    "azure":     dict(accent="3B82F6", header="1F4E78", row_alt="EEF5FC", text="111111", family="sans"),
-    "cobalt":    dict(accent="1D4ED8", header="172554", row_alt="EEF2FF", text="111111", family="sans"),
-    "sky":       dict(accent="0284C7", header="0C4A6E", row_alt="F0F9FF", text="111111", family="sans"),
-    "ocean":     dict(accent="0EA5E9", header="075985", row_alt="E0F2FE", text="111111", family="sans"),
-    "navy":      dict(accent="0F2A5A", header="0F2A5A", row_alt="EEF1F8", text="111111", family="serif"),
-    "oxford":    dict(accent="1E3A8A", header="172554", row_alt="EFF6FF", text="111111", family="serif"),
+    "azure": dict(accent="3B82F6", header="1F4E78", row_alt="EEF5FC", text="111111", family="sans"),
+    "cobalt": dict(accent="1D4ED8", header="172554", row_alt="EEF2FF", text="111111", family="sans"),
+    "sky": dict(accent="0284C7", header="0C4A6E", row_alt="F0F9FF", text="111111", family="sans"),
+    "ocean": dict(accent="0EA5E9", header="075985", row_alt="E0F2FE", text="111111", family="sans"),
+    "navy": dict(accent="0F2A5A", header="0F2A5A", row_alt="EEF1F8", text="111111", family="serif"),
+    "oxford": dict(accent="1E3A8A", header="172554", row_alt="EFF6FF", text="111111", family="serif"),
     # Slate / mono
-    "slate":     dict(accent="475569", header="1E293B", row_alt="F1F5F9", text="111111", family="sans"),
-    "graphite":  dict(accent="1F2937", header="111827", row_alt="F3F4F6", text="111111", family="sans"),
-    "minimal":   dict(accent="111111", header="111111", row_alt="F5F5F5", text="111111", family="sans"),
-    "bone":      dict(accent="1A1A1A", header="262626", row_alt="F5F5F4", text="111111", family="serif"),
+    "slate": dict(accent="475569", header="1E293B", row_alt="F1F5F9", text="111111", family="sans"),
+    "graphite": dict(accent="1F2937", header="111827", row_alt="F3F4F6", text="111111", family="sans"),
+    "minimal": dict(accent="111111", header="111111", row_alt="F5F5F5", text="111111", family="sans"),
+    "bone": dict(accent="1A1A1A", header="262626", row_alt="F5F5F4", text="111111", family="serif"),
     # Greens
-    "emerald":   dict(accent="059669", header="064E3B", row_alt="ECFDF5", text="111111", family="sans"),
-    "forest":    dict(accent="15803D", header="14532D", row_alt="F0FDF4", text="111111", family="sans"),
-    "sage":      dict(accent="4D7C5B", header="365240", row_alt="F3F6F3", text="111111", family="sans"),
-    "teal":      dict(accent="0D9488", header="134E4A", row_alt="F0FDFA", text="111111", family="sans"),
+    "emerald": dict(accent="059669", header="064E3B", row_alt="ECFDF5", text="111111", family="sans"),
+    "forest": dict(accent="15803D", header="14532D", row_alt="F0FDF4", text="111111", family="sans"),
+    "sage": dict(accent="4D7C5B", header="365240", row_alt="F3F6F3", text="111111", family="sans"),
+    "teal": dict(accent="0D9488", header="134E4A", row_alt="F0FDFA", text="111111", family="sans"),
     # Reds / warms
-    "crimson":   dict(accent="B91C1C", header="7F1D1D", row_alt="FEF2F2", text="111111", family="serif"),
-    "ruby":      dict(accent="DC2626", header="991B1B", row_alt="FEF2F2", text="111111", family="sans"),
-    "rose":      dict(accent="E11D48", header="881337", row_alt="FFF1F2", text="111111", family="sans"),
-    "amber":     dict(accent="D97706", header="78350F", row_alt="FFFBEB", text="111111", family="sans"),
-    "sunset":    dict(accent="EA580C", header="9A3412", row_alt="FEF3E8", text="111111", family="sans"),
-    "terracotta":dict(accent="C2410C", header="7C2D12", row_alt="FFEDD5", text="111111", family="serif"),
+    "crimson": dict(accent="B91C1C", header="7F1D1D", row_alt="FEF2F2", text="111111", family="serif"),
+    "ruby": dict(accent="DC2626", header="991B1B", row_alt="FEF2F2", text="111111", family="sans"),
+    "rose": dict(accent="E11D48", header="881337", row_alt="FFF1F2", text="111111", family="sans"),
+    "amber": dict(accent="D97706", header="78350F", row_alt="FFFBEB", text="111111", family="sans"),
+    "sunset": dict(accent="EA580C", header="9A3412", row_alt="FEF3E8", text="111111", family="sans"),
+    "terracotta": dict(accent="C2410C", header="7C2D12", row_alt="FFEDD5", text="111111", family="serif"),
     # Purples
-    "violet":    dict(accent="7C3AED", header="4C1D95", row_alt="F5F3FF", text="111111", family="sans"),
-    "indigo":    dict(accent="4F46E5", header="312E81", row_alt="EEF2FF", text="111111", family="sans"),
-    "plum":      dict(accent="7E22CE", header="581C87", row_alt="FAF5FF", text="111111", family="serif"),
+    "violet": dict(accent="7C3AED", header="4C1D95", row_alt="F5F3FF", text="111111", family="sans"),
+    "indigo": dict(accent="4F46E5", header="312E81", row_alt="EEF2FF", text="111111", family="sans"),
+    "plum": dict(accent="7E22CE", header="581C87", row_alt="FAF5FF", text="111111", family="serif"),
     # Corporate / heritage
     "corporate": dict(accent="0F2A5A", header="0F2A5A", row_alt="EEF1F8", text="111111", family="serif"),
-    "embassy":   dict(accent="7F1D1D", header="450A0A", row_alt="FEF2F2", text="111111", family="serif"),
-    "walnut":    dict(accent="78350F", header="422006", row_alt="FEF3E8", text="111111", family="serif"),
-    "brass":     dict(accent="A16207", header="713F12", row_alt="FEFCE8", text="111111", family="serif"),
+    "embassy": dict(accent="7F1D1D", header="450A0A", row_alt="FEF2F2", text="111111", family="serif"),
+    "walnut": dict(accent="78350F", header="422006", row_alt="FEF3E8", text="111111", family="serif"),
+    "brass": dict(accent="A16207", header="713F12", row_alt="FEFCE8", text="111111", family="serif"),
     "cambridge": dict(accent="166534", header="14532D", row_alt="F0FDF4", text="111111", family="serif"),
-    "academic":  dict(accent="374151", header="374151", row_alt="F3F4F6", text="111111", family="serif"),
+    "academic": dict(accent="374151", header="374151", row_alt="F3F4F6", text="111111", family="serif"),
     # Playful
-    "neon":      dict(accent="EC4899", header="831843", row_alt="FDF2F8", text="111111", family="sans"),
-    "tropical":  dict(accent="06B6D4", header="155E75", row_alt="ECFEFF", text="111111", family="sans"),
+    "neon": dict(accent="EC4899", header="831843", row_alt="FDF2F8", text="111111", family="sans"),
+    "tropical": dict(accent="06B6D4", header="155E75", row_alt="ECFEFF", text="111111", family="sans"),
     "bubblegum": dict(accent="EC4899", header="BE185D", row_alt="FDF2F8", text="111111", family="sans"),
-    "citrus":    dict(accent="84CC16", header="365314", row_alt="F7FEE7", text="111111", family="sans"),
-    "peach":     dict(accent="FB923C", header="9A3412", row_alt="FFEDD5", text="111111", family="sans"),
+    "citrus": dict(accent="84CC16", header="365314", row_alt="F7FEE7", text="111111", family="sans"),
+    "peach": dict(accent="FB923C", header="9A3412", row_alt="FFEDD5", text="111111", family="sans"),
     # Technical / dark-accent on white (no true dark background because
     # Office apps default to white pages; these just use darker accents)
-    "carbon":    dict(accent="27272A", header="18181B", row_alt="F4F4F5", text="111111", family="mono"),
-    "midnight":  dict(accent="1E293B", header="0F172A", row_alt="F1F5F9", text="111111", family="sans"),
-    "obsidian":  dict(accent="111827", header="030712", row_alt="F3F4F6", text="111111", family="sans"),
+    "carbon": dict(accent="27272A", header="18181B", row_alt="F4F4F5", text="111111", family="mono"),
+    "midnight": dict(accent="1E293B", header="0F172A", row_alt="F1F5F9", text="111111", family="sans"),
+    "obsidian": dict(accent="111827", header="030712", row_alt="F3F4F6", text="111111", family="sans"),
     "blueprint": dict(accent="0369A1", header="0C4A6E", row_alt="E0F2FE", text="111111", family="mono"),
-    "terminal":  dict(accent="166534", header="14532D", row_alt="F0FDF4", text="111111", family="mono"),
+    "terminal": dict(accent="166534", header="14532D", row_alt="F0FDF4", text="111111", family="mono"),
     # Editorial
     "editorial": dict(accent="B91C1C", header="1A1A1A", row_alt="FBF3EE", text="111111", family="serif"),
-    "vogue":     dict(accent="000000", header="262626", row_alt="FAFAFA", text="111111", family="serif"),
-    "journal":   dict(accent="374151", header="1F2937", row_alt="F9FAFB", text="111111", family="serif"),
+    "vogue": dict(accent="000000", header="262626", row_alt="FAFAFA", text="111111", family="serif"),
+    "journal": dict(accent="374151", header="1F2937", row_alt="F9FAFB", text="111111", family="serif"),
     "parchment": dict(accent="78350F", header="451A03", row_alt="FEF3E8", text="111111", family="serif"),
 }
 
 _OFFICE_FONTS = {
-    "sans":  dict(heading="Calibri", body="Calibri"),
+    "sans": dict(heading="Calibri", body="Calibri"),
     "serif": dict(heading="Cambria", body="Cambria"),
-    "mono":  dict(heading="Consolas", body="Consolas"),
+    "mono": dict(heading="Consolas", body="Consolas"),
 }
 
 # Per-format pools so decks don't pick serif-heavy presets by default and
@@ -98,19 +102,65 @@ _OFFICE_FONTS = {
 _OFFICE_POOLS: dict = {
     "docx": list(_OFFICE_PRESETS.keys()),
     "xlsx": [
-        "azure", "cobalt", "sky", "ocean", "navy", "oxford",
-        "slate", "graphite", "minimal", "emerald", "forest", "teal",
-        "indigo", "violet", "corporate", "academic", "tropical",
-        "crimson", "amber", "sunset", "rose", "carbon", "midnight",
-        "blueprint", "terminal",
+        "azure",
+        "cobalt",
+        "sky",
+        "ocean",
+        "navy",
+        "oxford",
+        "slate",
+        "graphite",
+        "minimal",
+        "emerald",
+        "forest",
+        "teal",
+        "indigo",
+        "violet",
+        "corporate",
+        "academic",
+        "tropical",
+        "crimson",
+        "amber",
+        "sunset",
+        "rose",
+        "carbon",
+        "midnight",
+        "blueprint",
+        "terminal",
     ],
     "pptx": [
-        "azure", "cobalt", "ocean", "navy", "slate", "graphite",
-        "minimal", "emerald", "teal", "indigo", "violet", "crimson",
-        "ruby", "rose", "sunset", "amber", "neon", "tropical",
-        "bubblegum", "citrus", "peach", "plum", "corporate",
-        "embassy", "walnut", "carbon", "midnight", "obsidian",
-        "editorial", "vogue", "journal", "blueprint",
+        "azure",
+        "cobalt",
+        "ocean",
+        "navy",
+        "slate",
+        "graphite",
+        "minimal",
+        "emerald",
+        "teal",
+        "indigo",
+        "violet",
+        "crimson",
+        "ruby",
+        "rose",
+        "sunset",
+        "amber",
+        "neon",
+        "tropical",
+        "bubblegum",
+        "citrus",
+        "peach",
+        "plum",
+        "corporate",
+        "embassy",
+        "walnut",
+        "carbon",
+        "midnight",
+        "obsidian",
+        "editorial",
+        "vogue",
+        "journal",
+        "blueprint",
     ],
 }
 
@@ -119,19 +169,23 @@ def _pick_office_preset(fmt: str, *text_hints: str) -> str:
     """Auto-pick an Office preset. Reuses the PDF keyword table but with
     fallbacks appropriate for Office (no decoration variants)."""
     import re as _re
+
     haystack = " ".join(t for t in text_hints if t).lower()
     tokens = set(_re.findall(r"[a-z0-9]+", haystack)) if haystack else set()
     pool = _OFFICE_POOLS.get(fmt, _OFFICE_POOLS["docx"])
     if tokens:
         for keywords, preset in _PDF_KEYWORD_HINTS:
+
             def matches(k: str) -> bool:
                 return (k in haystack) if " " in k else (k in tokens)
+
             if any(matches(k) for k in keywords):
                 if preset in pool:
                     return preset
                 if preset in _OFFICE_PRESETS:
                     return preset
     import hashlib as _hl
+
     h = int(_hl.sha1(haystack.encode("utf-8")).hexdigest()[:8], 16) if haystack else 0
     return pool[h % len(pool)]
 
@@ -144,7 +198,7 @@ def _office_theme(
     accent_color: str | None = None,
     text_color: str | None = None,
     header_color: str | None = None,
-    background_color: str | None = None,   # reserved for future DOCX/PPTX fill support
+    background_color: str | None = None,  # reserved for future DOCX/PPTX fill support
 ) -> dict:
     """Resolve an Office preset. `color="emerald"` overrides only the color
     triple (accent / header / row_alt). Surgical overrides (`accent_color`,
@@ -171,11 +225,11 @@ def _office_theme(
         h = _coerce_color(v)
         return h.lstrip("#").upper() if h else None
 
-    if (h := _office_hex(accent_color)):
+    if h := _office_hex(accent_color):
         accent = h
-    if (h := _office_hex(header_color)):
+    if h := _office_hex(header_color):
         header = h
-    if (h := _office_hex(text_color)):
+    if h := _office_hex(text_color):
         text = h
 
     return {
@@ -200,6 +254,7 @@ def _docx_add_inline(p, text: str) -> None:
     """Append text to a python-docx paragraph, honoring **bold** and `code`
     inline runs. Keeps rendering simple but avoids raw markdown showing up."""
     import re as _re
+
     tokens = _re.split(r"(\*\*[^*]+\*\*|`[^`]+`)", text)
     for tok in tokens:
         if not tok:
@@ -233,14 +288,17 @@ def generate_docx(
     """
     try:
         from docx import Document
-        from docx.shared import Pt, Inches, RGBColor
+        from docx.shared import RGBColor
         from docx.enum.text import WD_ALIGN_PARAGRAPH
         from docx.enum.table import WD_TABLE_ALIGNMENT
     except ImportError:
         return {"skill": "generate_docx", "error": "python-docx not installed."}
 
     T = _office_theme(
-        preset, "docx", title, (content or "")[:400],
+        preset,
+        "docx",
+        title,
+        (content or "")[:400],
         color=color,
         accent_color=accent_color,
         text_color=text_color,
@@ -248,6 +306,7 @@ def generate_docx(
 
     def _hex_to_rgb(h):
         return RGBColor(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
     ACCENT = _hex_to_rgb(T["accent"])
     HEADER = _hex_to_rgb(T["header"])
 
@@ -340,7 +399,10 @@ def generate_xlsx(
         return {"skill": "generate_xlsx", "error": "headers required"}
 
     T = _office_theme(
-        preset, "xlsx", title, sheet_name,
+        preset,
+        "xlsx",
+        title,
+        sheet_name,
         " ".join(str(h) for h in headers[:8]),
         color=color,
         accent_color=accent_color,
@@ -426,7 +488,7 @@ def generate_pptx(
     """
     try:
         from pptx import Presentation
-        from pptx.util import Inches, Pt, Emu
+        from pptx.util import Inches, Pt
         from pptx.dml.color import RGBColor
         from pptx.enum.shapes import MSO_SHAPE
     except ImportError:
@@ -434,13 +496,17 @@ def generate_pptx(
 
     hints = " ".join([title, subtitle or ""] + [s.get("title", "") for s in (slides or [])[:6]])
     T = _office_theme(
-        preset, "pptx", hints, color=color,
+        preset,
+        "pptx",
+        hints,
+        color=color,
         accent_color=accent_color,
         text_color=text_color,
     )
 
     def _hex_to_rgb(h):
         return RGBColor(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
     ACCENT = _hex_to_rgb(T["accent"])
     HEADER = _hex_to_rgb(T["header"])
 
@@ -451,11 +517,15 @@ def generate_pptx(
     def _decorate(slide, with_title_color=True):
         """Add a skinny accent bar along the left edge of the slide."""
         bar = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, Inches(0.18), prs.slide_height)
-        bar.fill.solid(); bar.fill.fore_color.rgb = ACCENT
+        bar.fill.solid()
+        bar.fill.fore_color.rgb = ACCENT
         bar.line.fill.background()
         # Optional footer dot-bar
-        dot = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, prs.slide_height - Inches(0.18), prs.slide_width, Inches(0.18))
-        dot.fill.solid(); dot.fill.fore_color.rgb = HEADER
+        dot = slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE, 0, prs.slide_height - Inches(0.18), prs.slide_width, Inches(0.18)
+        )
+        dot.fill.solid()
+        dot.fill.fore_color.rgb = HEADER
         dot.line.fill.background()
         if with_title_color and slide.shapes.title:
             for para in slide.shapes.title.text_frame.paragraphs:
@@ -530,6 +600,7 @@ def _markdown_to_sections(md: str) -> list[dict]:
     limited inline markup; we keep it simple and readable).
     """
     import re as _re
+
     lines = [ln.rstrip() for ln in (md or "").splitlines()]
     out: list[dict] = []
     i = 0
@@ -545,13 +616,15 @@ def _markdown_to_sections(md: str) -> list[dict]:
     while i < len(lines):
         ln = lines[i]
         if not ln.strip():
-            flush_para(); i += 1; continue
+            flush_para()
+            i += 1
+            continue
         m = _re.match(r"^(#{1,3})\s+(.*)$", ln)
         if m:
             flush_para()
-            out.append({"kind": "heading", "level": len(m.group(1)),
-                        "text": m.group(2).strip()})
-            i += 1; continue
+            out.append({"kind": "heading", "level": len(m.group(1)), "text": m.group(2).strip()})
+            i += 1
+            continue
         if _re.match(r"^\s*[-*+]\s+", ln):
             flush_para()
             items = []
@@ -564,16 +637,21 @@ def _markdown_to_sections(md: str) -> list[dict]:
         # Pipe table: header | --- | rows
         if "|" in ln and i + 1 < len(lines) and _re.match(r"^[\s|:-]+$", lines[i + 1]):
             flush_para()
+
             def _split(r):
                 cells = [c.strip() for c in r.strip().strip("|").split("|")]
                 return cells
-            headers = _split(ln); i += 2
+
+            headers = _split(ln)
+            i += 2
             rows = []
             while i < len(lines) and "|" in lines[i] and lines[i].strip():
-                rows.append(_split(lines[i])); i += 1
+                rows.append(_split(lines[i]))
+                i += 1
             out.append({"kind": "table", "headers": headers, "rows": rows})
             continue
-        para.append(ln); i += 1
+        para.append(ln)
+        i += 1
     flush_para()
     return out
 
@@ -589,97 +667,139 @@ def _markdown_to_sections(md: str) -> list[dict]:
 
 _PDF_PRESETS: dict = {
     # Core sans-serif + blue family ——————————————————————————————————
-    "azure":            dict(accent="#3b82f6", head_bg="#1F4E78", soft="#f4f7fb", decoration="bar",      family="modern_sans"),
-    "azure-rule":       dict(accent="#3b82f6", head_bg="#1e3a8a", soft="#eff6ff", decoration="rule",     family="modern_sans"),
-    "cobalt":           dict(accent="#1d4ed8", head_bg="#172554", soft="#eef2ff", decoration="bar",      family="modern_sans"),
-    "sky":              dict(accent="#0284c7", head_bg="#0c4a6e", soft="#f0f9ff", decoration="bar",      family="modern_sans"),
-    "ocean":            dict(accent="#0ea5e9", head_bg="#075985", soft="#e0f2fe", decoration="block",    family="modern_sans"),
-    "slate":            dict(accent="#475569", head_bg="#1e293b", soft="#f1f5f9", decoration="rule",     family="modern_sans"),
-    "steel":            dict(accent="#334155", head_bg="#0f172a", soft="#f8fafc", decoration="bar",      family="modern_sans"),
-    "graphite":         dict(accent="#1f2937", head_bg="#111827", soft="#f3f4f6", decoration="rule",     family="modern_sans"),
-
+    "azure": dict(accent="#3b82f6", head_bg="#1F4E78", soft="#f4f7fb", decoration="bar", family="modern_sans"),
+    "azure-rule": dict(accent="#3b82f6", head_bg="#1e3a8a", soft="#eff6ff", decoration="rule", family="modern_sans"),
+    "cobalt": dict(accent="#1d4ed8", head_bg="#172554", soft="#eef2ff", decoration="bar", family="modern_sans"),
+    "sky": dict(accent="#0284c7", head_bg="#0c4a6e", soft="#f0f9ff", decoration="bar", family="modern_sans"),
+    "ocean": dict(accent="#0ea5e9", head_bg="#075985", soft="#e0f2fe", decoration="block", family="modern_sans"),
+    "slate": dict(accent="#475569", head_bg="#1e293b", soft="#f1f5f9", decoration="rule", family="modern_sans"),
+    "steel": dict(accent="#334155", head_bg="#0f172a", soft="#f8fafc", decoration="bar", family="modern_sans"),
+    "graphite": dict(accent="#1f2937", head_bg="#111827", soft="#f3f4f6", decoration="rule", family="modern_sans"),
     # Green / teal / emerald ——————————————————————————————————————————
-    "emerald":          dict(accent="#059669", head_bg="#064e3b", soft="#ecfdf5", decoration="bar",      family="modern_sans"),
-    "forest":           dict(accent="#15803d", head_bg="#14532d", soft="#f0fdf4", decoration="rule",     family="modern_sans"),
-    "sage":             dict(accent="#4d7c5b", head_bg="#365240", soft="#f3f6f3", decoration="rule",     family="modern_sans"),
-    "teal":             dict(accent="#0d9488", head_bg="#134e4a", soft="#f0fdfa", decoration="bar",      family="modern_sans"),
-    "mint":             dict(accent="#10b981", head_bg="#065f46", soft="#ecfdf5", decoration="block",    family="modern_sans"),
-
+    "emerald": dict(accent="#059669", head_bg="#064e3b", soft="#ecfdf5", decoration="bar", family="modern_sans"),
+    "forest": dict(accent="#15803d", head_bg="#14532d", soft="#f0fdf4", decoration="rule", family="modern_sans"),
+    "sage": dict(accent="#4d7c5b", head_bg="#365240", soft="#f3f6f3", decoration="rule", family="modern_sans"),
+    "teal": dict(accent="#0d9488", head_bg="#134e4a", soft="#f0fdfa", decoration="bar", family="modern_sans"),
+    "mint": dict(accent="#10b981", head_bg="#065f46", soft="#ecfdf5", decoration="block", family="modern_sans"),
     # Red / orange / warm ————————————————————————————————————————————
-    "crimson":          dict(accent="#b91c1c", head_bg="#7f1d1d", soft="#fef2f2", decoration="bar",      family="classic_serif"),
-    "ruby":             dict(accent="#dc2626", head_bg="#991b1b", soft="#fef2f2", decoration="rule",     family="modern_sans"),
-    "rose":             dict(accent="#e11d48", head_bg="#881337", soft="#fff1f2", decoration="bar",      family="modern_sans"),
-    "magenta":          dict(accent="#c026d3", head_bg="#701a75", soft="#fdf4ff", decoration="bar",      family="modern_sans"),
-    "amber":            dict(accent="#d97706", head_bg="#78350f", soft="#fffbeb", decoration="bar",      family="modern_sans"),
-    "sunset":           dict(accent="#ea580c", head_bg="#9a3412", soft="#fef3e8", decoration="bar",      family="modern_sans"),
-    "ember":            dict(accent="#dc2626", head_bg="#7c2d12", soft="#fef3e8", decoration="block",    family="modern_sans"),
-    "terracotta":       dict(accent="#c2410c", head_bg="#7c2d12", soft="#ffedd5", decoration="rule",     family="classic_serif"),
-    "marigold":         dict(accent="#f59e0b", head_bg="#78350f", soft="#fffbeb", decoration="bar",      family="modern_sans"),
-
+    "crimson": dict(accent="#b91c1c", head_bg="#7f1d1d", soft="#fef2f2", decoration="bar", family="classic_serif"),
+    "ruby": dict(accent="#dc2626", head_bg="#991b1b", soft="#fef2f2", decoration="rule", family="modern_sans"),
+    "rose": dict(accent="#e11d48", head_bg="#881337", soft="#fff1f2", decoration="bar", family="modern_sans"),
+    "magenta": dict(accent="#c026d3", head_bg="#701a75", soft="#fdf4ff", decoration="bar", family="modern_sans"),
+    "amber": dict(accent="#d97706", head_bg="#78350f", soft="#fffbeb", decoration="bar", family="modern_sans"),
+    "sunset": dict(accent="#ea580c", head_bg="#9a3412", soft="#fef3e8", decoration="bar", family="modern_sans"),
+    "ember": dict(accent="#dc2626", head_bg="#7c2d12", soft="#fef3e8", decoration="block", family="modern_sans"),
+    "terracotta": dict(accent="#c2410c", head_bg="#7c2d12", soft="#ffedd5", decoration="rule", family="classic_serif"),
+    "marigold": dict(accent="#f59e0b", head_bg="#78350f", soft="#fffbeb", decoration="bar", family="modern_sans"),
     # Purple / indigo ————————————————————————————————————————————————
-    "violet":           dict(accent="#7c3aed", head_bg="#4c1d95", soft="#f5f3ff", decoration="bar",      family="modern_sans"),
-    "indigo":           dict(accent="#4f46e5", head_bg="#312e81", soft="#eef2ff", decoration="bar",      family="modern_sans"),
-    "lavender":         dict(accent="#8b5cf6", head_bg="#5b21b6", soft="#f5f3ff", decoration="rule",     family="modern_sans"),
-    "plum":             dict(accent="#7e22ce", head_bg="#581c87", soft="#faf5ff", decoration="block",    family="classic_serif"),
-    "aubergine":        dict(accent="#6b21a8", head_bg="#3b0764", soft="#f5f3ff", decoration="bar",      family="classic_serif"),
-
+    "violet": dict(accent="#7c3aed", head_bg="#4c1d95", soft="#f5f3ff", decoration="bar", family="modern_sans"),
+    "indigo": dict(accent="#4f46e5", head_bg="#312e81", soft="#eef2ff", decoration="bar", family="modern_sans"),
+    "lavender": dict(accent="#8b5cf6", head_bg="#5b21b6", soft="#f5f3ff", decoration="rule", family="modern_sans"),
+    "plum": dict(accent="#7e22ce", head_bg="#581c87", soft="#faf5ff", decoration="block", family="classic_serif"),
+    "aubergine": dict(accent="#6b21a8", head_bg="#3b0764", soft="#f5f3ff", decoration="bar", family="classic_serif"),
     # Dark / night ———————————————————————————————————————————————————
-    "midnight":         dict(accent="#60a5fa", head_bg="#111827", soft="#1f2233", decoration="block",    family="modern_sans", page_bg="#0b0f1a", text="#f5f5f5", muted="#9ca3af"),
-    "obsidian":         dict(accent="#f59e0b", head_bg="#0f172a", soft="#1e293b", decoration="block",    family="modern_sans", page_bg="#020617", text="#f1f5f9", muted="#94a3b8"),
-    "carbon":           dict(accent="#a78bfa", head_bg="#18181b", soft="#27272a", decoration="rule",     family="modern_sans", page_bg="#09090b", text="#fafafa", muted="#a1a1aa"),
-    "nocturne":         dict(accent="#22d3ee", head_bg="#082f49", soft="#0c4a6e", decoration="block",    family="modern_sans", page_bg="#082f49", text="#e0f2fe", muted="#7dd3fc"),
-    "eclipse":          dict(accent="#fb7185", head_bg="#1c1917", soft="#292524", decoration="block",    family="classic_serif", page_bg="#0c0a09", text="#fafaf9", muted="#a8a29e"),
-
+    "midnight": dict(
+        accent="#60a5fa",
+        head_bg="#111827",
+        soft="#1f2233",
+        decoration="block",
+        family="modern_sans",
+        page_bg="#0b0f1a",
+        text="#f5f5f5",
+        muted="#9ca3af",
+    ),
+    "obsidian": dict(
+        accent="#f59e0b",
+        head_bg="#0f172a",
+        soft="#1e293b",
+        decoration="block",
+        family="modern_sans",
+        page_bg="#020617",
+        text="#f1f5f9",
+        muted="#94a3b8",
+    ),
+    "carbon": dict(
+        accent="#a78bfa",
+        head_bg="#18181b",
+        soft="#27272a",
+        decoration="rule",
+        family="modern_sans",
+        page_bg="#09090b",
+        text="#fafafa",
+        muted="#a1a1aa",
+    ),
+    "nocturne": dict(
+        accent="#22d3ee",
+        head_bg="#082f49",
+        soft="#0c4a6e",
+        decoration="block",
+        family="modern_sans",
+        page_bg="#082f49",
+        text="#e0f2fe",
+        muted="#7dd3fc",
+    ),
+    "eclipse": dict(
+        accent="#fb7185",
+        head_bg="#1c1917",
+        soft="#292524",
+        decoration="block",
+        family="classic_serif",
+        page_bg="#0c0a09",
+        text="#fafaf9",
+        muted="#a8a29e",
+    ),
     # Minimal / mono ——————————————————————————————————————————————————
-    "minimal":          dict(accent="#111111", head_bg="#111111", soft="#fafafa", decoration="rule",     family="modern_sans"),
-    "bone":             dict(accent="#1a1a1a", head_bg="#262626", soft="#f5f5f4", decoration="none",     family="classic_serif"),
-    "duotone":          dict(accent="#525252", head_bg="#262626", soft="#f5f5f5", decoration="rule",     family="modern_sans"),
-    "whisper":          dict(accent="#737373", head_bg="#404040", soft="#fafafa", decoration="none",     family="classic_serif"),
-
+    "minimal": dict(accent="#111111", head_bg="#111111", soft="#fafafa", decoration="rule", family="modern_sans"),
+    "bone": dict(accent="#1a1a1a", head_bg="#262626", soft="#f5f5f4", decoration="none", family="classic_serif"),
+    "duotone": dict(accent="#525252", head_bg="#262626", soft="#f5f5f5", decoration="rule", family="modern_sans"),
+    "whisper": dict(accent="#737373", head_bg="#404040", soft="#fafafa", decoration="none", family="classic_serif"),
     # Serif / classic / corporate ————————————————————————————————————
-    "navy":             dict(accent="#0f2a5a", head_bg="#0f2a5a", soft="#eef1f8", decoration="bar",      family="classic_serif"),
-    "claret":           dict(accent="#881337", head_bg="#4c0519", soft="#fff1f2", decoration="bar",      family="classic_serif"),
-    "oxford":           dict(accent="#1e3a8a", head_bg="#172554", soft="#eff6ff", decoration="rule",     family="classic_serif"),
-    "walnut":           dict(accent="#78350f", head_bg="#422006", soft="#fef3e8", decoration="rule",     family="classic_serif"),
-    "cambridge":        dict(accent="#166534", head_bg="#14532d", soft="#f0fdf4", decoration="rule",     family="classic_serif"),
-    "brass":            dict(accent="#a16207", head_bg="#713f12", soft="#fefce8", decoration="bar",      family="classic_serif"),
-    "parchment":        dict(accent="#78350f", head_bg="#451a03", soft="#fef3e8", decoration="none",     family="classic_serif", page_bg="#fdf6e3"),
-
+    "navy": dict(accent="#0f2a5a", head_bg="#0f2a5a", soft="#eef1f8", decoration="bar", family="classic_serif"),
+    "claret": dict(accent="#881337", head_bg="#4c0519", soft="#fff1f2", decoration="bar", family="classic_serif"),
+    "oxford": dict(accent="#1e3a8a", head_bg="#172554", soft="#eff6ff", decoration="rule", family="classic_serif"),
+    "walnut": dict(accent="#78350f", head_bg="#422006", soft="#fef3e8", decoration="rule", family="classic_serif"),
+    "cambridge": dict(accent="#166534", head_bg="#14532d", soft="#f0fdf4", decoration="rule", family="classic_serif"),
+    "brass": dict(accent="#a16207", head_bg="#713f12", soft="#fefce8", decoration="bar", family="classic_serif"),
+    "parchment": dict(
+        accent="#78350f",
+        head_bg="#451a03",
+        soft="#fef3e8",
+        decoration="none",
+        family="classic_serif",
+        page_bg="#fdf6e3",
+    ),
     # Editorial / magazine ————————————————————————————————————————————
-    "editorial":        dict(accent="#b91c1c", head_bg="#1a1a1a", soft="#fbf3ee", decoration="rule",     family="classic_serif"),
-    "vogue":            dict(accent="#000000", head_bg="#262626", soft="#fafafa", decoration="rule",     family="display_serif"),
-    "broadsheet":       dict(accent="#292524", head_bg="#1c1917", soft="#fafaf9", decoration="rule",     family="display_serif"),
-    "journal":          dict(accent="#374151", head_bg="#1f2937", soft="#f9fafb", decoration="none",     family="classic_serif"),
-    "manuscript":       dict(accent="#525252", head_bg="#262626", soft="#fafaf9", decoration="rule",     family="classic_serif"),
-
+    "editorial": dict(accent="#b91c1c", head_bg="#1a1a1a", soft="#fbf3ee", decoration="rule", family="classic_serif"),
+    "vogue": dict(accent="#000000", head_bg="#262626", soft="#fafafa", decoration="rule", family="display_serif"),
+    "broadsheet": dict(accent="#292524", head_bg="#1c1917", soft="#fafaf9", decoration="rule", family="display_serif"),
+    "journal": dict(accent="#374151", head_bg="#1f2937", soft="#f9fafb", decoration="none", family="classic_serif"),
+    "manuscript": dict(accent="#525252", head_bg="#262626", soft="#fafaf9", decoration="rule", family="classic_serif"),
     # Monospaced / technical —————————————————————————————————————————
-    "terminal":         dict(accent="#22c55e", head_bg="#14532d", soft="#f0fdf4", decoration="rule",     family="mono"),
-    "blueprint":        dict(accent="#0284c7", head_bg="#0c4a6e", soft="#e0f2fe", decoration="rule",     family="mono"),
-    "lab":              dict(accent="#4338ca", head_bg="#312e81", soft="#eef2ff", decoration="bar",      family="mono"),
-    "console":          dict(accent="#d97706", head_bg="#78350f", soft="#fffbeb", decoration="rule",     family="mono"),
-
+    "terminal": dict(accent="#22c55e", head_bg="#14532d", soft="#f0fdf4", decoration="rule", family="mono"),
+    "blueprint": dict(accent="#0284c7", head_bg="#0c4a6e", soft="#e0f2fe", decoration="rule", family="mono"),
+    "lab": dict(accent="#4338ca", head_bg="#312e81", soft="#eef2ff", decoration="bar", family="mono"),
+    "console": dict(accent="#d97706", head_bg="#78350f", soft="#fffbeb", decoration="rule", family="mono"),
     # Playful / events ————————————————————————————————————————————————
-    "neon":             dict(accent="#ec4899", head_bg="#831843", soft="#fdf2f8", decoration="bar",      family="modern_sans"),
-    "tropical":         dict(accent="#06b6d4", head_bg="#155e75", soft="#ecfeff", decoration="bar",      family="modern_sans"),
-    "sunrise":          dict(accent="#f97316", head_bg="#9a3412", soft="#ffedd5", decoration="block",    family="modern_sans"),
-    "bubblegum":        dict(accent="#ec4899", head_bg="#be185d", soft="#fdf2f8", decoration="bar",      family="modern_sans"),
-    "pastel":           dict(accent="#a78bfa", head_bg="#6d28d9", soft="#f5f3ff", decoration="rule",     family="modern_sans"),
-    "citrus":           dict(accent="#84cc16", head_bg="#365314", soft="#f7fee7", decoration="bar",      family="modern_sans"),
-    "peach":            dict(accent="#fb923c", head_bg="#9a3412", soft="#ffedd5", decoration="rule",     family="modern_sans"),
-
+    "neon": dict(accent="#ec4899", head_bg="#831843", soft="#fdf2f8", decoration="bar", family="modern_sans"),
+    "tropical": dict(accent="#06b6d4", head_bg="#155e75", soft="#ecfeff", decoration="bar", family="modern_sans"),
+    "sunrise": dict(accent="#f97316", head_bg="#9a3412", soft="#ffedd5", decoration="block", family="modern_sans"),
+    "bubblegum": dict(accent="#ec4899", head_bg="#be185d", soft="#fdf2f8", decoration="bar", family="modern_sans"),
+    "pastel": dict(accent="#a78bfa", head_bg="#6d28d9", soft="#f5f3ff", decoration="rule", family="modern_sans"),
+    "citrus": dict(accent="#84cc16", head_bg="#365314", soft="#f7fee7", decoration="bar", family="modern_sans"),
+    "peach": dict(accent="#fb923c", head_bg="#9a3412", soft="#ffedd5", decoration="rule", family="modern_sans"),
     # Formal / heritage ——————————————————————————————————————————————
-    "embassy":          dict(accent="#7f1d1d", head_bg="#450a0a", soft="#fef2f2", decoration="bar",      family="classic_serif"),
-    "regal":            dict(accent="#713f12", head_bg="#422006", soft="#fef3e8", decoration="bar",      family="display_serif"),
-    "heritage":         dict(accent="#064e3b", head_bg="#022c22", soft="#ecfdf5", decoration="bar",      family="classic_serif"),
-    "academic":         dict(accent="#374151", head_bg="#374151", soft="#f3f4f6", decoration="none",     family="classic_serif"),
-    "corporate":        dict(accent="#0f2a5a", head_bg="#0f2a5a", soft="#eef1f8", decoration="bar",      family="classic_serif"),
+    "embassy": dict(accent="#7f1d1d", head_bg="#450a0a", soft="#fef2f2", decoration="bar", family="classic_serif"),
+    "regal": dict(accent="#713f12", head_bg="#422006", soft="#fef3e8", decoration="bar", family="display_serif"),
+    "heritage": dict(accent="#064e3b", head_bg="#022c22", soft="#ecfdf5", decoration="bar", family="classic_serif"),
+    "academic": dict(accent="#374151", head_bg="#374151", soft="#f3f4f6", decoration="none", family="classic_serif"),
+    "corporate": dict(accent="#0f2a5a", head_bg="#0f2a5a", soft="#eef1f8", decoration="bar", family="classic_serif"),
 }
 
 _PDF_FONT_STACKS = {
-    "modern_sans":   dict(heading="Helvetica-Bold",  body="Helvetica"),
-    "classic_serif": dict(heading="Times-Bold",      body="Times-Roman"),
-    "display_serif": dict(heading="Times-Bold",      body="Times-Roman"),
-    "mono":          dict(heading="Courier-Bold",    body="Courier"),
+    "modern_sans": dict(heading="Helvetica-Bold", body="Helvetica"),
+    "classic_serif": dict(heading="Times-Bold", body="Times-Roman"),
+    "display_serif": dict(heading="Times-Bold", body="Times-Roman"),
+    "mono": dict(heading="Courier-Bold", body="Courier"),
 }
 
 
@@ -692,66 +812,87 @@ _PDF_FONT_STACKS = {
 # ---------------------------------------------------------------------------
 _COLOR_PALETTES: dict = {
     # Blues
-    "azure":      dict(accent="#3b82f6", head_bg="#1F4E78", soft="#f4f7fb", row_alt="EEF5FC"),
-    "cobalt":     dict(accent="#1d4ed8", head_bg="#172554", soft="#eef2ff", row_alt="EEF2FF"),
-    "sky":        dict(accent="#0284c7", head_bg="#0c4a6e", soft="#f0f9ff", row_alt="F0F9FF"),
-    "ocean":      dict(accent="#0ea5e9", head_bg="#075985", soft="#e0f2fe", row_alt="E0F2FE"),
-    "navy":       dict(accent="#0f2a5a", head_bg="#0f2a5a", soft="#eef1f8", row_alt="EEF1F8"),
-    "oxford":     dict(accent="#1e3a8a", head_bg="#172554", soft="#eff6ff", row_alt="EFF6FF"),
-    "indigo":     dict(accent="#4f46e5", head_bg="#312e81", soft="#eef2ff", row_alt="EEF2FF"),
+    "azure": dict(accent="#3b82f6", head_bg="#1F4E78", soft="#f4f7fb", row_alt="EEF5FC"),
+    "cobalt": dict(accent="#1d4ed8", head_bg="#172554", soft="#eef2ff", row_alt="EEF2FF"),
+    "sky": dict(accent="#0284c7", head_bg="#0c4a6e", soft="#f0f9ff", row_alt="F0F9FF"),
+    "ocean": dict(accent="#0ea5e9", head_bg="#075985", soft="#e0f2fe", row_alt="E0F2FE"),
+    "navy": dict(accent="#0f2a5a", head_bg="#0f2a5a", soft="#eef1f8", row_alt="EEF1F8"),
+    "oxford": dict(accent="#1e3a8a", head_bg="#172554", soft="#eff6ff", row_alt="EFF6FF"),
+    "indigo": dict(accent="#4f46e5", head_bg="#312e81", soft="#eef2ff", row_alt="EEF2FF"),
     # Greens / teals
-    "emerald":    dict(accent="#059669", head_bg="#064e3b", soft="#ecfdf5", row_alt="ECFDF5"),
-    "forest":     dict(accent="#15803d", head_bg="#14532d", soft="#f0fdf4", row_alt="F0FDF4"),
-    "sage":       dict(accent="#4d7c5b", head_bg="#365240", soft="#f3f6f3", row_alt="F3F6F3"),
-    "teal":       dict(accent="#0d9488", head_bg="#134e4a", soft="#f0fdfa", row_alt="F0FDFA"),
-    "mint":       dict(accent="#10b981", head_bg="#065f46", soft="#ecfdf5", row_alt="ECFDF5"),
-    "olive":      dict(accent="#65a30d", head_bg="#365314", soft="#f7fee7", row_alt="F7FEE7"),
+    "emerald": dict(accent="#059669", head_bg="#064e3b", soft="#ecfdf5", row_alt="ECFDF5"),
+    "forest": dict(accent="#15803d", head_bg="#14532d", soft="#f0fdf4", row_alt="F0FDF4"),
+    "sage": dict(accent="#4d7c5b", head_bg="#365240", soft="#f3f6f3", row_alt="F3F6F3"),
+    "teal": dict(accent="#0d9488", head_bg="#134e4a", soft="#f0fdfa", row_alt="F0FDFA"),
+    "mint": dict(accent="#10b981", head_bg="#065f46", soft="#ecfdf5", row_alt="ECFDF5"),
+    "olive": dict(accent="#65a30d", head_bg="#365314", soft="#f7fee7", row_alt="F7FEE7"),
     # Reds / roses
-    "crimson":    dict(accent="#b91c1c", head_bg="#7f1d1d", soft="#fef2f2", row_alt="FEF2F2"),
-    "ruby":       dict(accent="#dc2626", head_bg="#991b1b", soft="#fef2f2", row_alt="FEF2F2"),
-    "rose":       dict(accent="#e11d48", head_bg="#881337", soft="#fff1f2", row_alt="FFF1F2"),
-    "coral":      dict(accent="#f43f5e", head_bg="#be123c", soft="#fff1f2", row_alt="FFF1F2"),
-    "burgundy":   dict(accent="#881337", head_bg="#4c0519", soft="#fff1f2", row_alt="FFF1F2"),
+    "crimson": dict(accent="#b91c1c", head_bg="#7f1d1d", soft="#fef2f2", row_alt="FEF2F2"),
+    "ruby": dict(accent="#dc2626", head_bg="#991b1b", soft="#fef2f2", row_alt="FEF2F2"),
+    "rose": dict(accent="#e11d48", head_bg="#881337", soft="#fff1f2", row_alt="FFF1F2"),
+    "coral": dict(accent="#f43f5e", head_bg="#be123c", soft="#fff1f2", row_alt="FFF1F2"),
+    "burgundy": dict(accent="#881337", head_bg="#4c0519", soft="#fff1f2", row_alt="FFF1F2"),
     # Oranges / warms
-    "amber":      dict(accent="#d97706", head_bg="#78350f", soft="#fffbeb", row_alt="FFFBEB"),
-    "sunset":     dict(accent="#ea580c", head_bg="#9a3412", soft="#fef3e8", row_alt="FEF3E8"),
-    "ember":      dict(accent="#dc2626", head_bg="#7c2d12", soft="#fef3e8", row_alt="FEF3E8"),
+    "amber": dict(accent="#d97706", head_bg="#78350f", soft="#fffbeb", row_alt="FFFBEB"),
+    "sunset": dict(accent="#ea580c", head_bg="#9a3412", soft="#fef3e8", row_alt="FEF3E8"),
+    "ember": dict(accent="#dc2626", head_bg="#7c2d12", soft="#fef3e8", row_alt="FEF3E8"),
     "terracotta": dict(accent="#c2410c", head_bg="#7c2d12", soft="#ffedd5", row_alt="FFEDD5"),
-    "marigold":   dict(accent="#f59e0b", head_bg="#78350f", soft="#fffbeb", row_alt="FFFBEB"),
-    "peach":      dict(accent="#fb923c", head_bg="#9a3412", soft="#ffedd5", row_alt="FFEDD5"),
+    "marigold": dict(accent="#f59e0b", head_bg="#78350f", soft="#fffbeb", row_alt="FFFBEB"),
+    "peach": dict(accent="#fb923c", head_bg="#9a3412", soft="#ffedd5", row_alt="FFEDD5"),
     # Purples / magentas
-    "violet":     dict(accent="#7c3aed", head_bg="#4c1d95", soft="#f5f3ff", row_alt="F5F3FF"),
-    "lavender":   dict(accent="#8b5cf6", head_bg="#5b21b6", soft="#f5f3ff", row_alt="F5F3FF"),
-    "plum":       dict(accent="#7e22ce", head_bg="#581c87", soft="#faf5ff", row_alt="FAF5FF"),
-    "magenta":    dict(accent="#c026d3", head_bg="#701a75", soft="#fdf4ff", row_alt="FDF4FF"),
-    "fuchsia":    dict(accent="#d946ef", head_bg="#86198f", soft="#fdf4ff", row_alt="FDF4FF"),
+    "violet": dict(accent="#7c3aed", head_bg="#4c1d95", soft="#f5f3ff", row_alt="F5F3FF"),
+    "lavender": dict(accent="#8b5cf6", head_bg="#5b21b6", soft="#f5f3ff", row_alt="F5F3FF"),
+    "plum": dict(accent="#7e22ce", head_bg="#581c87", soft="#faf5ff", row_alt="FAF5FF"),
+    "magenta": dict(accent="#c026d3", head_bg="#701a75", soft="#fdf4ff", row_alt="FDF4FF"),
+    "fuchsia": dict(accent="#d946ef", head_bg="#86198f", soft="#fdf4ff", row_alt="FDF4FF"),
     # Neutrals
-    "slate":      dict(accent="#475569", head_bg="#1e293b", soft="#f1f5f9", row_alt="F1F5F9"),
-    "graphite":   dict(accent="#1f2937", head_bg="#111827", soft="#f3f4f6", row_alt="F3F4F6"),
-    "carbon":     dict(accent="#27272a", head_bg="#18181b", soft="#f4f4f5", row_alt="F4F4F5"),
-    "midnight":   dict(accent="#1e293b", head_bg="#0f172a", soft="#f1f5f9", row_alt="F1F5F9"),
-    "mono":       dict(accent="#111111", head_bg="#111111", soft="#fafafa", row_alt="F5F5F5"),
-    "bone":       dict(accent="#1a1a1a", head_bg="#262626", soft="#f5f5f4", row_alt="F5F5F4"),
+    "slate": dict(accent="#475569", head_bg="#1e293b", soft="#f1f5f9", row_alt="F1F5F9"),
+    "graphite": dict(accent="#1f2937", head_bg="#111827", soft="#f3f4f6", row_alt="F3F4F6"),
+    "carbon": dict(accent="#27272a", head_bg="#18181b", soft="#f4f4f5", row_alt="F4F4F5"),
+    "midnight": dict(accent="#1e293b", head_bg="#0f172a", soft="#f1f5f9", row_alt="F1F5F9"),
+    "mono": dict(accent="#111111", head_bg="#111111", soft="#fafafa", row_alt="F5F5F5"),
+    "bone": dict(accent="#1a1a1a", head_bg="#262626", soft="#f5f5f4", row_alt="F5F5F4"),
     # Specials
-    "brass":      dict(accent="#a16207", head_bg="#713f12", soft="#fefce8", row_alt="FEFCE8"),
-    "walnut":     dict(accent="#78350f", head_bg="#422006", soft="#fef3e8", row_alt="FEF3E8"),
-    "ice":        dict(accent="#67e8f9", head_bg="#0e7490", soft="#ecfeff", row_alt="ECFEFF"),
-    "neon":       dict(accent="#ec4899", head_bg="#831843", soft="#fdf2f8", row_alt="FDF2F8"),
+    "brass": dict(accent="#a16207", head_bg="#713f12", soft="#fefce8", row_alt="FEFCE8"),
+    "walnut": dict(accent="#78350f", head_bg="#422006", soft="#fef3e8", row_alt="FEF3E8"),
+    "ice": dict(accent="#67e8f9", head_bg="#0e7490", soft="#ecfeff", row_alt="ECFEFF"),
+    "neon": dict(accent="#ec4899", head_bg="#831843", soft="#fdf2f8", row_alt="FDF2F8"),
 }
 
 # Aliases so natural-language color words map to the canonical palette name
 _COLOR_ALIASES = {
-    "blue": "azure", "dark blue": "navy", "light blue": "sky", "deep blue": "cobalt",
-    "green": "emerald", "dark green": "forest", "light green": "mint",
-    "red": "ruby", "dark red": "crimson", "light red": "rose",
-    "orange": "sunset", "dark orange": "ember", "light orange": "peach",
-    "yellow": "marigold", "gold": "brass",
-    "purple": "violet", "dark purple": "plum", "light purple": "lavender",
-    "pink": "rose", "hot pink": "magenta",
-    "black": "mono", "dark": "carbon", "night": "midnight",
-    "grey": "slate", "gray": "slate", "dark grey": "graphite", "dark gray": "graphite",
-    "brown": "walnut", "tan": "brass",
-    "turquoise": "teal", "cyan": "ice", "aqua": "ice",
+    "blue": "azure",
+    "dark blue": "navy",
+    "light blue": "sky",
+    "deep blue": "cobalt",
+    "green": "emerald",
+    "dark green": "forest",
+    "light green": "mint",
+    "red": "ruby",
+    "dark red": "crimson",
+    "light red": "rose",
+    "orange": "sunset",
+    "dark orange": "ember",
+    "light orange": "peach",
+    "yellow": "marigold",
+    "gold": "brass",
+    "purple": "violet",
+    "dark purple": "plum",
+    "light purple": "lavender",
+    "pink": "rose",
+    "hot pink": "magenta",
+    "black": "mono",
+    "dark": "carbon",
+    "night": "midnight",
+    "grey": "slate",
+    "gray": "slate",
+    "dark grey": "graphite",
+    "dark gray": "graphite",
+    "brown": "walnut",
+    "tan": "brass",
+    "turquoise": "teal",
+    "cyan": "ice",
+    "aqua": "ice",
 }
 
 COLOR_PALETTES = tuple(sorted(_COLOR_PALETTES.keys()))
@@ -766,54 +907,157 @@ def _resolve_color_palette(name: str | None) -> dict | None:
     key = _COLOR_ALIASES.get(key, key)
     return _COLOR_PALETTES.get(key)
 
+
 # Presets grouped by intended document type. When a skill is called with
 # `preset="auto"` (the default), we pick from the matching bucket. Lets us
 # keep the look appropriate to the document without the model having to
 # pick from 60 names.
 _PDF_POOLS: dict = {
     "report": [
-        "azure", "slate", "steel", "graphite", "emerald", "forest", "teal",
-        "indigo", "cobalt", "navy", "oxford", "journal", "minimal",
-        "midnight", "obsidian", "carbon", "lab", "blueprint", "duotone",
-        "academic", "cambridge", "claret", "sage",
+        "azure",
+        "slate",
+        "steel",
+        "graphite",
+        "emerald",
+        "forest",
+        "teal",
+        "indigo",
+        "cobalt",
+        "navy",
+        "oxford",
+        "journal",
+        "minimal",
+        "midnight",
+        "obsidian",
+        "carbon",
+        "lab",
+        "blueprint",
+        "duotone",
+        "academic",
+        "cambridge",
+        "claret",
+        "sage",
     ],
     "letter": [
-        "minimal", "bone", "oxford", "navy", "journal", "whisper",
-        "walnut", "embassy", "manuscript", "parchment", "academic",
-        "slate", "graphite", "cambridge", "broadsheet",
+        "minimal",
+        "bone",
+        "oxford",
+        "navy",
+        "journal",
+        "whisper",
+        "walnut",
+        "embassy",
+        "manuscript",
+        "parchment",
+        "academic",
+        "slate",
+        "graphite",
+        "cambridge",
+        "broadsheet",
     ],
     "certificate": [
-        "embassy", "regal", "heritage", "navy", "oxford", "walnut",
-        "brass", "claret", "cambridge", "parchment", "vogue",
-        "broadsheet", "corporate",
+        "embassy",
+        "regal",
+        "heritage",
+        "navy",
+        "oxford",
+        "walnut",
+        "brass",
+        "claret",
+        "cambridge",
+        "parchment",
+        "vogue",
+        "broadsheet",
+        "corporate",
     ],
     "flyer": [
-        "sunset", "ember", "marigold", "neon", "tropical", "sunrise",
-        "bubblegum", "pastel", "citrus", "peach", "rose", "magenta",
-        "amber", "teal", "emerald", "indigo", "violet",
+        "sunset",
+        "ember",
+        "marigold",
+        "neon",
+        "tropical",
+        "sunrise",
+        "bubblegum",
+        "pastel",
+        "citrus",
+        "peach",
+        "rose",
+        "magenta",
+        "amber",
+        "teal",
+        "emerald",
+        "indigo",
+        "violet",
     ],
     "menu": [
-        "editorial", "terracotta", "walnut", "brass", "embassy",
-        "regal", "parchment", "rose", "amber", "sage", "manuscript",
+        "editorial",
+        "terracotta",
+        "walnut",
+        "brass",
+        "embassy",
+        "regal",
+        "parchment",
+        "rose",
+        "amber",
+        "sage",
+        "manuscript",
         "vogue",
     ],
     "brochure": [
-        "azure", "ocean", "emerald", "teal", "indigo", "violet",
-        "sunset", "amber", "rose", "navy", "graphite", "minimal",
-        "marigold", "tropical", "sage",
+        "azure",
+        "ocean",
+        "emerald",
+        "teal",
+        "indigo",
+        "violet",
+        "sunset",
+        "amber",
+        "rose",
+        "navy",
+        "graphite",
+        "minimal",
+        "marigold",
+        "tropical",
+        "sage",
     ],
     "newsletter": [
-        "editorial", "journal", "broadsheet", "manuscript", "vogue",
-        "minimal", "duotone", "graphite", "claret", "navy", "oxford",
+        "editorial",
+        "journal",
+        "broadsheet",
+        "manuscript",
+        "vogue",
+        "minimal",
+        "duotone",
+        "graphite",
+        "claret",
+        "navy",
+        "oxford",
     ],
     "card": [
-        "minimal", "bone", "graphite", "slate", "navy", "walnut",
-        "azure", "carbon", "midnight", "whisper", "duotone", "emerald",
-        "crimson", "violet",
+        "minimal",
+        "bone",
+        "graphite",
+        "slate",
+        "navy",
+        "walnut",
+        "azure",
+        "carbon",
+        "midnight",
+        "whisper",
+        "duotone",
+        "emerald",
+        "crimson",
+        "violet",
     ],
     "general": [
-        "azure", "slate", "minimal", "navy", "graphite", "emerald",
-        "indigo", "editorial",
+        "azure",
+        "slate",
+        "minimal",
+        "navy",
+        "graphite",
+        "emerald",
+        "indigo",
+        "editorial",
     ],
 }
 
@@ -821,29 +1065,26 @@ _PDF_POOLS: dict = {
 # caller provides title / content / subject text; otherwise we fall back
 # to random choice from the skill's pool.
 _PDF_KEYWORD_HINTS: list[tuple[tuple[str, ...], str]] = [
-    (("wedding", "bridal", "bride", "groom"),                        "parchment"),
-    (("birthday", "party", "celebration", "rsvp"),                   "bubblegum"),
-    (("halloween", "horror", "spooky"),                              "obsidian"),
-    (("christmas", "holiday", "festive"),                            "crimson"),
-    (("finance", "financial", "earnings", "revenue", "q1", "q2",
-      "q3", "q4", "quarterly"),                                      "navy"),
-    (("tech", "engineering", "developer", "software", "api",
-      "architecture", "infrastructure"),                             "carbon"),
-    (("research", "paper", "thesis", "study", "academic",
-      "university"),                                                 "academic"),
-    (("legal", "law firm", "contract", "agreement", "attorney"),     "oxford"),
-    (("medical", "health", "clinical", "patient"),                   "teal"),
-    (("startup", "pitch", "investor", "fundraising"),                "indigo"),
-    (("menu", "restaurant", "bistro", "cafe", "café"),               "walnut"),
-    (("resort", "beach", "vacation", "travel", "tropical"),          "tropical"),
-    (("summer", "festival", "sunshine", "garden"),                   "sunset"),
-    (("minimalist", "simple", "clean"),                              "minimal"),
-    (("retro", "vintage", "classic"),                                "terracotta"),
-    (("nature", "eco", "sustainability", "environment"),             "forest"),
-    (("spring", "floral"),                                           "rose"),
-    (("government", "official", "ministry"),                         "embassy"),
-    (("music", "concert", "band", "album"),                          "neon"),
-    (("architecture", "construction", "blueprint"),                  "blueprint"),
+    (("wedding", "bridal", "bride", "groom"), "parchment"),
+    (("birthday", "party", "celebration", "rsvp"), "bubblegum"),
+    (("halloween", "horror", "spooky"), "obsidian"),
+    (("christmas", "holiday", "festive"), "crimson"),
+    (("finance", "financial", "earnings", "revenue", "q1", "q2", "q3", "q4", "quarterly"), "navy"),
+    (("tech", "engineering", "developer", "software", "api", "architecture", "infrastructure"), "carbon"),
+    (("research", "paper", "thesis", "study", "academic", "university"), "academic"),
+    (("legal", "law firm", "contract", "agreement", "attorney"), "oxford"),
+    (("medical", "health", "clinical", "patient"), "teal"),
+    (("startup", "pitch", "investor", "fundraising"), "indigo"),
+    (("menu", "restaurant", "bistro", "cafe", "café"), "walnut"),
+    (("resort", "beach", "vacation", "travel", "tropical"), "tropical"),
+    (("summer", "festival", "sunshine", "garden"), "sunset"),
+    (("minimalist", "simple", "clean"), "minimal"),
+    (("retro", "vintage", "classic"), "terracotta"),
+    (("nature", "eco", "sustainability", "environment"), "forest"),
+    (("spring", "floral"), "rose"),
+    (("government", "official", "ministry"), "embassy"),
+    (("music", "concert", "band", "album"), "neon"),
+    (("architecture", "construction", "blueprint"), "blueprint"),
 ]
 
 
@@ -854,6 +1095,7 @@ def _pick_pdf_preset(skill_kind: str, *text_hints: str) -> str:
     we don't always return the same one but the same input stays stable.
     """
     import re as _re
+
     haystack = " ".join(t for t in text_hints if t).lower()
     if haystack:
         # Whole-word tokenization — avoids false positives like "eco" in
@@ -867,6 +1109,7 @@ def _pick_pdf_preset(skill_kind: str, *text_hints: str) -> str:
                 if " " in k:
                     return k in haystack
                 return k in tokens
+
             if any(matches(k) for k in keywords):
                 pool = _PDF_POOLS.get(skill_kind) or _PDF_POOLS["general"]
                 if preset in pool:
@@ -877,25 +1120,45 @@ def _pick_pdf_preset(skill_kind: str, *text_hints: str) -> str:
     # Deterministic "random" from hashed input so repeating the same
     # request gives the same preset but different requests vary.
     import hashlib as _hl
+
     h = int(_hl.sha1(haystack.encode("utf-8")).hexdigest()[:8], 16) if haystack else 0
     return pool[h % len(pool)]
 
 
 _NAMED_COLORS: dict = {
-    "black": "#000000", "white": "#ffffff",
-    "red": "#dc2626", "green": "#16a34a", "blue": "#2563eb",
-    "yellow": "#eab308", "orange": "#ea580c", "purple": "#7c3aed",
-    "pink": "#ec4899", "brown": "#92400e", "grey": "#6b7280", "gray": "#6b7280",
-    "light grey": "#e5e7eb", "light gray": "#e5e7eb",
-    "dark grey": "#1f2937", "dark gray": "#1f2937",
-    "cream": "#fef3c7", "beige": "#fde68a",
-    "light green": "#bbf7d0", "mint": "#d1fae5", "pale green": "#d1fae5",
-    "light blue": "#bfdbfe", "sky": "#e0f2fe",
-    "light pink": "#fbcfe8", "pale pink": "#fce7f3",
-    "light yellow": "#fef9c3", "pale yellow": "#fef3c7",
-    "light purple": "#ddd6fe", "lavender": "#e9d5ff",
-    "light orange": "#fed7aa", "peach": "#ffedd5",
-    "light red": "#fecaca", "coral": "#fecdd3",
+    "black": "#000000",
+    "white": "#ffffff",
+    "red": "#dc2626",
+    "green": "#16a34a",
+    "blue": "#2563eb",
+    "yellow": "#eab308",
+    "orange": "#ea580c",
+    "purple": "#7c3aed",
+    "pink": "#ec4899",
+    "brown": "#92400e",
+    "grey": "#6b7280",
+    "gray": "#6b7280",
+    "light grey": "#e5e7eb",
+    "light gray": "#e5e7eb",
+    "dark grey": "#1f2937",
+    "dark gray": "#1f2937",
+    "cream": "#fef3c7",
+    "beige": "#fde68a",
+    "light green": "#bbf7d0",
+    "mint": "#d1fae5",
+    "pale green": "#d1fae5",
+    "light blue": "#bfdbfe",
+    "sky": "#e0f2fe",
+    "light pink": "#fbcfe8",
+    "pale pink": "#fce7f3",
+    "light yellow": "#fef9c3",
+    "pale yellow": "#fef3c7",
+    "light purple": "#ddd6fe",
+    "lavender": "#e9d5ff",
+    "light orange": "#fed7aa",
+    "peach": "#ffedd5",
+    "light red": "#fecaca",
+    "coral": "#fecdd3",
 }
 
 
@@ -934,6 +1197,7 @@ def _pdf_theme(
       Use these when the user explicitly asks for a specific color.
     """
     from reportlab.lib import colors
+
     key = (name or "auto").strip().lower()
     if key in ("auto", "", "default"):
         key = _pick_pdf_preset(skill_kind, *hints)
@@ -942,8 +1206,7 @@ def _pdf_theme(
     # else (font family, decoration, page_bg, text color).
     override = _resolve_color_palette(color)
     if override:
-        p = {**p, "accent": override["accent"], "head_bg": override["head_bg"],
-             "soft": override["soft"]}
+        p = {**p, "accent": override["accent"], "head_bg": override["head_bg"], "soft": override["soft"]}
     family = _PDF_FONT_STACKS.get(p.get("family", "modern_sans"))
     text = p.get("text", "#171717")
     muted = p.get("muted", "#6f6f6f")
@@ -967,22 +1230,22 @@ def _pdf_theme(
         head_bg = p["head_bg"]
 
     t = {
-        "name":           key,
+        "name": key,
         "color_override": _resolve_color_palette(color) and (color or "").lower(),
-        "accent":         accent,
-        "text":           text,
-        "muted":          muted,
-        "soft":           p["soft"],
-        "head_bg":        head_bg,
-        "page_bg":        page_bg,
-        "heading_font":   family["heading"],
-        "body_font":      family["body"],
-        "decoration":     p["decoration"],
+        "accent": accent,
+        "text": text,
+        "muted": muted,
+        "soft": p["soft"],
+        "head_bg": head_bg,
+        "page_bg": page_bg,
+        "heading_font": family["heading"],
+        "body_font": family["body"],
+        "decoration": p["decoration"],
     }
     t["accent_c"] = colors.HexColor(t["accent"])
-    t["text_c"]   = colors.HexColor(t["text"])
-    t["muted_c"]  = colors.HexColor(t["muted"])
-    t["soft_c"]   = colors.HexColor(t["soft"])
+    t["text_c"] = colors.HexColor(t["text"])
+    t["muted_c"] = colors.HexColor(t["muted"])
+    t["soft_c"] = colors.HexColor(t["soft"])
     t["head_bg_c"] = colors.HexColor(t["head_bg"])
     t["page_bg_c"] = colors.HexColor(t["page_bg"]) if t["page_bg"] else None
     return t
@@ -992,8 +1255,14 @@ def _pdf_theme(
 PDF_PRESETS = tuple(sorted(_PDF_PRESETS.keys()))
 # Backward-compat alias: the short list of legacy theme names.
 PDF_THEMES = (
-    "auto", "azure", "midnight", "minimal", "navy", "editorial",
-    "sunset", "academic",
+    "auto",
+    "azure",
+    "midnight",
+    "minimal",
+    "navy",
+    "editorial",
+    "sunset",
+    "academic",
 )
 
 
@@ -1048,8 +1317,15 @@ def generate_pdf_report(
         from reportlab.lib import colors
         from reportlab.lib.enums import TA_LEFT
         from reportlab.platypus import (
-            SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image,
-            ListFlowable, ListItem, PageBreak,
+            SimpleDocTemplate,
+            Paragraph,
+            Spacer,
+            Table,
+            TableStyle,
+            Image,
+            ListFlowable,
+            ListItem,
+            PageBreak,
         )
     except ImportError:
         return {"skill": "generate_pdf_report", "error": "reportlab not installed."}
@@ -1058,7 +1334,10 @@ def generate_pdf_report(
 
     # --- Resolve preset palette + page decoration (auto-picks by default) ---
     T = _pdf_theme(
-        preset or theme, "report", title, (content or "")[:400],
+        preset or theme,
+        "report",
+        title,
+        (content or "")[:400],
         color=color,
         background_color=background_color,
         text_color=text_color,
@@ -1102,51 +1381,88 @@ def generate_pdf_report(
         canvas.restoreState()
 
     doc = SimpleDocTemplate(
-        str(out), pagesize=A4,
-        leftMargin=22 * mm, rightMargin=22 * mm,
-        topMargin=24 * mm, bottomMargin=22 * mm,
-        title=title, author=author,
+        str(out),
+        pagesize=A4,
+        leftMargin=22 * mm,
+        rightMargin=22 * mm,
+        topMargin=24 * mm,
+        bottomMargin=22 * mm,
+        title=title,
+        author=author,
     )
 
     base = getSampleStyleSheet()
     title_style = ParagraphStyle(
-        "PMTitle", parent=base["Title"], fontName=HEADING_F,
-        fontSize=26, leading=30, textColor=TEXT, spaceAfter=4, alignment=TA_LEFT,
+        "PMTitle",
+        parent=base["Title"],
+        fontName=HEADING_F,
+        fontSize=26,
+        leading=30,
+        textColor=TEXT,
+        spaceAfter=4,
+        alignment=TA_LEFT,
     )
     subtitle_style = ParagraphStyle(
-        "PMSubtitle", parent=base["Normal"], fontName=BODY_F,
-        fontSize=10, leading=14, textColor=MUTED, spaceAfter=18, alignment=TA_LEFT,
+        "PMSubtitle",
+        parent=base["Normal"],
+        fontName=BODY_F,
+        fontSize=10,
+        leading=14,
+        textColor=MUTED,
+        spaceAfter=18,
+        alignment=TA_LEFT,
     )
     h1 = ParagraphStyle(
-        "PMH1", parent=base["Heading1"], fontName=HEADING_F,
-        fontSize=17, leading=22, textColor=TEXT,
-        spaceBefore=18, spaceAfter=6, keepWithNext=1,
-        borderPadding=(0, 0, 4, 0), borderColor=ACCENT, borderWidth=0,
+        "PMH1",
+        parent=base["Heading1"],
+        fontName=HEADING_F,
+        fontSize=17,
+        leading=22,
+        textColor=TEXT,
+        spaceBefore=18,
+        spaceAfter=6,
+        keepWithNext=1,
+        borderPadding=(0, 0, 4, 0),
+        borderColor=ACCENT,
+        borderWidth=0,
     )
     h2 = ParagraphStyle(
-        "PMH2", parent=base["Heading2"], fontName=HEADING_F,
-        fontSize=13, leading=17, textColor=ACCENT,
-        spaceBefore=14, spaceAfter=4, keepWithNext=1,
+        "PMH2",
+        parent=base["Heading2"],
+        fontName=HEADING_F,
+        fontSize=13,
+        leading=17,
+        textColor=ACCENT,
+        spaceBefore=14,
+        spaceAfter=4,
+        keepWithNext=1,
     )
     h3 = ParagraphStyle(
-        "PMH3", parent=base["Heading3"], fontName=HEADING_F,
-        fontSize=11, leading=15, textColor=TEXT,
-        spaceBefore=10, spaceAfter=3, keepWithNext=1,
+        "PMH3",
+        parent=base["Heading3"],
+        fontName=HEADING_F,
+        fontSize=11,
+        leading=15,
+        textColor=TEXT,
+        spaceBefore=10,
+        spaceAfter=3,
+        keepWithNext=1,
     )
     body = ParagraphStyle(
-        "PMBody", parent=base["BodyText"], fontName=BODY_F,
-        fontSize=10.5, leading=15, textColor=TEXT,
-        spaceAfter=6, alignment=TA_LEFT,
+        "PMBody",
+        parent=base["BodyText"],
+        fontName=BODY_F,
+        fontSize=10.5,
+        leading=15,
+        textColor=TEXT,
+        spaceAfter=6,
+        alignment=TA_LEFT,
     )
-    caption = ParagraphStyle(
-        "PMCaption", parent=body, fontName=BODY_F,
-        fontSize=9, leading=12, textColor=MUTED, spaceAfter=8,
-    )
-
     # Accept `sections` as a list; tolerate accidental single-dict or JSON
     # string the model sometimes produces.
     if isinstance(sections, str):
         import json as _json
+
         try:
             sections = _json.loads(sections)
         except Exception:
@@ -1175,8 +1491,7 @@ def generate_pdf_report(
         out = []
         for k in ("heading", "title", "header"):
             if s.get(k):
-                out.append({"kind": "heading", "text": str(s[k]),
-                            "level": int(s.get("level", 2))})
+                out.append({"kind": "heading", "text": str(s[k]), "level": int(s.get("level", 2))})
                 break
         for k in ("text", "content", "paragraph", "body", "description"):
             if s.get(k) and isinstance(s[k], str):
@@ -1191,16 +1506,18 @@ def generate_pdf_report(
                 break
         if s.get("rows") or s.get("table"):
             tbl = s.get("table") if isinstance(s.get("table"), dict) else s
-            out.append({"kind": "table",
-                        "headers": tbl.get("headers") or [],
-                        "rows": tbl.get("rows") or []})
+            out.append({"kind": "table", "headers": tbl.get("headers") or [], "rows": tbl.get("rows") or []})
         if s.get("chart_type") or s.get("chart"):
             ch = s.get("chart") if isinstance(s.get("chart"), dict) else s
-            out.append({"kind": "chart",
-                        "chart_type": ch.get("chart_type", "bar"),
-                        "title": ch.get("title", ""),
-                        "labels": ch.get("labels") or [],
-                        "values": ch.get("values") or []})
+            out.append(
+                {
+                    "kind": "chart",
+                    "chart_type": ch.get("chart_type", "bar"),
+                    "title": ch.get("title", ""),
+                    "labels": ch.get("labels") or [],
+                    "values": ch.get("values") or [],
+                }
+            )
         if out:
             return out
         # Last resort: render the dict as key/value paragraphs so content
@@ -1222,22 +1539,24 @@ def generate_pdf_report(
         }
 
     import datetime as _dt
+
     story = [
         Paragraph(title, title_style),
         Paragraph(
-            f"{_dt.date.today().strftime('%B %d, %Y')}"
-            + (f" · {author}" if author and author != "Mio" else ""),
+            f"{_dt.date.today().strftime('%B %d, %Y')}" + (f" · {author}" if author and author != "Mio" else ""),
             subtitle_style,
         ),
     ]
 
     import tempfile
     import os
+
     chart_tmpfiles: list[str] = []
 
     def _chart_png(sec: dict) -> str | None:
         try:
             import matplotlib
+
             matplotlib.use("Agg")
             import matplotlib.pyplot as plt
         except ImportError:
@@ -1294,7 +1613,7 @@ def generate_pdf_report(
                 continue  # empty table — skip
             if not headers and rows:
                 # Infer column count from first row
-                headers = [f"Col {i+1}" for i in range(len(rows[0]))]
+                headers = [f"Col {i + 1}" for i in range(len(rows[0]))]
             # Normalize all rows to header length
             ncols = len(headers)
             norm_rows = []
@@ -1307,25 +1626,29 @@ def generate_pdf_report(
                 norm_rows.append(r)
             data = [[str(x) for x in headers]] + [[str(x) for x in r] for r in norm_rows]
             tbl = Table(data, repeatRows=1)
-            tbl.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), HEAD_BG),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("FONTSIZE", (0, 0), (-1, 0), 9.5),
-                ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
-                ("FONTSIZE", (0, 1), (-1, -1), 9),
-                ("TEXTCOLOR", (0, 1), (-1, -1), TEXT),
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [SOFT_BG, colors.white]),
-                ("LINEBELOW", (0, 0), (-1, 0), 0.6, ACCENT),
-                ("LINEABOVE", (0, 0), (-1, 0), 0, HEAD_BG),
-                ("LINEBELOW", (0, -1), (-1, -1), 0.4, colors.HexColor("#d7dde5")),
-                ("ALIGN", (0, 0), (-1, 0), "CENTER"),
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 8),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-                ("TOPPADDING", (0, 0), (-1, -1), 7),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
-            ]))
+            tbl.setStyle(
+                TableStyle(
+                    [
+                        ("BACKGROUND", (0, 0), (-1, 0), HEAD_BG),
+                        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                        ("FONTSIZE", (0, 0), (-1, 0), 9.5),
+                        ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+                        ("FONTSIZE", (0, 1), (-1, -1), 9),
+                        ("TEXTCOLOR", (0, 1), (-1, -1), TEXT),
+                        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [SOFT_BG, colors.white]),
+                        ("LINEBELOW", (0, 0), (-1, 0), 0.6, ACCENT),
+                        ("LINEABOVE", (0, 0), (-1, 0), 0, HEAD_BG),
+                        ("LINEBELOW", (0, -1), (-1, -1), 0.4, colors.HexColor("#d7dde5")),
+                        ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+                        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                        ("TOPPADDING", (0, 0), (-1, -1), 7),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+                    ]
+                )
+            )
             story.append(tbl)
             story.append(Spacer(1, 8))
         elif kind == "chart":
@@ -1335,8 +1658,20 @@ def generate_pdf_report(
                 story.append(Spacer(1, 6))
         elif kind == "image":
             p = sec.get("path")
-            if p and os.path.exists(p):
-                story.append(Image(p, width=160 * mm, height=88 * mm))
+            if p:
+                try:
+                    source_path = downloads_input_path(p)
+                    with open_binary_no_follow(
+                        source_path,
+                        max_bytes=16 * 1024 * 1024,
+                    ) as source:
+                        image_data = io.BytesIO(source.read())
+                except (OSError, UnsafePathError) as exc:
+                    return {
+                        "skill": "generate_pdf_report",
+                        "error": f"invalid image input: {exc}",
+                    }
+                story.append(Image(image_data, width=160 * mm, height=88 * mm))
                 story.append(Spacer(1, 6))
         elif kind == "pagebreak":
             story.append(PageBreak())
@@ -1373,12 +1708,14 @@ def generate_pdf_report(
 # (multi-column, borders, centered hero, hand-positioned blocks, etc.).
 # ===========================================================================
 
+
 def _rl_imports():
     """Lazy-import reportlab pieces shared by the specialized templates."""
     from reportlab.lib.pagesizes import A4, landscape
     from reportlab.lib.units import mm
     from reportlab.lib import colors
     from reportlab.pdfgen import canvas as _canvas
+
     return A4, landscape, mm, colors, _canvas
 
 
@@ -1411,14 +1748,20 @@ def generate_letter(
         from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
         from reportlab.lib.enums import TA_LEFT, TA_RIGHT
         from reportlab.platypus import (
-            SimpleDocTemplate, Paragraph, Spacer, KeepTogether,
+            SimpleDocTemplate,
+            Paragraph,
+            Spacer,
         )
     except ImportError:
         return {"skill": "generate_letter", "error": "reportlab not installed."}
     import datetime as _dt
 
     T = _pdf_theme(
-        preset, "letter", subject, (body or "")[:300], recipient_name,
+        preset,
+        "letter",
+        subject,
+        (body or "")[:300],
+        recipient_name,
         color=color,
         background_color=background_color,
         text_color=text_color,
@@ -1438,22 +1781,24 @@ def generate_letter(
         canvas.restoreState()
 
     doc = SimpleDocTemplate(
-        str(out), pagesize=A4,
-        leftMargin=25 * mm, rightMargin=25 * mm,
-        topMargin=28 * mm, bottomMargin=22 * mm,
+        str(out),
+        pagesize=A4,
+        leftMargin=25 * mm,
+        rightMargin=25 * mm,
+        topMargin=28 * mm,
+        bottomMargin=22 * mm,
         title=subject or f"Letter to {recipient_name}",
     )
     base = getSampleStyleSheet()
-    addr = ParagraphStyle("LTAddr", parent=base["Normal"],
-                          fontName=T["body_font"], fontSize=10, leading=13.5,
-                          textColor=T["text_c"])
+    addr = ParagraphStyle(
+        "LTAddr", parent=base["Normal"], fontName=T["body_font"], fontSize=10, leading=13.5, textColor=T["text_c"]
+    )
     addr_right = ParagraphStyle("LTAddrR", parent=addr, alignment=TA_RIGHT)
-    subj_style = ParagraphStyle("LTSubj", parent=addr, fontName=T["heading_font"],
-                                fontSize=11.5, spaceBefore=14, spaceAfter=10)
-    body_style = ParagraphStyle("LTBody", parent=addr, fontSize=10.5, leading=15,
-                                spaceAfter=10, alignment=TA_LEFT)
-    signature_style = ParagraphStyle("LTSig", parent=addr, fontSize=10.5,
-                                     leading=14, spaceBefore=40)
+    subj_style = ParagraphStyle(
+        "LTSubj", parent=addr, fontName=T["heading_font"], fontSize=11.5, spaceBefore=14, spaceAfter=10
+    )
+    body_style = ParagraphStyle("LTBody", parent=addr, fontSize=10.5, leading=15, spaceAfter=10, alignment=TA_LEFT)
+    signature_style = ParagraphStyle("LTSig", parent=addr, fontSize=10.5, leading=14, spaceBefore=40)
 
     story: list = []
     if sender_address:
@@ -1511,7 +1856,12 @@ def generate_certificate(
         return {"skill": "generate_certificate", "error": "reportlab not installed."}
 
     T = _pdf_theme(
-        preset, "certificate", achievement, recipient, issuer, color=color,
+        preset,
+        "certificate",
+        achievement,
+        recipient,
+        issuer,
+        color=color,
         background_color=background_color,
         text_color=text_color,
         accent_color=accent_color,
@@ -1595,6 +1945,7 @@ def generate_certificate(
 
     # Date
     import datetime as _dt
+
     c.setFont(T["body_font"], 10)
     c.setFillColor(T["muted_c"])
     c.drawCentredString(W / 2, 22 * mm, f"Issued on {date or _dt.date.today().strftime('%B %d, %Y')}")
@@ -1624,15 +1975,29 @@ def generate_flyer(
         A4, _, mm, colors, canvas_mod = _rl_imports()
     except ImportError:
         return {"skill": "generate_flyer", "error": "reportlab not installed."}
-    import os as _os
-
     T = _pdf_theme(
-        preset, "flyer", title, subtitle, (body or "")[:300], call_to_action,
+        preset,
+        "flyer",
+        title,
+        subtitle,
+        (body or "")[:300],
+        call_to_action,
         color=color,
         background_color=background_color,
         text_color=text_color,
         accent_color=accent_color,
     )
+    hero_image = None
+    if image_path:
+        try:
+            source_path = downloads_input_path(image_path)
+            with open_binary_no_follow(
+                source_path,
+                max_bytes=16 * 1024 * 1024,
+            ) as source:
+                hero_image = io.BytesIO(source.read())
+        except (OSError, UnsafePathError) as exc:
+            return {"skill": "generate_flyer", "error": f"invalid image input: {exc}"}
     out = _output_path(filename, ".pdf")
     W, H = A4
     c = canvas_mod.Canvas(str(out), pagesize=A4)
@@ -1645,7 +2010,6 @@ def generate_flyer(
     c.setFillColor(T["accent_c"])
     c.rect(0, H - 60 * mm, W, 60 * mm, fill=1, stroke=0)
     # Diagonal accent stripe
-    from reportlab.lib.colors import Color
     c.setFillColor(T["head_bg_c"])
     p = c.beginPath()
     p.moveTo(0, H - 60 * mm)
@@ -1664,18 +2028,18 @@ def generate_flyer(
 
     # Hero image
     body_top = H - 80 * mm
-    if image_path and _os.path.exists(image_path):
+    if hero_image is not None:
         try:
             from reportlab.lib.utils import ImageReader
-            img = ImageReader(image_path)
+
+            img = ImageReader(hero_image)
             iw, ih = img.getSize()
             target_w = W - 40 * mm
             target_h = target_w * ih / iw
             if target_h > 100 * mm:
                 target_h = 100 * mm
                 target_w = target_h * iw / ih
-            c.drawImage(img, (W - target_w) / 2, body_top - target_h,
-                        width=target_w, height=target_h, mask="auto")
+            c.drawImage(img, (W - target_w) / 2, body_top - target_h, width=target_w, height=target_h, mask="auto")
             body_top = body_top - target_h - 10 * mm
         except Exception:
             pass
@@ -1686,7 +2050,8 @@ def generate_flyer(
     lines, buf = [], ""
     for w in (body or "").split():
         if len(buf) + len(w) + 1 > 80:
-            lines.append(buf); buf = w
+            lines.append(buf)
+            buf = w
         else:
             buf = (buf + " " + w).strip()
     if buf:
@@ -1703,8 +2068,7 @@ def generate_flyer(
         cx = W / 2
         cy = 40 * mm
         c.setFillColor(T["accent_c"])
-        c.roundRect(cx - pill_w / 2, cy - pill_h / 2, pill_w, pill_h,
-                    radius=pill_h / 2, fill=1, stroke=0)
+        c.roundRect(cx - pill_w / 2, cy - pill_h / 2, pill_w, pill_h, radius=pill_h / 2, fill=1, stroke=0)
         c.setFillColor(colors.white)
         c.setFont(T["heading_font"], 14)
         c.drawCentredString(cx, cy - 2, call_to_action[:60])
@@ -1747,7 +2111,11 @@ def generate_menu(
         return {"skill": "generate_menu", "error": "reportlab not installed."}
 
     T = _pdf_theme(
-        preset, "menu", restaurant_name, tagline, color=color,
+        preset,
+        "menu",
+        restaurant_name,
+        tagline,
+        color=color,
         background_color=background_color,
         text_color=text_color,
         accent_color=accent_color,
@@ -1846,12 +2214,13 @@ def generate_brochure(
     except ImportError:
         return {"skill": "generate_brochure", "error": "reportlab not installed."}
 
-    panel_hints = " ".join(
-        (p.get("heading", "") + " " + p.get("body", ""))[:200]
-        for p in (panels or [])[:3]
-    )
+    panel_hints = " ".join((p.get("heading", "") + " " + p.get("body", ""))[:200] for p in (panels or [])[:3])
     T = _pdf_theme(
-        preset, "brochure", title, panel_hints, color=color,
+        preset,
+        "brochure",
+        title,
+        panel_hints,
+        color=color,
         background_color=background_color,
         text_color=text_color,
         accent_color=accent_color,
@@ -1901,18 +2270,22 @@ def generate_brochure(
             for w in words:
                 test = (buf + " " + w).strip()
                 if stringWidth(test, T["body_font"], 10) > maxw:
-                    lines.append(buf); buf = w
+                    lines.append(buf)
+                    buf = w
                 else:
                     buf = test
-            if buf: lines.append(buf)
+            if buf:
+                lines.append(buf)
             for ln in lines:
-                if y < 30 * mm: break
+                if y < 30 * mm:
+                    break
                 c.drawString(x, y, ln)
                 y -= 4.6 * mm
             y -= 3 * mm
         # Bullets
         for b in bullets:
-            if y < 30 * mm: break
+            if y < 30 * mm:
+                break
             c.setFillColor(T["accent_c"])
             c.circle(x + 1.6, y + 1.5, 0.9, fill=1, stroke=0)
             c.setFillColor(T["text_c"])
@@ -1960,12 +2333,15 @@ def generate_newsletter(
     except ImportError:
         return {"skill": "generate_newsletter", "error": "reportlab not installed."}
 
-    art_hints = " ".join(
-        (a.get("heading", "") + " " + a.get("body", ""))[:200]
-        for a in (articles or [])[:4]
-    )
+    art_hints = " ".join((a.get("heading", "") + " " + a.get("body", ""))[:200] for a in (articles or [])[:4])
     T = _pdf_theme(
-        preset, "newsletter", title, lead_headline, lead_body[:300] if lead_body else "", art_hints, color=color,
+        preset,
+        "newsletter",
+        title,
+        lead_headline,
+        lead_body[:300] if lead_body else "",
+        art_hints,
+        color=color,
         background_color=background_color,
         text_color=text_color,
         accent_color=accent_color,
@@ -1986,8 +2362,8 @@ def generate_newsletter(
     c.setFillColor(T["muted_c"])
     c.setFont(T["body_font"], 10)
     import datetime as _dt
-    c.drawRightString(W - 18 * mm, H - 22 * mm,
-                      issue or _dt.date.today().strftime("%B %Y"))
+
+    c.drawRightString(W - 18 * mm, H - 22 * mm, issue or _dt.date.today().strftime("%B %Y"))
     c.setStrokeColor(T["text_c"])
     c.setLineWidth(0.8)
     c.line(18 * mm, H - 28 * mm, W - 18 * mm, H - 28 * mm)
@@ -2009,10 +2385,12 @@ def generate_newsletter(
         for w in words:
             test = (buf + " " + w).strip()
             if stringWidth(test, T["body_font"], 11) > maxw:
-                lines.append(buf); buf = w
+                lines.append(buf)
+                buf = w
             else:
                 buf = test
-        if buf: lines.append(buf)
+        if buf:
+            lines.append(buf)
         for ln in lines[:6]:
             c.drawString(18 * mm, y_cursor, ln)
             y_cursor -= 5 * mm
@@ -2043,12 +2421,15 @@ def generate_newsletter(
         for w in words:
             test = (buf + " " + w).strip()
             if stringWidth(test, T["body_font"], 10) > col_w:
-                lines.append(buf); buf = w
+                lines.append(buf)
+                buf = w
             else:
                 buf = test
-        if buf: lines.append(buf)
+        if buf:
+            lines.append(buf)
         for ln in lines:
-            if col_y[col] < 25 * mm: break
+            if col_y[col] < 25 * mm:
+                break
             c.drawString(col_x[col], col_y[col], ln)
             col_y[col] -= 4.5 * mm
         col_y[col] -= 6 * mm
@@ -2087,7 +2468,12 @@ def generate_business_card(
         return {"skill": "generate_business_card", "error": "reportlab not installed."}
 
     T = _pdf_theme(
-        preset, "card", name, role, company, color=color,
+        preset,
+        "card",
+        name,
+        role,
+        company,
+        color=color,
         background_color=background_color,
         text_color=text_color,
         accent_color=accent_color,

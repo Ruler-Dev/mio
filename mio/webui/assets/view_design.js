@@ -524,7 +524,10 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
     try {
       // Force escape of raw HTML so the artifact body doesn't render
       // as live DOM inside the sidebar.
-      return window.marked.parse(text, { breaks: true, gfm: true, mangle: false, headerIds: false });
+      const rendered = window.marked.parse(text, {
+        breaks: true, gfm: true, mangle: false, headerIds: false,
+      });
+      return window.Mio?.sanitizeHtml ? window.Mio.sanitizeHtml(rendered) : escapeHtml(text);
     } catch {
       return escapeHtml(text);
     }

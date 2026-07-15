@@ -13,7 +13,6 @@ read keys/values only at these positions.
 
 from __future__ import annotations
 
-from typing import Optional
 
 import mlx.core as mx
 
@@ -59,7 +58,10 @@ def attention_scored(
     h = inner.embed_tokens(input_ids)
     L = int(input_ids.shape[1])
     from mlx_lm.models.base import create_attention_mask
+    from mlx_lm.models.qwen3_next import create_ssm_mask
+
     fa_mask = create_attention_mask(h, None)
+    ssm_mask = create_ssm_mask(h, None)
     # Run layers up to score_layer.
     for layer_idx, layer in enumerate(inner.layers):
         if layer_idx == score_layer and not layer.is_linear:
@@ -94,8 +96,7 @@ def attention_scored(
             )
         # Forward this layer to advance hidden state for subsequent layers.
         if layer.is_linear:
-            mask = create_attention_mask(h, None)  # placeholder
-            h = layer(h, mask=mask, cache=None)
+            h = layer(h, mask=ssm_mask, cache=None)
         else:
             h = layer(h, mask=fa_mask, cache=None)
 

@@ -106,10 +106,10 @@
     ta.addEventListener("keydown", (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
         e.preventDefault();
-        runCell(cell, out);
+        runCell(cell, out, state);
       }
     });
-    el.querySelector('[data-act="run"]').addEventListener("click", () => runCell(cell, out));
+    el.querySelector('[data-act="run"]').addEventListener("click", () => runCell(cell, out, state));
     el.querySelector('[data-act="up"]').addEventListener("click", () => {
       if (idx <= 0) return;
       state.cells.splice(idx, 1); state.cells.splice(idx - 1, 0, cell);
@@ -149,7 +149,7 @@
     host.querySelector('[data-action="run-all"]').addEventListener("click", async () => {
       for (const cell of state.cells) {
         const el = host.querySelector(`[data-id="${cell.id}"] .nb-cell-out`);
-        await runCell(cell, el);
+        await runCell(cell, el, state);
       }
     });
     host.querySelector('[data-action="clear"]').addEventListener("click", () => {
@@ -171,7 +171,7 @@
 
   // --- Cell runners -----------------------------------------------------
 
-  async function runCell(cell, outEl) {
+  async function runCell(cell, outEl, state) {
     if (!outEl) return;
     outEl.innerHTML = `<div class="muted" style="padding:8px">running…</div>`;
     let result;
@@ -185,16 +185,8 @@
       result = { error: String(e?.message || e) };
     }
     cell.lastOutput = result;
-    saveState_global();
+    saveState(state);
     renderOutput(outEl, cell.type, result);
-  }
-
-  function saveState_global() {
-    // Re-read + save — ensures we persist cell outputs across sessions.
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) localStorage.setItem(STORAGE_KEY, raw);
-    } catch {}
   }
 
   function renderOutput(outEl, type, result) {
@@ -254,6 +246,8 @@
         await new Promise((res, rej) => {
           const s = document.createElement("script");
           s.src = "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js";
+          s.integrity = "sha384-i3R37b3tF+HWudsUf1VSEOY2YxwSNMqY8DQa9Z0O3xh+NkJ9o+yjcGyIi5huj+nB";
+          s.crossOrigin = "anonymous";
           s.onload = res; s.onerror = rej;
           document.head.appendChild(s);
         });
@@ -294,7 +288,10 @@
   function renderMarkdown(src) {
     // If marked is already on the page (main chat uses it) reuse it;
     // otherwise do a tiny subset fallback.
-    if (window.marked?.parse) return window.marked.parse(src);
+    if (window.marked?.parse) {
+      const rendered = window.marked.parse(src);
+      return window.Mio?.sanitizeHtml ? window.Mio.sanitizeHtml(rendered) : escapeHtml(src);
+    }
     return escapeHtml(src).replace(/\n/g, "<br>");
   }
 

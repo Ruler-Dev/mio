@@ -12,8 +12,125 @@ import tempfile
 import time
 from pathlib import Path
 
+from mio.webui.safe_files import downloads_output_path
+from mio.webui.skills_docs import (
+    COLOR_PALETTES as _COLOR_PALETTES,
+    OFFICE_PRESETS as _OFFICE_PRESETS,
+    PDF_PRESETS as _PDF_PRESETS,
+    generate_brochure as _g_brochure,
+    generate_business_card as _g_bcard,
+    generate_certificate as _g_certificate,
+    generate_docx as _g_docx,
+    generate_flyer as _g_flyer,
+    generate_letter as _g_letter,
+    generate_menu as _g_menu,
+    generate_newsletter as _g_newsletter,
+    generate_pdf_report as _g_pdf_report,
+    generate_pptx as _g_pptx,
+    generate_xlsx as _g_xlsx,
+)
+from mio.webui.skills_fun import (
+    flip_coin as _g_flip_coin,
+    generate_names as _g_generate_names,
+    pick_random as _g_pick_random,
+    roll_dice as _g_roll_dice,
+    wiki_summary as _g_wiki_summary,
+    wordle_helper as _g_wordle_helper,
+)
+from mio.webui.skills_life import (
+    blender_exec as _g_blender_exec,
+    blender_snapshot as _g_blender_snapshot,
+    blender_status as _g_blender_status,
+    bookmark_list as _g_bookmark_list,
+    bookmark_save as _g_bookmark_save,
+    bookmark_search as _g_bookmark_search,
+    color_palette as _g_color_palette,
+    convert_currency as _g_convert_currency,
+    describe_image as _g_describe_image,
+    explain_regex as _g_explain_regex,
+    hn_top as _g_hn_top,
+    http_request as _g_http_request,
+    import_shadertoy as _g_import_shadertoy,
+    meeting_notes as _g_meeting_notes,
+    quote as _g_quote,
+    reading_briefing as _g_reading_briefing,
+    reddit_top as _g_reddit_top,
+    review_code as _g_review_code,
+    scale_recipe as _g_scale_recipe,
+    url_preview as _g_url_preview,
+)
+from mio.webui.skills_misc import (
+    extract_pdf_text as _g_extract_pdf,
+    find_anime as _g_anime,
+    find_game as _g_game,
+    find_manga as _g_manga,
+    find_movie_tv as _g_tv,
+    generate_csv as _g_csv,
+    generate_ical as _g_ical,
+    generate_invoice as _g_invoice,
+    generate_markdown as _g_md,
+    generate_qr_code as _g_qr,
+    generate_resume as _g_resume,
+    generate_sqlite_db as _g_sqlite,
+    search_images as _g_imgs,
+    search_youtube as _g_yt,
+    translate_text as _g_translate,
+)
+from mio.webui.skills_productivity import (
+    analyze_csv as _g_analyze_csv,
+    analyze_json as _g_analyze_json,
+    habit_add as _g_habit_add,
+    habit_checkin as _g_habit_checkin,
+    habit_list as _g_habit_list,
+    journal_append as _g_journal_append,
+    journal_read as _g_journal_read,
+    journal_search as _g_journal_search,
+    todo_add as _g_todo_add,
+    todo_delete as _g_todo_delete,
+    todo_done as _g_todo_done,
+    todo_list as _g_todo_list,
+)
+from mio.webui.skills_python import (
+    date_math as _g_dm,
+    decode_jwt as _g_jwt,
+    detect_language as _g_lang,
+    encode_decode as _g_enc,
+    extract_links as _g_links,
+    fetch_rss as _g_rss,
+    format_json as _g_fmtj,
+    generate_fake_data as _g_fake,
+    generate_password as _g_pw,
+    generate_slug as _g_slug,
+    generate_uuid as _g_uuid,
+    hash_text as _g_hash,
+    html_to_markdown as _g_h2m,
+    image_convert as _g_img_convert,
+    image_info as _g_img_info,
+    image_resize as _g_img_resize,
+    json_query as _g_jq,
+    json_to_yaml as _g_j2y,
+    markdown_to_html as _g_m2h,
+    merge_pdfs as _g_mpdf,
+    split_pdf as _g_spdf,
+    symbolic_math as _g_sym,
+    text_stats as _g_ts,
+    timezone_convert as _g_tz,
+    unit_convert as _g_unit,
+    unzip_file as _g_unzip,
+    yaml_to_json as _g_y2j,
+    zip_files as _g_zip,
+)
+from mio.webui.skills_rag import (
+    drop_index as _rag_drop,
+    index_folder as _rag_index,
+    list_indexes as _rag_list,
+    search_local_folder as _rag_search,
+)
+from mio.webui.weather import get_weather as _g_weather
+
 
 # ===== Web Search Skill =====
+
 
 def web_search(query: str, max_results: int = 5) -> dict:
     """Search the web and return structured results."""
@@ -43,7 +160,19 @@ def fetch_url(url: str) -> dict:
     Settings → Cache.
     """
     from mio.webui.browser import fetch_page
+    from mio.webui.flow_runner import _validate_http_url
     from mio.webui.router import web_cache_get, web_cache_put
+
+    try:
+        _validate_http_url(url)
+    except (TypeError, ValueError) as exc:
+        return {
+            "skill": "fetch_url",
+            "url": url,
+            "content": "",
+            "truncated": False,
+            "error": f"blocked_url: {exc}",
+        }
 
     cached = web_cache_get(url)
     if cached is not None:
@@ -94,6 +223,7 @@ _UNICODE_FONT_CANDIDATES = [
 def _find_unicode_font() -> tuple[str, str] | None:
     """Return (regular_path, bold_path_or_regular) for a Unicode TTF, or None."""
     import os
+
     for p in _UNICODE_FONT_CANDIDATES:
         if os.path.exists(p):
             bold = p.replace(".ttf", " Bold.ttf")
@@ -150,9 +280,7 @@ def generate_pdf(
         }
 
     filename = filename or f"mio-{int(time.time())}.pdf"
-    output_dir = Path.home() / "Downloads"
-    output_dir.mkdir(exist_ok=True)
-    output_path = output_dir / filename
+    output_path = downloads_output_path(filename, ".pdf")
 
     pdf = FPDF()
     pdf.add_page()
@@ -174,9 +302,15 @@ def generate_pdf(
             # fpdf2 with core fonts only supports latin-1; transliterate anything
             # outside that range so generation never fails.
             replacements = {
-                "\u2013": "-", "\u2014": "-", "\u2018": "'", "\u2019": "'",
-                "\u201C": '"', "\u201D": '"', "\u2026": "...", "\u2022": "*",
-                "\u00A0": " ",
+                "\u2013": "-",
+                "\u2014": "-",
+                "\u2018": "'",
+                "\u2019": "'",
+                "\u201c": '"',
+                "\u201d": '"',
+                "\u2026": "...",
+                "\u2022": "*",
+                "\u00a0": " ",
             }
             for k, v in replacements.items():
                 s = s.replace(k, v)
@@ -218,12 +352,13 @@ def generate_pdf(
     return {
         "skill": "generate_pdf",
         "path": str(output_path),
-        "filename": filename,
+        "filename": output_path.name,
         "pages": pdf.pages_count,
     }
 
 
 # ===== Chart Generation Skill =====
+
 
 def generate_chart(
     chart_type: str,
@@ -237,6 +372,7 @@ def generate_chart(
     """Generate a PNG chart. chart_type ∈ {bar, hbar, line, pie}."""
     try:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
     except ImportError:
@@ -252,22 +388,24 @@ def generate_chart(
         }
 
     filename = filename or f"mio-chart-{int(time.time())}.png"
-    output_path = Path.home() / "Downloads" / filename
-    output_path.parent.mkdir(exist_ok=True)
+    output_path = downloads_output_path(filename, ".png")
 
     fig, ax = plt.subplots(figsize=(9, 5.5), dpi=140)
     ct = chart_type.lower()
     if ct == "bar":
         ax.bar(labels, values, color="#3b82f6")
-        ax.set_xlabel(xlabel); ax.set_ylabel(ylabel)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
         plt.setp(ax.get_xticklabels(), rotation=30, ha="right")
     elif ct == "hbar":
         ax.barh(labels, values, color="#3b82f6")
         ax.invert_yaxis()
-        ax.set_xlabel(xlabel); ax.set_ylabel(ylabel)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
     elif ct == "line":
         ax.plot(labels, values, marker="o", color="#3b82f6", linewidth=2)
-        ax.set_xlabel(xlabel); ax.set_ylabel(ylabel)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
         ax.grid(True, alpha=0.3)
     elif ct == "pie":
         ax.pie(values, labels=labels, autopct="%1.1f%%", startangle=90)
@@ -287,12 +425,13 @@ def generate_chart(
     return {
         "skill": "generate_chart",
         "path": str(output_path),
-        "filename": filename,
+        "filename": output_path.name,
         "chart_type": ct,
     }
 
 
 # ===== Execute Code Skill =====
+
 
 def execute_python(code: str, timeout: int = 30) -> dict:
     """Execute Python code in a subprocess and return output."""
@@ -304,7 +443,9 @@ def execute_python(code: str, timeout: int = 30) -> dict:
     try:
         result = subprocess.run(
             ["python3", script_path],
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
             cwd=str(Path.home() / "Downloads"),
         )
         return {
@@ -418,22 +559,6 @@ SKILLS = {
 
 # Attach document-generation + weather skills (mirrors Anthropic's Claude
 # Skills library choices: python-docx, openpyxl, python-pptx, reportlab).
-from mio.webui.skills_docs import (
-    generate_docx as _g_docx,
-    generate_xlsx as _g_xlsx,
-    generate_pptx as _g_pptx,
-    generate_pdf_report as _g_pdf_report,
-    generate_letter as _g_letter,
-    generate_certificate as _g_certificate,
-    generate_flyer as _g_flyer,
-    generate_menu as _g_menu,
-    generate_brochure as _g_brochure,
-    generate_newsletter as _g_newsletter,
-    generate_business_card as _g_bcard,
-    PDF_PRESETS as _PDF_PRESETS,
-    OFFICE_PRESETS as _OFFICE_PRESETS,
-    COLOR_PALETTES as _COLOR_PALETTES,
-)
 
 # Color-override parameter — works alongside `preset` to produce variations
 # ("same layout, different color"). Accepts 40+ named palettes plus common
@@ -445,8 +570,7 @@ _COLOR_PARAM = {
         "/ soft background) while KEEPING the preset's layout, fonts, and "
         "decoration. Use this when the user asks for the 'same document "
         "but in emerald / red / dark blue / etc.' — don't change preset, "
-        "just pass color. Accepts palette names (" +
-        ", ".join(_COLOR_PALETTES[:12]) + ", etc.) and common aliases "
+        "just pass color. Accepts palette names (" + ", ".join(_COLOR_PALETTES[:12]) + ", etc.) and common aliases "
         "('blue', 'dark green', 'hot pink', 'gold', 'cyan')."
     ),
 }
@@ -504,13 +628,9 @@ _TEXT_COLOR_PARAM = {
 _ACCENT_COLOR_PARAM = {
     "type": "string",
     "description": (
-        "Override the accent color (headings / accent bar / links). Same "
-        "accepted formats as background_color."
+        "Override the accent color (headings / accent bar / links). Same accepted formats as background_color."
     ),
 }
-
-from mio.webui.weather import get_weather as _g_weather
-
 
 SKILLS["generate_docx"] = {
     "function": _g_docx,
@@ -547,7 +667,8 @@ SKILLS["generate_xlsx"] = {
         "properties": {
             "title": {"type": "string", "description": "Title shown above table (optional)"},
             "headers": {
-                "type": "array", "items": {"type": "string"},
+                "type": "array",
+                "items": {"type": "string"},
                 "description": "Column headers",
             },
             "rows": {
@@ -617,25 +738,20 @@ SKILLS["generate_pdf_report"] = {
             "content": {
                 "type": "string",
                 "description": (
-                    "Markdown body (headings, paragraphs, bullets, pipe "
-                    "tables). Easiest way to fill the report."
+                    "Markdown body (headings, paragraphs, bullets, pipe tables). Easiest way to fill the report."
                 ),
             },
             "sections": {
                 "type": "array",
                 "items": {"type": "object"},
                 "description": (
-                    "Optional structured blocks appended after `content`. "
-                    "Use for charts/images/page-breaks."
+                    "Optional structured blocks appended after `content`. Use for charts/images/page-breaks."
                 ),
             },
             "filename": {"type": "string", "description": "Output filename (optional)"},
             "author": {"type": "string", "description": "Author name (optional)"},
             "preset": _PRESET_PARAM,
             "color": _COLOR_PARAM,
-            "background_color": _BG_COLOR_PARAM,
-            "text_color": _TEXT_COLOR_PARAM,
-            "accent_color": _ACCENT_COLOR_PARAM,
             "background_color": {
                 "type": "string",
                 "description": (
@@ -711,7 +827,8 @@ SKILLS["generate_certificate"] = {
             "issuer": {"type": "string", "description": "Organization or person issuing it"},
             "date": {"type": "string", "description": "Issue date (defaults to today)"},
             "signatures": {
-                "type": "array", "items": {"type": "object"},
+                "type": "array",
+                "items": {"type": "object"},
                 "description": "List of {name, role} dicts for signature lines",
             },
             "filename": {"type": "string"},
@@ -793,7 +910,8 @@ SKILLS["generate_brochure"] = {
         "properties": {
             "title": {"type": "string"},
             "panels": {
-                "type": "array", "items": {"type": "object"},
+                "type": "array",
+                "items": {"type": "object"},
                 "description": "Three {heading, body, bullets} dicts",
             },
             "footer": {"type": "string"},
@@ -822,7 +940,8 @@ SKILLS["generate_newsletter"] = {
             "lead_headline": {"type": "string"},
             "lead_body": {"type": "string"},
             "articles": {
-                "type": "array", "items": {"type": "object"},
+                "type": "array",
+                "items": {"type": "object"},
                 "description": "List of {heading, body} for two-column articles",
             },
             "footer": {"type": "string"},
@@ -840,7 +959,7 @@ SKILLS["generate_newsletter"] = {
 SKILLS["generate_business_card"] = {
     "function": _g_bcard,
     "description": (
-        "Generate a single business card (3.5\"×2\") centered on an A4 PDF. "
+        'Generate a single business card (3.5"×2") centered on an A4 PDF. '
         "Good for 'make me a business card' requests."
     ),
     "parameters": {
@@ -864,24 +983,6 @@ SKILLS["generate_business_card"] = {
     },
 }
 
-from mio.webui.skills_misc import (
-    generate_qr_code as _g_qr,
-    generate_ical as _g_ical,
-    generate_csv as _g_csv,
-    generate_sqlite_db as _g_sqlite,
-    generate_resume as _g_resume,
-    generate_invoice as _g_invoice,
-    generate_markdown as _g_md,
-    extract_pdf_text as _g_extract_pdf,
-    translate_text as _g_translate,
-    find_anime as _g_anime,
-    find_manga as _g_manga,
-    find_movie_tv as _g_tv,
-    find_game as _g_game,
-    search_images as _g_imgs,
-    search_youtube as _g_yt,
-)
-
 SKILLS["generate_markdown"] = {
     "function": _g_md,
     "description": (
@@ -897,8 +998,11 @@ SKILLS["generate_markdown"] = {
             "title": {"type": "string", "description": "Note title; becomes H1 and filename stem"},
             "content": {"type": "string", "description": "Markdown body"},
             "filename": {"type": "string", "description": "Override filename (without .md suffix is fine)"},
-            "tags": {"type": "array", "items": {"type": "string"},
-                     "description": "List of tags for the YAML frontmatter"},
+            "tags": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "List of tags for the YAML frontmatter",
+            },
             "vault_path": {"type": "string", "description": "Path to an Obsidian vault or any folder"},
             "frontmatter": {"type": "object", "description": "Extra YAML frontmatter key/values"},
         },
@@ -925,13 +1029,6 @@ SKILLS["generate_qr_code"] = {
 }
 
 # ---- Local folder RAG ----
-from mio.webui.skills_rag import (
-    index_folder as _rag_index,
-    search_local_folder as _rag_search,
-    list_indexes as _rag_list,
-    drop_index as _rag_drop,
-)
-
 SKILLS["index_folder"] = {
     "function": _rag_index,
     "description": (
@@ -962,8 +1059,8 @@ SKILLS["search_local_folder"] = {
     "parameters": {
         "type": "object",
         "properties": {
-            "query":       {"type": "string", "description": "FTS5 query"},
-            "limit":       {"type": "integer", "description": "Max results (default 8)"},
+            "query": {"type": "string", "description": "FTS5 query"},
+            "limit": {"type": "integer", "description": "Max results (default 8)"},
             "index_label": {"type": "string", "description": "Restrict to one indexed folder"},
         },
         "required": ["query"],
@@ -987,29 +1084,6 @@ SKILLS["drop_index"] = {
 }
 
 # ---- Life & work skills (batch 2) ----
-from mio.webui.skills_life import (
-    scale_recipe as _g_scale_recipe,
-    bookmark_save as _g_bookmark_save,
-    bookmark_list as _g_bookmark_list,
-    bookmark_search as _g_bookmark_search,
-    color_palette as _g_color_palette,
-    describe_image as _g_describe_image,
-    review_code as _g_review_code,
-    meeting_notes as _g_meeting_notes,
-    explain_regex as _g_explain_regex,
-    convert_currency as _g_convert_currency,
-    url_preview as _g_url_preview,
-    hn_top as _g_hn_top,
-    reddit_top as _g_reddit_top,
-    quote as _g_quote,
-    http_request as _g_http_request,
-    reading_briefing as _g_reading_briefing,
-    blender_status as _g_blender_status,
-    blender_exec as _g_blender_exec,
-    blender_snapshot as _g_blender_snapshot,
-    import_shadertoy as _g_import_shadertoy,
-)
-
 SKILLS["http_request"] = {
     "function": _g_http_request,
     "description": (
@@ -1018,62 +1092,74 @@ SKILLS["http_request"] = {
         "`body` may be a string or JSON-serializable value; dicts auto-set "
         "Content-Type to application/json."
     ),
-    "parameters": {"type": "object", "properties": {
-        "url":     {"type": "string"},
-        "method":  {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]},
-        "headers": {"type": "object"},
-        "body":    {"type": "string"},
-        "timeout": {"type": "integer"},
-    }, "required": ["url"]},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string"},
+            "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]},
+            "headers": {"type": "object"},
+            "body": {"type": "string"},
+            "timeout": {"type": "integer"},
+        },
+        "required": ["url"],
+    },
 }
 SKILLS["reading_briefing"] = {
     "function": _g_reading_briefing,
     "description": "Summarize the top items in the local reading list.",
-    "parameters": {"type": "object", "properties": {
-        "limit": {"type": "integer"},
-    }},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "limit": {"type": "integer"},
+        },
+    },
 }
 
 # ---- Fun / random / wikipedia ----
-from mio.webui.skills_fun import (
-    roll_dice as _g_roll_dice,
-    flip_coin as _g_flip_coin,
-    pick_random as _g_pick_random,
-    generate_names as _g_generate_names,
-    wordle_helper as _g_wordle_helper,
-    wiki_summary as _g_wiki_summary,
-)
-
 SKILLS["roll_dice"] = {
     "function": _g_roll_dice,
     "description": "Roll dice in NdM notation (e.g. '2d6', '1d20+3', '4d6-1').",
-    "parameters": {"type": "object", "properties": {
-        "notation": {"type": "string"},
-    }, "required": ["notation"]},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "notation": {"type": "string"},
+        },
+        "required": ["notation"],
+    },
 }
 SKILLS["flip_coin"] = {
     "function": _g_flip_coin,
     "description": "Flip one or more coins.",
-    "parameters": {"type": "object", "properties": {
-        "count": {"type": "integer"},
-    }},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "count": {"type": "integer"},
+        },
+    },
 }
 SKILLS["pick_random"] = {
     "function": _g_pick_random,
     "description": "Pick random item(s) from a list.",
-    "parameters": {"type": "object", "properties": {
-        "items": {"type": "array", "items": {"type": "string"}},
-        "count": {"type": "integer"},
-    }, "required": ["items"]},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "items": {"type": "array", "items": {"type": "string"}},
+            "count": {"type": "integer"},
+        },
+        "required": ["items"],
+    },
 }
 SKILLS["generate_names"] = {
     "function": _g_generate_names,
     "description": "Generate names. `kind`: person | company | product | pet | fantasy.",
-    "parameters": {"type": "object", "properties": {
-        "kind":  {"type": "string"},
-        "count": {"type": "integer"},
-        "theme": {"type": "string", "description": "Optional keyword bias"},
-    }},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string"},
+            "count": {"type": "integer"},
+            "theme": {"type": "string", "description": "Optional keyword bias"},
+        },
+    },
 }
 SKILLS["wordle_helper"] = {
     "function": _g_wordle_helper,
@@ -1082,114 +1168,137 @@ SKILLS["wordle_helper"] = {
         "unknown), `yellow` is letters that ARE in the word (position "
         "unknown), `grey` is letters confirmed NOT in the word."
     ),
-    "parameters": {"type": "object", "properties": {
-        "green":  {"type": "string"},
-        "yellow": {"type": "string"},
-        "grey":   {"type": "string"},
-    }},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "green": {"type": "string"},
+            "yellow": {"type": "string"},
+            "grey": {"type": "string"},
+        },
+    },
 }
 SKILLS["wiki_summary"] = {
     "function": _g_wiki_summary,
     "description": "Fetch a Wikipedia summary for a topic (REST API, no key).",
-    "parameters": {"type": "object", "properties": {
-        "topic": {"type": "string"},
-        "lang":  {"type": "string", "description": "2-letter code (default 'en')"},
-    }, "required": ["topic"]},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "topic": {"type": "string"},
+            "lang": {"type": "string", "description": "2-letter code (default 'en')"},
+        },
+        "required": ["topic"],
+    },
 }
 
 
 SKILLS["hn_top"] = {
     "function": _g_hn_top,
     "description": "Fetch current top stories from Hacker News (Firebase API, no key needed).",
-    "parameters": {"type": "object", "properties": {
-        "limit": {"type": "integer", "description": "Default 10, max 50"},
-    }},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "limit": {"type": "integer", "description": "Default 10, max 50"},
+        },
+    },
 }
 SKILLS["reddit_top"] = {
     "function": _g_reddit_top,
     "description": "Fetch top posts from a subreddit (public JSON). `period`: hour/day/week/month/year/all.",
-    "parameters": {"type": "object", "properties": {
-        "subreddit": {"type": "string", "description": "e.g. 'programming' or 'r/news'; defaults to r/all"},
-        "limit":     {"type": "integer"},
-        "period":    {"type": "string"},
-    }},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "subreddit": {"type": "string", "description": "e.g. 'programming' or 'r/news'; defaults to r/all"},
+            "limit": {"type": "integer"},
+            "period": {"type": "string"},
+        },
+    },
 }
 SKILLS["quote"] = {
     "function": _g_quote,
     "description": "Random famous quote, optionally filtered by topic or author.",
-    "parameters": {"type": "object", "properties": {
-        "topic":  {"type": "string", "description": "e.g. 'stoic', 'tech', 'writing'"},
-        "author": {"type": "string"},
-    }},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "topic": {"type": "string", "description": "e.g. 'stoic', 'tech', 'writing'"},
+            "author": {"type": "string"},
+        },
+    },
 }
 
 # ---- Productivity skills (todo / habits / journal / analyzers) ----
-from mio.webui.skills_productivity import (
-    todo_add as _g_todo_add,
-    todo_list as _g_todo_list,
-    todo_done as _g_todo_done,
-    todo_delete as _g_todo_delete,
-    habit_add as _g_habit_add,
-    habit_checkin as _g_habit_checkin,
-    habit_list as _g_habit_list,
-    journal_append as _g_journal_append,
-    journal_read as _g_journal_read,
-    journal_search as _g_journal_search,
-    analyze_json as _g_analyze_json,
-    analyze_csv as _g_analyze_csv,
-)
-
 SKILLS["todo_add"] = {
     "function": _g_todo_add,
     "description": "Add an item to the persistent todo list.",
-    "parameters": {"type": "object", "properties": {
-        "text": {"type": "string"},
-        "list_name": {"type": "string", "description": "Optional list/category (default 'inbox')"},
-        "priority": {"type": "integer", "description": "1=low, 2=normal, 3=high"},
-        "due": {"type": "string", "description": "ISO date (optional)"},
-    }, "required": ["text"]},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string"},
+            "list_name": {"type": "string", "description": "Optional list/category (default 'inbox')"},
+            "priority": {"type": "integer", "description": "1=low, 2=normal, 3=high"},
+            "due": {"type": "string", "description": "ISO date (optional)"},
+        },
+        "required": ["text"],
+    },
 }
 SKILLS["todo_list"] = {
     "function": _g_todo_list,
     "description": "List todos. Defaults to open items only.",
-    "parameters": {"type": "object", "properties": {
-        "include_done": {"type": "boolean"},
-        "list_name":    {"type": "string"},
-        "limit":        {"type": "integer"},
-    }},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "include_done": {"type": "boolean"},
+            "list_name": {"type": "string"},
+            "limit": {"type": "integer"},
+        },
+    },
 }
 SKILLS["todo_done"] = {
     "function": _g_todo_done,
     "description": "Mark a todo done by id.",
-    "parameters": {"type": "object", "properties": {
-        "todo_id": {"type": "integer"},
-        "done":    {"type": "boolean", "description": "Set to false to un-complete"},
-    }, "required": ["todo_id"]},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "todo_id": {"type": "integer"},
+            "done": {"type": "boolean", "description": "Set to false to un-complete"},
+        },
+        "required": ["todo_id"],
+    },
 }
 SKILLS["todo_delete"] = {
     "function": _g_todo_delete,
     "description": "Delete a todo by id.",
-    "parameters": {"type": "object", "properties": {
-        "todo_id": {"type": "integer"},
-    }, "required": ["todo_id"]},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "todo_id": {"type": "integer"},
+        },
+        "required": ["todo_id"],
+    },
 }
 
 SKILLS["habit_add"] = {
     "function": _g_habit_add,
     "description": "Create a new habit to track (e.g. 'Read 20 min').",
-    "parameters": {"type": "object", "properties": {
-        "name":    {"type": "string"},
-        "cadence": {"type": "string", "description": "daily | weekly | etc."},
-    }, "required": ["name"]},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "cadence": {"type": "string", "description": "daily | weekly | etc."},
+        },
+        "required": ["name"],
+    },
 }
 SKILLS["habit_checkin"] = {
     "function": _g_habit_checkin,
     "description": "Record a habit check-in for today.",
-    "parameters": {"type": "object", "properties": {
-        "habit_id": {"type": "integer"},
-        "name":     {"type": "string", "description": "Habit name (alternative to habit_id)"},
-        "note":     {"type": "string"},
-    }},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "habit_id": {"type": "integer"},
+            "name": {"type": "string", "description": "Habit name (alternative to habit_id)"},
+            "note": {"type": "string"},
+        },
+    },
 }
 SKILLS["habit_list"] = {
     "function": _g_habit_list,
@@ -1200,42 +1309,61 @@ SKILLS["habit_list"] = {
 SKILLS["journal_append"] = {
     "function": _g_journal_append,
     "description": "Append an entry to today's journal file (~/.mio/journal/<day>.md).",
-    "parameters": {"type": "object", "properties": {
-        "entry": {"type": "string"},
-        "mood":  {"type": "string"},
-        "tags":  {"type": "array", "items": {"type": "string"}},
-    }, "required": ["entry"]},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "entry": {"type": "string"},
+            "mood": {"type": "string"},
+            "tags": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["entry"],
+    },
 }
 SKILLS["journal_read"] = {
     "function": _g_journal_read,
     "description": "Read a specific day's journal entry (default: today).",
-    "parameters": {"type": "object", "properties": {
-        "day": {"type": "string", "description": "ISO date (YYYY-MM-DD); empty = today"},
-    }},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "day": {"type": "string", "description": "ISO date (YYYY-MM-DD); empty = today"},
+        },
+    },
 }
 SKILLS["journal_search"] = {
     "function": _g_journal_search,
     "description": "Search journal entries for a substring.",
-    "parameters": {"type": "object", "properties": {
-        "query": {"type": "string"},
-        "limit": {"type": "integer"},
-    }, "required": ["query"]},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "limit": {"type": "integer"},
+        },
+        "required": ["query"],
+    },
 }
 
 SKILLS["analyze_json"] = {
     "function": _g_analyze_json,
     "description": "Return schema, size, depth, sample values for a JSON blob.",
-    "parameters": {"type": "object", "properties": {
-        "json_str": {"type": "string"},
-    }, "required": ["json_str"]},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "json_str": {"type": "string"},
+        },
+        "required": ["json_str"],
+    },
 }
 SKILLS["analyze_csv"] = {
     "function": _g_analyze_csv,
     "description": "Per-column type inference + stats (min/max/mean/stdev) for a CSV.",
-    "parameters": {"type": "object", "properties": {
-        "csv_text":  {"type": "string"},
-        "delimiter": {"type": "string"},
-    }, "required": ["csv_text"]},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "csv_text": {"type": "string"},
+            "delimiter": {"type": "string"},
+        },
+        "required": ["csv_text"],
+    },
 }
 
 SKILLS["explain_regex"] = {
@@ -1258,9 +1386,9 @@ SKILLS["convert_currency"] = {
     "parameters": {
         "type": "object",
         "properties": {
-            "amount":        {"type": "number"},
+            "amount": {"type": "number"},
             "from_currency": {"type": "string", "description": "3-letter ISO code"},
-            "to_currency":   {"type": "string", "description": "3-letter ISO code"},
+            "to_currency": {"type": "string", "description": "3-letter ISO code"},
         },
         "required": ["amount", "from_currency", "to_currency"],
     },
@@ -1291,7 +1419,7 @@ SKILLS["scale_recipe"] = {
         "type": "object",
         "properties": {
             "ingredients": {"type": "array", "items": {"type": "string"}},
-            "scale":       {"type": "number", "description": "Multiplier (e.g. 0.5, 2, 3.5)"},
+            "scale": {"type": "number", "description": "Multiplier (e.g. 0.5, 2, 3.5)"},
         },
         "required": ["ingredients", "scale"],
     },
@@ -1303,10 +1431,10 @@ SKILLS["bookmark_save"] = {
     "parameters": {
         "type": "object",
         "properties": {
-            "url":     {"type": "string"},
-            "title":   {"type": "string"},
+            "url": {"type": "string"},
+            "title": {"type": "string"},
             "snippet": {"type": "string", "description": "Short description or quote"},
-            "tags":    {"type": "array", "items": {"type": "string"}},
+            "tags": {"type": "array", "items": {"type": "string"}},
         },
         "required": ["url"],
     },
@@ -1318,8 +1446,8 @@ SKILLS["bookmark_list"] = {
     "parameters": {
         "type": "object",
         "properties": {
-            "tag":         {"type": "string"},
-            "limit":       {"type": "integer"},
+            "tag": {"type": "string"},
+            "limit": {"type": "integer"},
             "unread_only": {"type": "boolean"},
         },
     },
@@ -1341,8 +1469,7 @@ SKILLS["bookmark_search"] = {
 SKILLS["color_palette"] = {
     "function": _g_color_palette,
     "description": (
-        "Generate a 5-color palette from a seed hex color. `mode`: "
-        "complementary | analogous | triadic | monochromatic."
+        "Generate a 5-color palette from a seed hex color. `mode`: complementary | analogous | triadic | monochromatic."
     ),
     "parameters": {
         "type": "object",
@@ -1377,9 +1504,9 @@ SKILLS["review_code"] = {
     "parameters": {
         "type": "object",
         "properties": {
-            "code":     {"type": "string"},
+            "code": {"type": "string"},
             "language": {"type": "string"},
-            "focus":    {"type": "string", "description": "e.g. 'security', 'performance'"},
+            "focus": {"type": "string", "description": "e.g. 'security', 'performance'"},
         },
         "required": ["code"],
     },
@@ -1564,7 +1691,8 @@ SKILLS["find_anime"] = {
             "genre": {"type": "string"},
             "count": {"type": "integer", "description": "Number of results (default 3)"},
             "random": {"type": "boolean", "description": "Return a single random anime"},
-        }, "required": [],
+        },
+        "required": [],
     },
 }
 SKILLS["find_manga"] = {
@@ -1592,7 +1720,8 @@ SKILLS["find_movie_tv"] = {
             "query": {"type": "string"},
             "type": {"type": "string", "description": "'tv' | 'movie' | 'any'"},
             "count": {"type": "integer"},
-        }, "required": ["query"],
+        },
+        "required": ["query"],
     },
 }
 SKILLS["find_game"] = {
@@ -1606,7 +1735,8 @@ SKILLS["find_game"] = {
         "properties": {
             "query": {"type": "string"},
             "count": {"type": "integer"},
-        }, "required": ["query"],
+        },
+        "required": ["query"],
     },
 }
 SKILLS["search_youtube"] = {
@@ -1624,7 +1754,8 @@ SKILLS["search_youtube"] = {
         "properties": {
             "query": {"type": "string"},
             "count": {"type": "integer", "description": "Number of videos (default 5)"},
-        }, "required": ["query"],
+        },
+        "required": ["query"],
     },
 }
 SKILLS["search_images"] = {
@@ -1641,7 +1772,8 @@ SKILLS["search_images"] = {
         "properties": {
             "query": {"type": "string"},
             "count": {"type": "integer", "description": "How many images (default 6)"},
-        }, "required": ["query"],
+        },
+        "required": ["query"],
     },
 }
 
@@ -1662,38 +1794,6 @@ SKILLS["translate_text"] = {
     },
 }
 
-from mio.webui.skills_python import (
-    image_resize as _g_img_resize,
-    image_convert as _g_img_convert,
-    image_info as _g_img_info,
-    hash_text as _g_hash,
-    encode_decode as _g_enc,
-    generate_uuid as _g_uuid,
-    generate_password as _g_pw,
-    generate_fake_data as _g_fake,
-    decode_jwt as _g_jwt,
-    json_to_yaml as _g_j2y,
-    yaml_to_json as _g_y2j,
-    timezone_convert as _g_tz,
-    date_math as _g_dm,
-    unit_convert as _g_unit,
-    text_stats as _g_ts,
-    fetch_rss as _g_rss,
-    zip_files as _g_zip,
-    unzip_file as _g_unzip,
-    merge_pdfs as _g_mpdf,
-    split_pdf as _g_spdf,
-    symbolic_math as _g_sym,
-    markdown_to_html as _g_m2h,
-    html_to_markdown as _g_h2m,
-    detect_language as _g_lang,
-    json_query as _g_jq,
-    generate_slug as _g_slug,
-    format_json as _g_fmtj,
-    extract_links as _g_links,
-)
-
-
 def _simple(name, desc, params, required):
     return {
         "function": globals()[f"_g_{name}"],
@@ -1705,19 +1805,29 @@ def _simple(name, desc, params, required):
 SKILLS["image_resize"] = {
     "function": _g_img_resize,
     "description": "Resize an image (PNG/JPG) in ~/Downloads. Specify either width or height to preserve aspect ratio.",
-    "parameters": {"type": "object", "properties": {
-        "path": {"type": "string", "description": "Absolute path or filename in ~/Downloads"},
-        "width": {"type": "integer"}, "height": {"type": "integer"},
-        "filename": {"type": "string"},
-    }, "required": ["path"]},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Absolute path or filename in ~/Downloads"},
+            "width": {"type": "integer"},
+            "height": {"type": "integer"},
+            "filename": {"type": "string"},
+        },
+        "required": ["path"],
+    },
 }
 SKILLS["image_convert"] = {
     "function": _g_img_convert,
     "description": "Convert an image to a different format (png, jpg, webp, bmp, gif, tiff).",
-    "parameters": {"type": "object", "properties": {
-        "path": {"type": "string"}, "to_format": {"type": "string"},
-        "filename": {"type": "string"},
-    }, "required": ["path", "to_format"]},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "to_format": {"type": "string"},
+            "filename": {"type": "string"},
+        },
+        "required": ["path", "to_format"],
+    },
 }
 SKILLS["image_info"] = {
     "function": _g_img_info,
@@ -1727,44 +1837,76 @@ SKILLS["image_info"] = {
 SKILLS["hash_text"] = {
     "function": _g_hash,
     "description": "Hash text with md5/sha1/sha256/sha384/sha512.",
-    "parameters": {"type": "object", "properties": {
-        "text": {"type": "string"}, "algorithm": {"type": "string"},
-    }, "required": ["text"]},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string"},
+            "algorithm": {"type": "string"},
+        },
+        "required": ["text"],
+    },
 }
 SKILLS["encode_decode"] = {
     "function": _g_enc,
     "description": "Encode or decode text. Operation: base64-encode, base64-decode, url-encode, url-decode, hex-encode, hex-decode, rot13.",
-    "parameters": {"type": "object", "properties": {
-        "text": {"type": "string"}, "operation": {"type": "string"},
-    }, "required": ["text", "operation"]},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string"},
+            "operation": {"type": "string"},
+        },
+        "required": ["text", "operation"],
+    },
 }
 SKILLS["generate_uuid"] = {
     "function": _g_uuid,
     "description": "Generate one or more UUIDs (v1, v4, v5).",
-    "parameters": {"type": "object", "properties": {
-        "count": {"type": "integer"}, "version": {"type": "integer"},
-    }, "required": []},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "count": {"type": "integer"},
+            "version": {"type": "integer"},
+        },
+        "required": [],
+    },
 }
 SKILLS["generate_password"] = {
     "function": _g_pw,
     "description": "Generate secure random password(s). Cryptographically strong via secrets module.",
-    "parameters": {"type": "object", "properties": {
-        "length": {"type": "integer"}, "symbols": {"type": "boolean"}, "count": {"type": "integer"},
-    }, "required": []},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "length": {"type": "integer"},
+            "symbols": {"type": "boolean"},
+            "count": {"type": "integer"},
+        },
+        "required": [],
+    },
 }
 SKILLS["generate_fake_data"] = {
     "function": _g_fake,
     "description": "Generate fake/synthetic data via Faker. Kind: profile, company, address, credit_card, text, internet.",
-    "parameters": {"type": "object", "properties": {
-        "kind": {"type": "string"}, "count": {"type": "integer"}, "locale": {"type": "string"},
-    }, "required": []},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string"},
+            "count": {"type": "integer"},
+            "locale": {"type": "string"},
+        },
+        "required": [],
+    },
 }
 SKILLS["decode_jwt"] = {
     "function": _g_jwt,
     "description": "Decode a JWT token; optionally verify with a secret.",
-    "parameters": {"type": "object", "properties": {
-        "token": {"type": "string"}, "secret": {"type": "string"},
-    }, "required": ["token"]},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "token": {"type": "string"},
+            "secret": {"type": "string"},
+        },
+        "required": ["token"],
+    },
 }
 SKILLS["json_to_yaml"] = {
     "function": _g_j2y,
@@ -1779,24 +1921,42 @@ SKILLS["yaml_to_json"] = {
 SKILLS["timezone_convert"] = {
     "function": _g_tz,
     "description": "Convert an ISO datetime between timezones (IANA names: 'America/New_York', 'Europe/Rome', etc.).",
-    "parameters": {"type": "object", "properties": {
-        "dt_iso": {"type": "string"}, "from_tz": {"type": "string"}, "to_tz": {"type": "string"},
-    }, "required": ["dt_iso", "from_tz", "to_tz"]},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "dt_iso": {"type": "string"},
+            "from_tz": {"type": "string"},
+            "to_tz": {"type": "string"},
+        },
+        "required": ["dt_iso", "from_tz", "to_tz"],
+    },
 }
 SKILLS["date_math"] = {
     "function": _g_dm,
     "description": "Add/subtract days/hours/minutes to an ISO datetime (defaults to now). Returns resulting datetime and weekday.",
-    "parameters": {"type": "object", "properties": {
-        "date_iso": {"type": "string"}, "days": {"type": "integer"},
-        "hours": {"type": "integer"}, "minutes": {"type": "integer"},
-    }, "required": []},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "date_iso": {"type": "string"},
+            "days": {"type": "integer"},
+            "hours": {"type": "integer"},
+            "minutes": {"type": "integer"},
+        },
+        "required": [],
+    },
 }
 SKILLS["unit_convert"] = {
     "function": _g_unit,
     "description": "Convert physical units (length, mass, time, temperature, volume, energy, speed, etc.) via pint.",
-    "parameters": {"type": "object", "properties": {
-        "value": {"type": "number"}, "from_unit": {"type": "string"}, "to_unit": {"type": "string"},
-    }, "required": ["value", "from_unit", "to_unit"]},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "value": {"type": "number"},
+            "from_unit": {"type": "string"},
+            "to_unit": {"type": "string"},
+        },
+        "required": ["value", "from_unit", "to_unit"],
+    },
 }
 SKILLS["text_stats"] = {
     "function": _g_ts,
@@ -1806,44 +1966,71 @@ SKILLS["text_stats"] = {
 SKILLS["fetch_rss"] = {
     "function": _g_rss,
     "description": "Fetch an RSS or Atom feed, return parsed items (title, link, summary, author, published).",
-    "parameters": {"type": "object", "properties": {
-        "url": {"type": "string"}, "max_items": {"type": "integer"},
-    }, "required": ["url"]},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string"},
+            "max_items": {"type": "integer"},
+        },
+        "required": ["url"],
+    },
 }
 SKILLS["zip_files"] = {
     "function": _g_zip,
     "description": "Create a ZIP archive from a list of files in ~/Downloads.",
-    "parameters": {"type": "object", "properties": {
-        "paths": {"type": "array", "items": {"type": "string"}},
-        "filename": {"type": "string"},
-    }, "required": ["paths"]},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "paths": {"type": "array", "items": {"type": "string"}},
+            "filename": {"type": "string"},
+        },
+        "required": ["paths"],
+    },
 }
 SKILLS["unzip_file"] = {
     "function": _g_unzip,
     "description": "Extract a ZIP archive to a destination folder (default: ~/Downloads/<name>/).",
-    "parameters": {"type": "object", "properties": {
-        "path": {"type": "string"}, "dest_dir": {"type": "string"},
-    }, "required": ["path"]},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "dest_dir": {"type": "string"},
+        },
+        "required": ["path"],
+    },
 }
 SKILLS["merge_pdfs"] = {
     "function": _g_mpdf,
     "description": "Merge multiple PDFs from ~/Downloads into one file.",
-    "parameters": {"type": "object", "properties": {
-        "paths": {"type": "array", "items": {"type": "string"}},
-        "filename": {"type": "string"},
-    }, "required": ["paths"]},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "paths": {"type": "array", "items": {"type": "string"}},
+            "filename": {"type": "string"},
+        },
+        "required": ["paths"],
+    },
 }
 SKILLS["split_pdf"] = {
     "function": _g_spdf,
     "description": "Split a PDF into pages. pages='all' → one PDF per page. pages='1-3,5,7-9' → extract those pages into a single PDF.",
-    "parameters": {"type": "object", "properties": {
-        "path": {"type": "string"}, "pages": {"type": "string"},
-    }, "required": ["path"]},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "pages": {"type": "string"},
+        },
+        "required": ["path"],
+    },
 }
 SKILLS["markdown_to_html"] = {
     "function": _g_m2h,
     "description": "Convert markdown to HTML (python-markdown with fenced code + tables + toc + nl2br).",
-    "parameters": {"type": "object", "properties": {"markdown_text": {"type": "string"}}, "required": ["markdown_text"]},
+    "parameters": {
+        "type": "object",
+        "properties": {"markdown_text": {"type": "string"}},
+        "required": ["markdown_text"],
+    },
 }
 SKILLS["html_to_markdown"] = {
     "function": _g_h2m,
@@ -1858,23 +2045,39 @@ SKILLS["detect_language"] = {
 SKILLS["json_query"] = {
     "function": _g_jq,
     "description": "Run a JSONPath query (e.g. '$.users[?(@.age>18)].name') against a JSON string.",
-    "parameters": {"type": "object", "properties": {
-        "json_str": {"type": "string"}, "path": {"type": "string"},
-    }, "required": ["json_str", "path"]},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "json_str": {"type": "string"},
+            "path": {"type": "string"},
+        },
+        "required": ["json_str", "path"],
+    },
 }
 SKILLS["generate_slug"] = {
     "function": _g_slug,
     "description": "Slugify a string (lowercase, hyphens, strip punctuation) for filenames and URLs.",
-    "parameters": {"type": "object", "properties": {
-        "text": {"type": "string"}, "max_length": {"type": "integer"},
-    }, "required": ["text"]},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string"},
+            "max_length": {"type": "integer"},
+        },
+        "required": ["text"],
+    },
 }
 SKILLS["format_json"] = {
     "function": _g_fmtj,
     "description": "Pretty-print JSON with configurable indent and key sorting.",
-    "parameters": {"type": "object", "properties": {
-        "json_str": {"type": "string"}, "indent": {"type": "integer"}, "sort_keys": {"type": "boolean"},
-    }, "required": ["json_str"]},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "json_str": {"type": "string"},
+            "indent": {"type": "integer"},
+            "sort_keys": {"type": "boolean"},
+        },
+        "required": ["json_str"],
+    },
 }
 SKILLS["extract_links"] = {
     "function": _g_links,
@@ -1885,11 +2088,15 @@ SKILLS["extract_links"] = {
 SKILLS["symbolic_math"] = {
     "function": _g_sym,
     "description": "Symbolic math via sympy. operation: simplify|expand|factor|solve|diff|integrate|latex. Example: simplify '(x+1)**2'.",
-    "parameters": {"type": "object", "properties": {
-        "expression": {"type": "string"},
-        "operation": {"type": "string"},
-        "variable": {"type": "string"},
-    }, "required": ["expression"]},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "expression": {"type": "string"},
+            "operation": {"type": "string"},
+            "variable": {"type": "string"},
+        },
+        "required": ["expression"],
+    },
 }
 
 
@@ -1915,8 +2122,8 @@ SKILLS["get_weather"] = {
         "Get current weather, 24-hour hourly forecast, and 7-day daily "
         "forecast for a location. Uses Open-Meteo (no API key). After "
         "calling this, ALWAYS emit an HTML artifact rendering the widget: "
-        "in your reply write <antArtifact identifier=\"weather-<slug>\" "
-        "type=\"application/vnd.pimio.weather\" title=\"Weather in <city>\">"
+        'in your reply write <antArtifact identifier="weather-<slug>" '
+        'type="application/vnd.pimio.weather" title="Weather in <city>">'
         "<JSON result verbatim></antArtifact>. The webui will render it as "
         "an animated widget with Meteocons icons."
     ),
@@ -1937,8 +2144,8 @@ SKILLS["get_weather"] = {
 }
 
 
-def get_tools_spec() -> list[dict]:
-    """Return OpenAI-format tools spec for all skills."""
+def get_tools_spec(allowed_names: set[str] | None = None) -> list[dict]:
+    """Return OpenAI-format tool specs, optionally restricted by policy."""
     return [
         {
             "type": "function",
@@ -1949,6 +2156,7 @@ def get_tools_spec() -> list[dict]:
             },
         }
         for name, skill in SKILLS.items()
+        if allowed_names is None or name in allowed_names
     ]
 
 
@@ -1966,6 +2174,7 @@ def execute_skill(name: str, arguments: dict) -> dict:
     fn = SKILLS[name]["function"]
     try:
         import inspect
+
         sig = inspect.signature(fn)
         params = sig.parameters
         accepts_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
@@ -1997,6 +2206,41 @@ def _read_mio_skill(name: str, max_chars: int = 32_000) -> dict:
     from mio.skill_catalog import read_mio_skill
 
     return read_mio_skill(name=name, max_chars=max_chars)
+
+
+def _list_mcp_tools(server: str) -> dict:
+    from mio.mcp import list_mcp_tools
+
+    return list_mcp_tools(server)
+
+
+def _call_mcp_tool(server: str, name: str, arguments: dict | None = None) -> dict:
+    from mio.mcp import call_mcp_tool
+
+    return call_mcp_tool(server, name, arguments or {})
+
+
+def _list_flow_skills(query: str = "", limit: int = 50) -> dict:
+    from mio.webui.flow_skills import FlowSkillError, list_flow_skills
+
+    try:
+        return list_flow_skills(query=query, limit=limit)
+    except (FlowSkillError, TypeError, ValueError) as exc:
+        return {"skill": "list_flow_skills", "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _run_flow_skill(name: str, input=None, variables: dict | None = None) -> dict:
+    from mio.webui.flow_skills import FlowSkillError, run_flow_skill
+
+    try:
+        return run_flow_skill(name=name, input=input, variables=variables or {})
+    except (FlowSkillError, TypeError, ValueError, RuntimeError) as exc:
+        return {
+            "skill": "run_flow_skill",
+            "name": name,
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
 
 
 SKILLS["list_mio_skills"] = {
@@ -2032,6 +2276,79 @@ SKILLS["read_mio_skill"] = {
                 "minimum": 1,
                 "maximum": 200000,
                 "default": 32000,
+            },
+        },
+        "required": ["name"],
+    },
+}
+
+SKILLS["list_mcp_tools"] = {
+    "function": _list_mcp_tools,
+    "description": (
+        "Discover tools on one enabled Mio-local MCP server (headroom, llm-wiki, or ponytail). "
+        "Remote and authenticated MCPs are denied by the WebUI policy."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "server": {"type": "string", "description": "Enabled Mio MCP server name"},
+        },
+        "required": ["server"],
+    },
+}
+
+SKILLS["call_mcp_tool"] = {
+    "function": _call_mcp_tool,
+    "description": (
+        "Call one advertised tool on an enabled Mio-local MCP. Call list_mcp_tools first. "
+        "Use mutating tools only when the user explicitly requested the change."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "server": {"type": "string", "description": "Enabled Mio MCP server name"},
+            "name": {"type": "string", "description": "Advertised MCP tool name"},
+            "arguments": {
+                "type": "object",
+                "description": "Arguments matching the advertised input schema",
+                "additionalProperties": True,
+            },
+        },
+        "required": ["server", "name"],
+    },
+}
+
+SKILLS["list_flow_skills"] = {
+    "function": _list_flow_skills,
+    "description": (
+        "List Flow Mode graphs that the user explicitly exposed as Mio skills. "
+        "This stable catalog keeps the model tool schema bounded."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Optional text filter"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50},
+        },
+        "required": [],
+    },
+}
+
+SKILLS["run_flow_skill"] = {
+    "function": _run_flow_skill,
+    "description": (
+        "Run one user-published Mio Flow skill. Call list_flow_skills first to discover "
+        "its name and declared user inputs."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Published flow skill name"},
+            "input": {"description": "Primary value for a flow with one user-input node"},
+            "variables": {
+                "type": "object",
+                "description": "Values keyed by the input names returned by list_flow_skills",
+                "additionalProperties": True,
             },
         },
         "required": ["name"],

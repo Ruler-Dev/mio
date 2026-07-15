@@ -2,7 +2,7 @@
 //
 // Recognises patterns like:
 //   "remind me tomorrow at 9am to water the plants"
-//   "every weekday at 8:30am summarise my inbox"
+//   "every Monday at 8:30am summarise my inbox"
 //   "in 30 minutes stretch"
 //   "at 17:00 kick off the build"
 //
@@ -17,7 +17,7 @@
 
   const PATTERNS = [
     // "every {day} at {HH:MM}? {am/pm}? {task}"
-    { kind: "recurring", re: /^every\s+(day|weekday|weekend|mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)(?:\s+at)?\s+([0-9]{1,2})(?::([0-9]{2}))?\s*(am|pm)?\s+(.+)$/i },
+    { kind: "recurring", re: /^every\s+(day|week|mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)(?:\s+at)?\s+([0-9]{1,2})(?::([0-9]{2}))?\s*(am|pm)?\s+(.+)$/i },
     // "tomorrow at 9am do X"
     { kind: "once",      re: /^(tomorrow|today)(?:\s+at)?\s+([0-9]{1,2})(?::([0-9]{2}))?\s*(am|pm)?\s+(.+)$/i },
     // "in N {min|hours} X"
@@ -45,6 +45,7 @@
         const n = parseInt(m[1], 10);
         const unit = m[2].toLowerCase();
         const mins = unit.startsWith("h") ? n * 60 : n;
+        if (!Number.isSafeInteger(mins) || mins < 1 || mins > 527040) continue;
         return {
           kind: "delay",
           minutes: mins,
@@ -54,10 +55,10 @@
       }
       if (p.kind === "once" || p.kind === "once-today") {
         const when = p.kind === "once-today" ? "today" : m[1].toLowerCase();
-        const offset = m[0].length - m[m.length - 1].length;
         const h0 = parseInt(p.kind === "once-today" ? m[1] : m[2], 10);
         const mn = parseInt(p.kind === "once-today" ? (m[2] || "0") : (m[3] || "0"), 10);
         const ampm = (p.kind === "once-today" ? m[3] : m[4] || "").toLowerCase();
+        if (mn > 59 || (ampm ? h0 < 1 || h0 > 12 : h0 > 23)) continue;
         let h = h0 % 24;
         if (ampm === "pm" && h < 12) h += 12;
         if (ampm === "am" && h === 12) h = 0;
@@ -74,6 +75,7 @@
         const h0 = parseInt(m[2], 10);
         const mn = parseInt(m[3] || "0", 10);
         const ampm = (m[4] || "").toLowerCase();
+        if (mn > 59 || (ampm ? h0 < 1 || h0 > 12 : h0 > 23)) continue;
         let h = h0 % 24;
         if (ampm === "pm" && h < 12) h += 12;
         if (ampm === "am" && h === 12) h = 0;
@@ -90,24 +92,28 @@
   }
 
   function toCadence(parsed) {
-    // Maps to the scheduler.py schema. Keep it simple — the scheduler
-    // accepts whatever shape we send; create_schedule normalises.
+    // Map exactly to scheduler.validate_cadence's canonical ``kind`` schema.
     if (parsed.kind === "delay") {
       const at = new Date(Date.now() + parsed.minutes * 60_000);
-      return { type: "once", at: at.toISOString() };
+      return { kind: "once", at: at.toISOString() };
     }
     if (parsed.kind === "once") {
       const d = new Date();
       if (parsed.when === "tomorrow") d.setDate(d.getDate() + 1);
       d.setHours(parsed.hour, parsed.minute, 0, 0);
-      return { type: "once", at: d.toISOString() };
+      return { kind: "once", at: d.toISOString() };
     }
     if (parsed.kind === "recurring") {
-      const dayMap = { mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6, sun: 0 };
+      if (parsed.day === "day") {
+        return { kind: "daily", hour: parsed.hour, minute: parsed.minute };
+      }
+      const dayMap = { mon: 0, tue: 1, wed: 2, thu: 3, fri: 4, sat: 5, sun: 6 };
+      const weekday = parsed.day === "week"
+        ? (new Date().getDay() + 6) % 7
+        : dayMap[parsed.day.slice(0, 3)];
       return {
-        type: "weekly",
-        day: parsed.day === "day" || parsed.day === "weekday" || parsed.day === "weekend"
-          ? parsed.day : parsed.day.slice(0, 3),
+        kind: "weekly",
+        weekday,
         hour: parsed.hour, minute: parsed.minute,
       };
     }
@@ -166,7 +172,7 @@
         input.dispatchEvent(new Event("input", { bubbles: true }));
         toast("Scheduled: " + parsed.display);
       } else {
-        toast("Schedule create failed");
+        toast("Schedule create failed: " + (data?.detail || data?.error || "invalid cadence"));
       }
     } catch (e) {
       toast("Schedule failed: " + e.message);
@@ -217,5 +223,5 @@
     boot();
   }
 
-  window.Mio.nlSchedule = { parse };
+  window.Mio.nlSchedule = { parse, toCadence };
 })();

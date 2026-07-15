@@ -62,7 +62,12 @@
     pad.querySelector('[data-act="preview"]').addEventListener("click", () => {
       const showing = !prev.hidden;
       if (showing) { prev.hidden = true;  src.hidden = false; return; }
-      prev.innerHTML = window.marked?.parse ? window.marked.parse(src.value) : escapeHtml(src.value).replace(/\n/g, "<br>");
+      const rendered = window.marked?.parse
+        ? window.marked.parse(src.value)
+        : escapeHtml(src.value).replace(/\n/g, "<br>");
+      prev.innerHTML = window.Mio?.sanitizeHtml
+        ? window.Mio.sanitizeHtml(rendered)
+        : escapeHtml(src.value).replace(/\n/g, "<br>");
       prev.hidden = false; src.hidden = true;
     });
     pad.querySelector('[data-act="chat"]').addEventListener("click", () => {

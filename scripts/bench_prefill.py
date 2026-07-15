@@ -70,8 +70,10 @@ def bench_tier(
         best_peak = 0.0
         for _ in range(reps):
             if hasattr(mx, "reset_peak_memory"):
-                try: mx.reset_peak_memory()
-                except Exception: pass
+                try:
+                    mx.reset_peak_memory()
+                except Exception:
+                    pass
             t0 = time.perf_counter()
             r = generate_dflash_once(
                 target_model=target, tokenizer=tok, draft_model=draft,
@@ -105,8 +107,10 @@ def bench_tier(
     del target, draft
     gc.collect()
     if hasattr(mx, "clear_cache"):
-        try: mx.clear_cache()
-        except Exception: pass
+        try:
+            mx.clear_cache()
+        except Exception:
+            pass
     return results
 
 

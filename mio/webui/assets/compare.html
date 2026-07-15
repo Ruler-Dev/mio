@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Mio — Side-by-side compare</title>
+<script src="/ui/assets/security.js"></script>
 <style>
 :root {
   --bg: #0a0a14; --panel: #161621; --border: #2a2a38; --accent: #3b82f6;
@@ -87,8 +88,7 @@ function run(side) {
   const metric = document.getElementById('metric-' + side);
   out.innerHTML = '<span class="cursor"></span>';
   metric.textContent = 'starting…';
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const ws = new WebSocket(proto + '//' + location.host + '/ui/ws/chat');
+  const ws = window.Mio.security.openWebSocket('/ui/ws/chat');
   let buf = '';
   let startMs = null;
   ws.onopen = () => {

@@ -221,7 +221,6 @@ def pack_3bit_indices(indices: mx.array) -> mx.array:
     # Pad to multiple of 10
     if D % 10 != 0:
         pad_size = num_words * 10 - D
-        batch_size = flat.size // D
         flat_padded = flat.reshape(-1, D)
         flat_padded = mx.pad(flat_padded, [(0, 0), (0, pad_size)])
         flat = flat_padded.reshape(-1)

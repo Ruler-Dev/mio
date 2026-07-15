@@ -46,8 +46,10 @@ def bench_tier(tier_name: str, sys_repeat: int = 80, max_tokens: int = 16) -> di
     for i, u in enumerate(users, 1):
         msg = [{"role": "system", "content": sys_content}, {"role": "user", "content": u}]
         if hasattr(mx, "reset_peak_memory"):
-            try: mx.reset_peak_memory()
-            except Exception: pass
+            try:
+                mx.reset_peak_memory()
+            except Exception:
+                pass
         t0 = time.perf_counter()
         _, m = eng.generate(msg, max_tokens=max_tokens)
         wall = time.perf_counter() - t0
@@ -73,8 +75,10 @@ def bench_tier(tier_name: str, sys_repeat: int = 80, max_tokens: int = 16) -> di
     eng.unload()
     gc.collect()
     if hasattr(mx, "clear_cache"):
-        try: mx.clear_cache()
-        except Exception: pass
+        try:
+            mx.clear_cache()
+        except Exception:
+            pass
 
     return {
         "tier": tier_name,

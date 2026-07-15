@@ -6,7 +6,7 @@ import os
 import time
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -26,6 +26,14 @@ from mio.dflash.model import (
     DFlashDraftModelArgs,
 )
 from mio.dflash.recurrent_rollback_cache import RecurrentRollbackCache
+from mio.dflash.verify_linear import (
+    target_verify_active,
+    target_verify_component_enabled,
+    target_verify_embedding_as_linear,
+    target_verify_linear,
+    target_verify_linears,
+    target_verify_mode,
+)
 
 
 def resolve_model_ref(model_ref: str | Path | None, *, kind: str) -> str:
@@ -67,10 +75,6 @@ def _prepare_prompt_tokens(tokenizer: Any, prompt: str, *, use_chat_template: bo
     return list(tokenizer.encode(prompt))
 
 
-def sample_tokens(logits: mx.array) -> mx.array:
-    return mx.argmax(logits, axis=-1)
-
-
 def build_suppress_token_mask(
     vocab_size: int,
     suppress_token_ids: Optional[list[int]],
@@ -89,16 +93,6 @@ def build_suppress_token_mask(
     return mx.any(mx.equal(vocab_indices[:, None], token_array[None, :]), axis=1)
 
 
-def sample_tokens_with_mask(
-    logits: mx.array,
-    suppress_token_mask: Optional[mx.array] = None,
-) -> mx.array:
-    if suppress_token_mask is None:
-        return sample_tokens(logits)
-    floor = mx.array(-1e9, dtype=logits.dtype)
-    return mx.argmax(mx.where(suppress_token_mask, floor, logits), axis=-1)
-
-
 def greedy_tokens_with_mask(
     logits: mx.array,
     suppress_token_mask: Optional[mx.array] = None,
@@ -110,6 +104,28 @@ def greedy_tokens_with_mask(
     return mx.argmax(masked_logits, axis=-1).astype(mx.uint32)
 
 
+def sample_tokens_with_mask(
+    logits: mx.array,
+    sampler: Optional[Callable[[mx.array], mx.array]] = None,
+    suppress_token_mask: Optional[mx.array] = None,
+) -> mx.array:
+    """Sample one token from logits while preserving Mio's suppression mask.
+
+    MLX-LM samplers consume normalized log-probabilities.  DFlash verification
+    remains greedy (its exact-match acceptance rule is not a stochastic
+    speculative sampler), while the target-only baseline can use this helper
+    for correct temperature/top-p/top-k generation.
+    """
+
+    if sampler is None:
+        return greedy_tokens_with_mask(logits, suppress_token_mask)
+    if suppress_token_mask is not None:
+        floor = mx.array(-1e9, dtype=logits.dtype)
+        logits = mx.where(suppress_token_mask, floor, logits)
+    logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
+    return sampler(logprobs).astype(mx.uint32)
+
+
 def _match_acceptance_length(
     drafted_tokens: mx.array,
     posterior_tokens: mx.array,
@@ -118,6 +134,21 @@ def _match_acceptance_length(
         return mx.array(0, dtype=mx.int32)
     matches = mx.equal(drafted_tokens, posterior_tokens).astype(mx.int32)
     return mx.sum(mx.cumprod(matches, axis=0))
+
+
+def _commit_prefix_length(
+    token_ids: mx.array,
+    stop_token_array: mx.array | None,
+) -> tuple[int, bool]:
+    """Return the prefix length through the first stop token, inclusive."""
+    total = int(token_ids.shape[0])
+    if total == 0 or stop_token_array is None:
+        return total, False
+    stop_ids = {int(token_id) for token_id in stop_token_array.tolist()}
+    for index, token_id in enumerate(token_ids.tolist()):
+        if int(token_id) in stop_ids:
+            return index + 1, True
+    return total, False
 
 
 def _concat_hidden_state_chunks(
@@ -187,9 +218,17 @@ def _target_embed_tokens(target_model: Any) -> Any:
 
 def _lm_head_logits(target_model: Any, hidden_states: mx.array) -> mx.array:
     wrapper = _target_text_wrapper(target_model)
+    exact_head = target_verify_component_enabled("head")
     if getattr(getattr(wrapper, "args", None), "tie_word_embeddings", True):
-        return wrapper.model.embed_tokens.as_linear(hidden_states)
-    return wrapper.lm_head(hidden_states)
+        if target_verify_active() and not exact_head:
+            return wrapper.model.embed_tokens.as_linear(hidden_states)
+        return target_verify_embedding_as_linear(
+            wrapper.model.embed_tokens,
+            hidden_states,
+        )
+    if target_verify_active() and not exact_head:
+        return wrapper.lm_head(hidden_states)
+    return target_verify_linear(wrapper.lm_head, hidden_states)
 
 
 def extract_context_feature_from_dict(
@@ -210,6 +249,15 @@ def _resolve_verify_len_cap(target_model: Any, block_tokens: int) -> int:
         if override > 0:
             return max(1, min(int(block_tokens), override))
     return int(block_tokens)
+
+
+def _exact_commit_oracle_enabled() -> bool:
+    return os.environ.get("MIO_DFLASH_EXACT_COMMIT_ORACLE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _resolve_dflash_max_ctx() -> int:
@@ -267,6 +315,52 @@ def _forward_draft(
         target_hidden=draft_context,
         cache=cache,
     )
+
+
+def _advance_draft_context_cache(
+    draft_model: DFlashDraftModel,
+    draft_context: mx.array,
+    cache: list[Any],
+) -> bool:
+    """Append a committed projected-context tail without running a draft block."""
+    advance = getattr(draft_model, "advance_projected_context_cache", None)
+    if not callable(advance):
+        return False
+    advance(draft_context=draft_context, cache=cache)
+    pending: list[mx.array] = []
+    for entry in cache:
+        for name in ("keys", "values", "positions"):
+            value = getattr(entry, name, None)
+            if value is not None:
+                pending.append(value)
+    if pending:
+        mx.eval(*pending)
+    return True
+
+
+def _next_pending_draft_context(
+    draft_model: DFlashDraftModel,
+    *,
+    previous: mx.array,
+    committed_hidden: mx.array,
+    previous_was_consumed: bool,
+) -> mx.array:
+    """Return the projected context that the draft cache still has to consume.
+
+    A regular speculative cycle feeds ``previous`` through the draft model, so
+    only the newly committed target features remain pending.  A one-token
+    terminal cycle skips the draft forward entirely; in that case both the old
+    context and the new committed tail must survive in the cache snapshot.
+    """
+
+    committed = _project_draft_context(draft_model, committed_hidden)
+    if previous_was_consumed or int(previous.shape[1]) == 0:
+        result = committed
+    else:
+        result = mx.concatenate([previous, committed], axis=1)
+    mx.eval(result)
+    return result
+
 
 def _should_quantize_draft(quantize_draft: bool = False) -> bool:
     if quantize_draft:
@@ -677,11 +771,17 @@ def _install_speculative_linear_cache_hook(linear_attn: Any) -> None:
         if self.sharding_group is not None:
             inputs = sum_gradients(self.sharding_group)(inputs)
 
-        qkv = self.in_proj_qkv(inputs)
-        z_proj = self.in_proj_z(inputs)
+        if target_verify_component_enabled("gdn"):
+            qkv, z_proj, b, a = target_verify_linears(
+                (self.in_proj_qkv, self.in_proj_z, self.in_proj_b, self.in_proj_a),
+                inputs,
+            )
+        else:
+            qkv = self.in_proj_qkv(inputs)
+            z_proj = self.in_proj_z(inputs)
+            b = self.in_proj_b(inputs)
+            a = self.in_proj_a(inputs)
         z = z_proj.reshape(B, S, self.num_v_heads, self.head_v_dim)
-        b = self.in_proj_b(inputs)
-        a = self.in_proj_a(inputs)
 
         if cache[0] is not None:
             conv_state = cache[0]
@@ -717,7 +817,7 @@ def _install_speculative_linear_cache_hook(linear_attn: Any) -> None:
         if state is None:
             _, _, h_k, d_k = q.shape
             h_v, d_v = v.shape[-2:]
-            state = mx.zeros((B, h_v, d_v, d_k), dtype=q.dtype)
+            state = mx.zeros((B, h_v, d_v, d_k), dtype=mx.float32)
         state_in = state
 
         if (
@@ -756,7 +856,11 @@ def _install_speculative_linear_cache_hook(linear_attn: Any) -> None:
         cache[1] = state
         out = self.norm(out, z)
         out_flat = out.reshape(B, S, -1)
-        out = self.out_proj(out_flat)
+        out = (
+            target_verify_linear(self.out_proj, out_flat)
+            if target_verify_component_enabled("gdn")
+            else self.out_proj(out_flat)
+        )
 
         if self.sharding_group is not None:
             out = mx.distributed.all_sum(out, group=self.sharding_group)
@@ -852,7 +956,17 @@ def _install_split_full_attention_hook(attn: Any) -> None:
         mask: Optional[mx.array] = None,
         cache: Optional[Any] = None,
     ) -> mx.array:
-        if not getattr(self, "_dflash_split_sdpa_enabled", False):
+        verify_active = target_verify_active()
+        exact_attention = target_verify_component_enabled("attention")
+        exact_projections = exact_attention or target_verify_component_enabled(
+            "attention_proj"
+        )
+        exact_sdpa = exact_attention or target_verify_component_enabled(
+            "attention_sdpa"
+        )
+        if verify_active and not (exact_projections or exact_sdpa):
+            return original_call(self, x, mask=mask, cache=cache)
+        if not getattr(self, "_dflash_split_sdpa_enabled", False) and not verify_active:
             return original_call(self, x, mask=mask, cache=cache)
         if not _attention_has_gated_q_proj(self):
             return original_call(self, x, mask=mask, cache=cache)
@@ -862,16 +976,21 @@ def _install_split_full_attention_hook(attn: Any) -> None:
             return original_call(self, x, mask=mask, cache=cache)
 
         B, L, _ = x.shape
-        q_proj_output = self.q_proj(x)
+        if verify_active and exact_projections:
+            q_proj_output, keys, values = target_verify_linears(
+                (self.q_proj, self.k_proj, self.v_proj),
+                x,
+            )
+        else:
+            q_proj_output = self.q_proj(x)
+            keys = self.k_proj(x)
+            values = self.v_proj(x)
         num_attention_heads = _attention_num_heads(self)
         num_key_value_heads = _attention_num_kv_heads(self)
         queries, gate = mx.split(
             q_proj_output.reshape(B, L, num_attention_heads, -1), 2, axis=-1
         )
         gate = gate.reshape(B, L, -1)
-
-        keys = self.k_proj(x)
-        values = self.v_proj(x)
 
         queries = self.q_norm(queries).transpose(0, 2, 1, 3)
         keys = self.k_norm(keys.reshape(B, L, num_key_value_heads, -1)).transpose(
@@ -898,11 +1017,15 @@ def _install_split_full_attention_hook(attn: Any) -> None:
         )
         should_split = (
             cache is not None
-            and cached_prefix_len >= exact_prefix_threshold
+            and (
+                (verify_active and exact_sdpa)
+                or cached_prefix_len >= exact_prefix_threshold
+            )
             and (mask is None or mask == "causal" or isinstance(mask, mx.array))
         )
         should_use_batched_2pass = (
             should_split
+            and not verify_active
             and int(queries.shape[2]) == 16
             and queries.dtype in (mx.bfloat16, mx.float16)
             and int(queries.shape[-1]) in (128, 256)
@@ -946,10 +1069,47 @@ def _install_split_full_attention_hook(attn: Any) -> None:
             )
         output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
         gated_output = output * mx.sigmoid(gate)
-        return self.o_proj(gated_output)
+        return (
+            target_verify_linear(self.o_proj, gated_output)
+            if verify_active and exact_projections
+            else self.o_proj(gated_output)
+        )
 
     cls.__call__ = split_call
     cls._dflash_split_full_attention_installed = True
+
+
+def _install_target_verify_mlp_hook(mlp: Any) -> None:
+    cls = type(mlp)
+    if getattr(cls, "_dflash_target_verify_call_installed", False):
+        return
+
+    original_call = cls.__call__
+
+    def verify_call(self, x: mx.array) -> mx.array:
+        exact_all = target_verify_component_enabled("mlp")
+        exact_gate_up = exact_all or target_verify_component_enabled("mlp_gate_up")
+        exact_down = exact_all or target_verify_component_enabled("mlp_down")
+        if (
+            not target_verify_active()
+            or not (exact_gate_up or exact_down)
+            or x.ndim != 3
+            or int(x.shape[1]) <= 1
+        ):
+            return original_call(self, x)
+        if exact_gate_up:
+            gate, up = target_verify_linears((self.gate_proj, self.up_proj), x)
+        else:
+            gate, up = self.gate_proj(x), self.up_proj(x)
+        activated = swiglu(gate, up)
+        return (
+            target_verify_linear(self.down_proj, activated)
+            if exact_down
+            else self.down_proj(activated)
+        )
+
+    cls.__call__ = verify_call
+    cls._dflash_target_verify_call_installed = True
 
 
 def _install_target_speculative_hooks(target_model: Any) -> None:
@@ -960,8 +1120,12 @@ def _install_target_speculative_hooks(target_model: Any) -> None:
         text_model._dflash_speculative_hooks_installed = True
         return
     for layer in text_model.layers:
+        mlp = getattr(layer, "mlp", None)
+        if mlp is not None and all(
+            hasattr(mlp, name) for name in ("gate_proj", "up_proj", "down_proj")
+        ):
+            _install_target_verify_mlp_hook(mlp)
         if getattr(layer, "is_linear", False) and hasattr(layer, "linear_attn"):
-            _install_exact_small_proj_hooks(layer.linear_attn)
             _install_speculative_linear_cache_hook(layer.linear_attn)
         elif not getattr(layer, "is_linear", False) and hasattr(layer, "self_attn"):
             _install_split_full_attention_hook(layer.self_attn)
@@ -1416,7 +1580,16 @@ def chunked_dflash_prefill(
 def trim_cache_to(cache_entries: list[Any], size: int) -> int:
     if not cache_entries:
         return 0
-    current_size = int(getattr(cache_entries[0], "offset", 0) or 0)
+    if not cache_mod.can_trim_prompt_cache(cache_entries):
+        return 0
+    offsets = [
+        int(offset)
+        for entry in cache_entries
+        if (offset := getattr(entry, "offset", None)) is not None
+    ]
+    if not offsets:
+        return 0
+    current_size = max(offsets)
     if current_size <= size:
         return 0
     return int(cache_mod.trim_prompt_cache(cache_entries, current_size - size) or 0)
@@ -1469,6 +1642,11 @@ def _restore_target_cache_after_acceptance(
                 continue
             replay_start_ns = time.perf_counter_ns()
             cache_entry.rollback(acceptance_length)
+            state = getattr(cache_entry, "state", None)
+            if isinstance(state, (list, tuple)):
+                pending = [value for value in state if isinstance(value, mx.array)]
+                if pending:
+                    mx.eval(*pending)
             replay_ns_total += time.perf_counter_ns() - replay_start_ns
         elif hasattr(cache_entry, "offset"):
             offset = int(getattr(cache_entry, "offset", 0) or 0)
@@ -1479,6 +1657,134 @@ def _restore_target_cache_after_acceptance(
     return replay_ns_total
 
 
+def _snapshot_target_cache_exact(cache_entries: list[Any]) -> list[dict[str, Any]]:
+    """Capture the cache prefix without copying model-sized buffers.
+
+    Recurrent caches replace their state arrays on every forward, so retaining
+    the current references is sufficient. KV caches write only at and beyond
+    ``offset``; restoring that scalar makes speculative suffixes invisible and
+    lets the exact commit overwrite them.
+    """
+
+    snapshots: list[dict[str, Any]] = []
+    materialize: list[mx.array] = []
+    for cache_entry in cache_entries:
+        raw_cache = getattr(cache_entry, "cache", None)
+        recurrent_state = list(raw_cache) if isinstance(raw_cache, list) else None
+        if recurrent_state is not None:
+            materialize.extend(value for value in recurrent_state if value is not None)
+        snapshots.append(
+            {
+                "cache": recurrent_state,
+                "offset": getattr(cache_entry, "offset", None),
+                "lengths": getattr(cache_entry, "lengths", None),
+                "left_padding": getattr(cache_entry, "left_padding", None),
+            }
+        )
+    if materialize:
+        mx.eval(*materialize)
+    return snapshots
+
+
+def _restore_target_cache_exact(
+    cache_entries: list[Any],
+    snapshots: list[dict[str, Any]],
+    *,
+    expected_offset: int,
+) -> None:
+    if len(cache_entries) != len(snapshots):
+        raise ValueError("target cache snapshot length mismatch")
+    for cache_entry, snapshot in zip(cache_entries, snapshots, strict=True):
+        recurrent_state = snapshot["cache"]
+        if recurrent_state is not None:
+            cache_entry.cache = list(recurrent_state)
+        if snapshot["offset"] is not None:
+            cache_entry.offset = int(snapshot["offset"])
+        if hasattr(cache_entry, "lengths"):
+            cache_entry.lengths = snapshot["lengths"]
+        if hasattr(cache_entry, "left_padding"):
+            cache_entry.left_padding = snapshot["left_padding"]
+        _clear_rollback_state(cache_entry)
+
+        restored_offset = getattr(cache_entry, "offset", None)
+        if restored_offset is not None and int(restored_offset) != int(expected_offset):
+            raise RuntimeError(
+                "target cache restore offset mismatch: "
+                f"expected {expected_offset}, got {restored_offset}"
+            )
+
+
+def _rebuild_verified_prefix_exact(
+    *,
+    target_model: Any,
+    target_cache: list[Any],
+    verify_token_ids: mx.array,
+    candidate_count: int,
+    capture_layer_ids: set[int],
+    suppress_token_mask: Optional[mx.array],
+    stop_token_ids: set[int],
+) -> dict[str, Any]:
+    """Commit a speculative prefix using the autoregressive numerical path.
+
+    MLX kernels can choose different floating-point accumulation paths for a
+    multi-token matrix multiplication and a singleton decode. A block argmax
+    is therefore a fast proposal, not a sufficient correctness oracle. This
+    routine replays only its accepted prefix one token at a time, validates
+    every drafted token against the singleton logits, and returns the exact
+    continuation state used by greedy baseline generation.
+    """
+
+    width = int(verify_token_ids.shape[1])
+    candidate_count = min(width, max(1, int(candidate_count)))
+    hidden_chunks: list[dict[int, mx.array]] = []
+    next_token: mx.array | None = None
+    last_logits: mx.array | None = None
+    stop_hit = False
+    commit_count = 0
+
+    for index in range(candidate_count):
+        step_logits, step_hidden = target_forward_with_hidden_states(
+            target_model,
+            input_ids=verify_token_ids[:, index : index + 1],
+            cache=target_cache,
+            capture_layer_ids=capture_layer_ids,
+            only_last_logit=True,
+        )
+        if not isinstance(step_hidden, dict):
+            raise TypeError("exact DFlash rebuild requires selective hidden capture")
+        next_token = greedy_tokens_with_mask(
+            step_logits[:, -1, :], suppress_token_mask
+        ).reshape(-1)
+        last_logits = step_logits[:, -1, :]
+        mx.eval(step_logits, next_token, *step_hidden.values())
+        hidden_chunks.append(step_hidden)
+        commit_count = index + 1
+
+        current_token = int(verify_token_ids[0, index].item())
+        if current_token in stop_token_ids:
+            stop_hit = True
+            break
+        if index + 1 < candidate_count:
+            proposed_next = int(verify_token_ids[0, index + 1].item())
+            if proposed_next != int(next_token[0].item()):
+                break
+
+    if next_token is None or last_logits is None:
+        raise RuntimeError("exact DFlash rebuild produced no continuation token")
+    committed_hidden = _concat_hidden_state_chunk_dicts(
+        hidden_chunks,
+        capture_layer_ids,
+    )
+    return {
+        "commit_count": commit_count,
+        "acceptance_length": commit_count - 1,
+        "stop_hit": stop_hit,
+        "next_token": next_token,
+        "last_logits": last_logits,
+        "committed_hidden": committed_hidden,
+    }
+
+
 def _verify_target_block(
     *,
     target_model: Any,
@@ -1487,6 +1793,15 @@ def _verify_target_block(
     verify_chunk_tokens: Optional[int],
     capture_layer_ids: Optional[set[int]] = None,
 ) -> tuple[mx.array, list[mx.array] | dict[int, mx.array]]:
+    if not target_verify_active():
+        with target_verify_mode():
+            return _verify_target_block(
+                target_model=target_model,
+                verify_ids=verify_ids,
+                target_cache=target_cache,
+                verify_chunk_tokens=verify_chunk_tokens,
+                capture_layer_ids=capture_layer_ids,
+            )
     total_tokens = int(verify_ids.shape[1])
     if total_tokens <= 0:
         raise ValueError("verify block must contain at least one token")
@@ -1536,6 +1851,7 @@ def generate_baseline_once(
     quantize_kv_cache: bool = False,
     tq_bits: Optional[int] = None,
     pq_bits: Optional[int] = None,
+    sampler: Optional[Callable[[mx.array], mx.array]] = None,
 ) -> dict[str, Any]:
     if hasattr(mx, "reset_peak_memory"):
         try:
@@ -1578,7 +1894,9 @@ def generate_baseline_once(
     mx.eval(logits)
     prefill_ns = time.perf_counter_ns() - prefill_start_ns
     suppress_token_mask = build_suppress_token_mask(int(logits.shape[-1]), suppress_token_ids)
-    next_token = int(greedy_tokens_with_mask(logits[:, -1, :], suppress_token_mask).item())
+    next_token = int(
+        sample_tokens_with_mask(logits[:, -1, :], sampler, suppress_token_mask).item()
+    )
     generated_tokens = [next_token]
 
     while len(generated_tokens) < max_new_tokens:
@@ -1586,7 +1904,9 @@ def generate_baseline_once(
             break
         token_array = mx.array([[next_token]], dtype=mx.uint32)
         logits = target_model(token_array, cache=cache)
-        next_token = int(greedy_tokens_with_mask(logits[:, -1, :], suppress_token_mask).item())
+        next_token = int(
+            sample_tokens_with_mask(logits[:, -1, :], sampler, suppress_token_mask).item()
+        )
         generated_tokens.append(next_token)
 
     elapsed_us = (time.perf_counter_ns() - start_ns) / 1_000.0
@@ -1614,6 +1934,7 @@ def stream_baseline_generate(
     fallback_reason: Optional[str] = None,
     tq_bits: Optional[int] = None,
     pq_bits: Optional[int] = None,
+    sampler: Optional[Callable[[mx.array], mx.array]] = None,
 ) -> Iterator[dict[str, Any]]:
     prompt_tokens = (
         list(prompt_tokens_override)
@@ -1643,7 +1964,9 @@ def stream_baseline_generate(
     mx.eval(logits)
     prefill_ns = time.perf_counter_ns() - prefill_start_ns
     suppress_token_mask = build_suppress_token_mask(int(logits.shape[-1]), suppress_token_ids)
-    next_token = int(greedy_tokens_with_mask(logits[:, -1, :], suppress_token_mask).item())
+    next_token = int(
+        sample_tokens_with_mask(logits[:, -1, :], sampler, suppress_token_mask).item()
+    )
     generated_tokens = [next_token]
 
     yield {
@@ -1669,7 +1992,9 @@ def stream_baseline_generate(
             break
         token_array = mx.array([[next_token]], dtype=mx.uint32)
         logits = target_model(token_array, cache=cache)
-        next_token = int(greedy_tokens_with_mask(logits[:, -1, :], suppress_token_mask).item())
+        next_token = int(
+            sample_tokens_with_mask(logits[:, -1, :], sampler, suppress_token_mask).item()
+        )
         generated_tokens.append(next_token)
         yield {
             "event": "token",
@@ -1903,7 +2228,11 @@ def generate_dflash_once(
     draft_incremental_ns = 0
     verify_ns_total = 0
     replay_ns_total = 0
+    rebuild_ns_total = 0
     commit_ns_total = 0
+    rebuilt_target_tokens = 0
+    exact_acceptance_corrections = 0
+    exact_commit_oracle = _exact_commit_oracle_enabled()
     seen_draft_cycle = False
     acceptance_history: list[int] = []
 
@@ -1913,11 +2242,13 @@ def generate_dflash_once(
         replay_cycle_ns = 0
         remaining = max_new_tokens - generated_token_count
         block_len = max(1, min(effective_block_tokens, remaining))
+        verify_width = min(block_len, verify_len_cap)
         block_token_buffer[:block_len] = draft_model.mask_token_id
         block_token_buffer[:1] = staged_first
         block_token_ids = block_token_buffer[:block_len]
 
-        if block_len > 1:
+        draft_context_consumed = block_len > 1
+        if draft_context_consumed:
             draft_start_ns = time.perf_counter_ns()
             noise_embedding = _target_embed_tokens(target_model)(block_token_ids[None])
             draft_hidden = _forward_draft(
@@ -1926,11 +2257,20 @@ def generate_dflash_once(
                 draft_context=draft_context,
                 cache=draft_cache,
             )
-            draft_logits = _lm_head_logits(target_model, draft_hidden[:, 1:, :])
-            mx.async_eval(draft_logits)
-            mx.eval(draft_logits)
-            drafted = greedy_tokens_with_mask(draft_logits, suppress_token_mask).squeeze(0)
-            block_token_ids[1:block_len] = drafted
+            if verify_width > 1:
+                # Keep the bidirectional DFlash backbone full-width so its
+                # cache semantics do not change, but project only positions
+                # the target will actually verify.
+                draft_logits = _lm_head_logits(
+                    target_model,
+                    draft_hidden[:, 1:verify_width, :],
+                )
+                mx.async_eval(draft_logits)
+                mx.eval(draft_logits)
+                drafted = greedy_tokens_with_mask(draft_logits, suppress_token_mask).squeeze(0)
+                block_token_ids[1:verify_width] = drafted
+            else:
+                mx.eval(draft_hidden)
             draft_cycle_ns = time.perf_counter_ns() - draft_start_ns
             draft_ns_total += draft_cycle_ns
             if not seen_draft_cycle:
@@ -1939,66 +2279,122 @@ def generate_dflash_once(
             else:
                 draft_incremental_ns += draft_cycle_ns
 
-        verify_token_ids = block_token_ids[: min(block_len, verify_len_cap)]
+        verify_token_ids = block_token_ids[:verify_width]
         verify_ids = verify_token_ids[None]
+        target_cache_snapshot = _snapshot_target_cache_exact(target_cache)
         if use_speculative_linear_cache:
             _arm_target_rollback_with_prefix(target_cache, prefix_len=start)
         verify_start_ns = time.perf_counter_ns()
-        verify_logits, verify_hidden_states = _verify_target_block(
-            target_model=target_model,
-            verify_ids=verify_ids,
-            target_cache=target_cache,
-            verify_chunk_tokens=verify_chunk_tokens,
-            capture_layer_ids=capture_layer_ids,
-        )
+        try:
+            verify_logits, verify_hidden_states = _verify_target_block(
+                target_model=target_model,
+                verify_ids=verify_ids,
+                target_cache=target_cache,
+                verify_chunk_tokens=verify_chunk_tokens,
+                capture_layer_ids=(set() if exact_commit_oracle else capture_layer_ids),
+            )
+            posterior = greedy_tokens_with_mask(
+                verify_logits[0],
+                suppress_token_mask,
+            )
+            hidden_values = (
+                tuple(verify_hidden_states.values())
+                if isinstance(verify_hidden_states, dict)
+                else ()
+            )
+            mx.eval(posterior, *hidden_values)
+        except BaseException:
+            _restore_target_cache_exact(
+                target_cache,
+                target_cache_snapshot,
+                expected_offset=start,
+            )
+            raise
         verify_cycle_ns = time.perf_counter_ns() - verify_start_ns
         verify_ns_total += verify_cycle_ns
 
-        posterior = greedy_tokens_with_mask(verify_logits[0], suppress_token_mask)
-        acceptance_len = int(
+        raw_acceptance_len = int(
             _match_acceptance_length(verify_token_ids[1:], posterior[:-1]).item()
         )
-        acceptance_history.append(acceptance_len)
-        committed_hidden = extract_context_feature_from_dict(
-            verify_hidden_states,
-            list(draft_model.target_layer_ids),
-        )[:, : (1 + acceptance_len), :]
-        mx.eval(committed_hidden, posterior)
+        candidate_segment = verify_token_ids[: 1 + raw_acceptance_len]
+        candidate_count, candidate_stop_hit = _commit_prefix_length(
+            candidate_segment,
+            stop_token_array,
+        )
 
-        commit_count = 1 + acceptance_len
+        if exact_commit_oracle:
+            replay_start_ns = time.perf_counter_ns()
+            _restore_target_cache_exact(
+                target_cache,
+                target_cache_snapshot,
+                expected_offset=start,
+            )
+            replay_cycle_ns = time.perf_counter_ns() - replay_start_ns
+            replay_ns_total += replay_cycle_ns
+            rebuild_start_ns = time.perf_counter_ns()
+            exact_commit = _rebuild_verified_prefix_exact(
+                target_model=target_model,
+                target_cache=target_cache,
+                verify_token_ids=verify_ids,
+                candidate_count=candidate_count,
+                capture_layer_ids=capture_layer_ids,
+                suppress_token_mask=suppress_token_mask,
+                stop_token_ids=set(stop_token_ids),
+            )
+            rebuild_cycle_ns = time.perf_counter_ns() - rebuild_start_ns
+            rebuild_ns_total += rebuild_cycle_ns
+            commit_count = int(exact_commit["commit_count"])
+            acceptance_len = int(exact_commit["acceptance_length"])
+            stop_hit = bool(exact_commit["stop_hit"])
+            next_token = exact_commit["next_token"]
+            committed_hidden_dict = exact_commit["committed_hidden"]
+            if acceptance_len != raw_acceptance_len:
+                exact_acceptance_corrections += 1
+            rebuilt_target_tokens += commit_count
+        else:
+            commit_count = candidate_count
+            acceptance_len = commit_count - 1
+            stop_hit = candidate_stop_hit
+            if not isinstance(verify_hidden_states, dict):
+                raise TypeError("selective DFlash verify must return hidden states")
+            committed_hidden_dict = verify_hidden_states
+            next_token = posterior[acceptance_len : acceptance_len + 1]
+            mx.eval(next_token, *verify_hidden_states.values())
+            replay_start_ns = time.perf_counter_ns()
+            _restore_target_cache_after_acceptance(
+                target_cache,
+                target_len=start + commit_count,
+                acceptance_length=acceptance_len,
+                drafted_tokens=verify_width - 1,
+            )
+            replay_ns_total += time.perf_counter_ns() - replay_start_ns
+        commit_start_ns = time.perf_counter_ns()
+        acceptance_history.append(acceptance_len)
         committed_segment = verify_token_ids[:commit_count]
-        generated_token_buffer[generated_token_count : generated_token_count + commit_count] = committed_segment
+        committed_hidden = extract_context_feature_from_dict(
+            committed_hidden_dict,
+            list(draft_model.target_layer_ids),
+        )[:, :commit_count, :]
+
+        generated_token_buffer[
+            generated_token_count : generated_token_count + commit_count
+        ] = committed_segment
         generated_token_count += commit_count
         accepted_from_draft += acceptance_len
-
-        commit_start_ns = time.perf_counter_ns()
         start += commit_count
-        draft_context = _project_draft_context(draft_model, committed_hidden)
-        mx.eval(draft_context)
-        replay_cycle_ns = _restore_target_cache_after_acceptance(
-            target_cache,
-            target_len=start,
-            acceptance_length=acceptance_len,
-            drafted_tokens=block_len - 1,
+        draft_context = _next_pending_draft_context(
+            draft_model,
+            previous=draft_context,
+            committed_hidden=committed_hidden,
+            previous_was_consumed=draft_context_consumed,
         )
-        replay_ns_total += replay_cycle_ns
         cycles_completed += 1
         commit_wall_ns = time.perf_counter_ns() - commit_start_ns
         commit_ns_total += commit_wall_ns
-        stop_hit = False
-        if stop_token_array is not None:
-            stop_hit = bool(
-                mx.any(
-                    mx.equal(
-                        committed_segment[:, None],
-                        stop_token_array[None, :],
-                    )
-                ).item()
-            )
         if stop_hit:
             break
 
-        staged_first = posterior[acceptance_len : acceptance_len + 1]
+        staged_first = next_token
 
     elapsed_us = (time.perf_counter_ns() - start_ns) / 1_000.0
     generated_token_ids = (
@@ -2025,11 +2421,19 @@ def generate_dflash_once(
             "draft_incremental": draft_incremental_ns / 1_000.0,
             "verify": verify_ns_total / 1_000.0,
             "replay": replay_ns_total / 1_000.0,
+            "rebuild": rebuild_ns_total / 1_000.0,
             "commit": commit_ns_total / 1_000.0,
         },
         "speculative_linear_cache": use_speculative_linear_cache,
         "verify_chunk_tokens": int(verify_chunk_tokens) if verify_chunk_tokens else None,
         "verify_len_cap": int(verify_len_cap),
+        "cache_commit_mode": (
+            "restore_rebuild_singleton_exact"
+            if exact_commit_oracle
+            else "timewise_exact_tape"
+        ),
+        "rebuilt_target_tokens": rebuilt_target_tokens,
+        "exact_acceptance_corrections": exact_acceptance_corrections,
         "quantize_kv_cache": bool(quantize_kv_cache),
         "tokens_per_cycle": (len(generated_token_ids) / cycles_completed) if cycles_completed > 0 else 0.0,
         "acceptance_first_20_avg": (sum(first_20) / len(first_20)) if first_20 else 0.0,
@@ -2038,11 +2442,14 @@ def generate_dflash_once(
         "warm_offset": warm_offset,
     }
     if return_final_state:
-        result["final_state"] = {
+        final_state = {
             "target_cache": target_cache,
             "draft_cache": draft_cache,
-            "offset": prompt_len,  # caches now hold the full prompt
+            "offset": start,
         }
+        if not _advance_draft_context_cache(draft_model, draft_context, draft_cache):
+            final_state["draft_context"] = draft_context
+        result["final_state"] = final_state
     return result
 
 
@@ -2190,17 +2597,23 @@ def stream_dflash_generate(
     draft_incremental_ns = 0
     verify_ns_total = 0
     replay_ns_total = 0
+    rebuild_ns_total = 0
     commit_ns_total = 0
+    rebuilt_target_tokens = 0
+    exact_acceptance_corrections = 0
+    exact_commit_oracle = _exact_commit_oracle_enabled()
     seen_draft_cycle = False
 
     while len(generated_token_ids) < max_new_tokens:
         remaining = max_new_tokens - len(generated_token_ids)
         block_len = max(1, min(effective_block_tokens, remaining))
+        verify_width = min(block_len, verify_len_cap)
         block_token_buffer[:block_len] = draft_model.mask_token_id
         block_token_buffer[:1] = staged_first
         block_token_ids = block_token_buffer[:block_len]
 
-        if block_len > 1:
+        draft_context_consumed = block_len > 1
+        if draft_context_consumed:
             draft_start_ns = time.perf_counter_ns()
             noise_embedding = _target_embed_tokens(target_model)(block_token_ids[None])
             draft_hidden = _forward_draft(
@@ -2209,12 +2622,17 @@ def stream_dflash_generate(
                 draft_context=draft_context,
                 cache=draft_cache,
             )
-            draft_logits = _lm_head_logits(target_model, draft_hidden[:, 1:, :])
-
-            mx.async_eval(draft_logits)
-            mx.eval(draft_logits)
-            drafted = greedy_tokens_with_mask(draft_logits, suppress_token_mask).squeeze(0)
-            block_token_ids[1:block_len] = drafted
+            if verify_width > 1:
+                draft_logits = _lm_head_logits(
+                    target_model,
+                    draft_hidden[:, 1:verify_width, :],
+                )
+                mx.async_eval(draft_logits)
+                mx.eval(draft_logits)
+                drafted = greedy_tokens_with_mask(draft_logits, suppress_token_mask).squeeze(0)
+                block_token_ids[1:verify_width] = drafted
+            else:
+                mx.eval(draft_hidden)
             draft_cycle_ns = time.perf_counter_ns() - draft_start_ns
             draft_ns_total += draft_cycle_ns
             if not seen_draft_cycle:
@@ -2223,40 +2641,104 @@ def stream_dflash_generate(
             else:
                 draft_incremental_ns += draft_cycle_ns
 
-        verify_token_ids = block_token_ids[: min(block_len, verify_len_cap)]
+        verify_token_ids = block_token_ids[:verify_width]
         verify_ids = verify_token_ids[None]
+        target_cache_snapshot = _snapshot_target_cache_exact(target_cache)
         _arm_target_rollback_with_prefix(target_cache, prefix_len=start)
         verify_start_ns = time.perf_counter_ns()
-        verify_logits, verify_hidden_states = _verify_target_block(
-            target_model=target_model,
-            verify_ids=verify_ids,
-            target_cache=target_cache,
-            verify_chunk_tokens=None,
-            capture_layer_ids=capture_layer_ids,
-        )
+        try:
+            verify_logits, verify_hidden_states = _verify_target_block(
+                target_model=target_model,
+                verify_ids=verify_ids,
+                target_cache=target_cache,
+                verify_chunk_tokens=None,
+                capture_layer_ids=(set() if exact_commit_oracle else capture_layer_ids),
+            )
+            posterior = greedy_tokens_with_mask(
+                verify_logits[0],
+                suppress_token_mask,
+            )
+            hidden_values = (
+                tuple(verify_hidden_states.values())
+                if isinstance(verify_hidden_states, dict)
+                else ()
+            )
+            mx.eval(posterior, *hidden_values)
+        except BaseException:
+            _restore_target_cache_exact(
+                target_cache,
+                target_cache_snapshot,
+                expected_offset=start,
+            )
+            raise
         verify_ns_total += time.perf_counter_ns() - verify_start_ns
 
-        posterior = greedy_tokens_with_mask(verify_logits[0], suppress_token_mask)
-        acceptance_len = int(
+        raw_acceptance_len = int(
             _match_acceptance_length(verify_token_ids[1:], posterior[:-1]).item()
         )
-        committed_hidden = extract_context_feature_from_dict(
-            verify_hidden_states,
-            list(draft_model.target_layer_ids),
-        )[:, : (1 + acceptance_len), :]
-        mx.eval(committed_hidden, posterior)
-
-        commit_count = 1 + acceptance_len
-        committed_segment = verify_token_ids[:commit_count]
+        candidate_segment = verify_token_ids[: 1 + raw_acceptance_len]
+        candidate_count, candidate_stop_hit = _commit_prefix_length(
+            candidate_segment,
+            stop_token_array,
+        )
+        if exact_commit_oracle:
+            replay_start_ns = time.perf_counter_ns()
+            _restore_target_cache_exact(
+                target_cache,
+                target_cache_snapshot,
+                expected_offset=start,
+            )
+            replay_ns_total += time.perf_counter_ns() - replay_start_ns
+            rebuild_start_ns = time.perf_counter_ns()
+            exact_commit = _rebuild_verified_prefix_exact(
+                target_model=target_model,
+                target_cache=target_cache,
+                verify_token_ids=verify_ids,
+                candidate_count=candidate_count,
+                capture_layer_ids=capture_layer_ids,
+                suppress_token_mask=suppress_token_mask,
+                stop_token_ids=set(stop_token_ids),
+            )
+            rebuild_ns_total += time.perf_counter_ns() - rebuild_start_ns
+            commit_count = int(exact_commit["commit_count"])
+            acceptance_len = int(exact_commit["acceptance_length"])
+            stop_hit = bool(exact_commit["stop_hit"])
+            next_token = exact_commit["next_token"]
+            last_commit_logits = exact_commit["last_logits"]
+            committed_hidden_dict = exact_commit["committed_hidden"]
+            if acceptance_len != raw_acceptance_len:
+                exact_acceptance_corrections += 1
+            rebuilt_target_tokens += commit_count
+        else:
+            commit_count = candidate_count
+            acceptance_len = commit_count - 1
+            stop_hit = candidate_stop_hit
+            if not isinstance(verify_hidden_states, dict):
+                raise TypeError("selective DFlash verify must return hidden states")
+            committed_hidden_dict = verify_hidden_states
+            next_token = posterior[acceptance_len : acceptance_len + 1]
+            last_commit_logits = verify_logits[:, acceptance_len, :]
+            mx.eval(next_token, last_commit_logits, *verify_hidden_states.values())
+            replay_start_ns = time.perf_counter_ns()
+            _restore_target_cache_after_acceptance(
+                target_cache,
+                target_len=start + commit_count,
+                acceptance_length=acceptance_len,
+                drafted_tokens=verify_width - 1,
+            )
+            replay_ns_total += time.perf_counter_ns() - replay_start_ns
         commit_start_ns = time.perf_counter_ns()
+        committed_segment = verify_token_ids[:commit_count]
+        committed_hidden = extract_context_feature_from_dict(
+            committed_hidden_dict,
+            list(draft_model.target_layer_ids),
+        )[:, :commit_count, :]
         start += commit_count
-        draft_context = _project_draft_context(draft_model, committed_hidden)
-        mx.eval(draft_context)
-        replay_ns_total += _restore_target_cache_after_acceptance(
-            target_cache,
-            target_len=start,
-            acceptance_length=acceptance_len,
-            drafted_tokens=block_len - 1,
+        draft_context = _next_pending_draft_context(
+            draft_model,
+            previous=draft_context,
+            committed_hidden=committed_hidden,
+            previous_was_consumed=draft_context_consumed,
         )
         cycles_completed += 1
         commit_ns_total += time.perf_counter_ns() - commit_start_ns
@@ -2291,23 +2773,23 @@ def stream_dflash_generate(
             if promoted:
                 stop_token_ids = list(stop_token_ids or []) + list(promoted)
                 stop_token_array = mx.array(stop_token_ids, dtype=mx.uint32)
+            next_token = greedy_tokens_with_mask(
+                last_commit_logits, suppress_token_mask
+            ).reshape(-1)
 
-        stop_hit = False
-        if stop_token_array is not None:
-            stop_hit = bool(
-                mx.any(
-                    mx.equal(
-                        committed_segment[:, None],
-                        stop_token_array[None, :],
-                    )
-                ).item()
-            )
         if stop_hit:
             break
 
-        staged_first = posterior[acceptance_len : acceptance_len + 1]
+        staged_first = next_token
 
     elapsed_us = (time.perf_counter_ns() - start_ns) / 1_000.0
+    final_state = {
+        "target_cache": target_cache,
+        "draft_cache": draft_cache,
+        "offset": start,
+    }
+    if not _advance_draft_context_cache(draft_model, draft_context, draft_cache):
+        final_state["draft_context"] = draft_context
     yield {
         "event": "summary",
         "elapsed_us": elapsed_us,
@@ -2326,13 +2808,17 @@ def stream_dflash_generate(
             "draft_incremental": draft_incremental_ns / 1_000.0,
             "verify": verify_ns_total / 1_000.0,
             "replay": replay_ns_total / 1_000.0,
+            "rebuild": rebuild_ns_total / 1_000.0,
             "commit": commit_ns_total / 1_000.0,
         },
         "verify_len_cap": int(verify_len_cap),
+        "cache_commit_mode": (
+            "restore_rebuild_singleton_exact"
+            if exact_commit_oracle
+            else "timewise_exact_tape"
+        ),
+        "rebuilt_target_tokens": rebuilt_target_tokens,
+        "exact_acceptance_corrections": exact_acceptance_corrections,
         "warm_offset": warm_offset,
-        "final_state": {
-            "target_cache": target_cache,
-            "draft_cache": draft_cache,
-            "offset": prompt_len,
-        },
+        "final_state": final_state,
     }

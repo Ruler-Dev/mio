@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 from fpdf import FPDF
-import math
 
 # --- Dark theme palette ---
 BG = (12, 12, 20)
@@ -43,7 +42,7 @@ class Deck(FPDF):
         self.rect(0, 200, 297, 10, "F")
         self.set_font("Helvetica", "", 6)
         self.set_text_color(*DIM)
-        self.text(8, 206, f"Mio  |  Federico Lupo  |  April 2026")
+        self.text(8, 206, "Mio  |  Federico Lupo  |  April 2026")
         self.text(272, 206, f"{self.slide_num}")
         # Accent line
         self._gradient_line(12)

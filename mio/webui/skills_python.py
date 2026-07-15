@@ -10,27 +10,41 @@ from __future__ import annotations
 import base64
 import datetime as _dt
 import hashlib
-import io
 import json
 import os
 import re
 import secrets
+import stat
 import string
 import time
+import unicodedata
 import urllib.parse
 import urllib.request
 import uuid
 import zipfile
 from pathlib import Path
 
+from mio.webui.safe_files import (
+    UnsafePathError,
+    downloads_input_path,
+    downloads_output_path,
+    ensure_directory_chain,
+    open_binary_no_follow,
+    open_confined_binary_writer,
+    relative_path_parts,
+)
+
+
+_MAX_ZIP_MEMBERS = 1024
+_MAX_ZIP_MEMBER_BYTES = 64 * 1024 * 1024
+_MAX_ZIP_TOTAL_BYTES = 256 * 1024 * 1024
+_MAX_ZIP_COMPRESSION_RATIO = 200.0
+_ZIP_COPY_CHUNK_BYTES = 1024 * 1024
+
 
 def _out(filename: str | None, ext: str) -> Path:
     fn = filename or f"mio-{int(time.time())}{ext}"
-    if not fn.endswith(ext):
-        fn = fn + ext
-    p = Path.home() / "Downloads" / fn
-    p.parent.mkdir(exist_ok=True)
-    return p
+    return downloads_output_path(fn, ext)
 
 
 # ============================================================
@@ -41,22 +55,22 @@ def image_resize(path: str, width: int | None = None, height: int | None = None,
         from PIL import Image
     except ImportError:
         return {"skill": "image_resize", "error": "Pillow not installed"}
-    src = Path(path)
-    if not src.is_absolute():
-        src = Path.home() / "Downloads" / path
-    if not src.exists():
-        return {"skill": "image_resize", "error": f"not found: {src}"}
-    img = Image.open(src)
-    w0, h0 = img.size
-    if width and not height:
-        height = round(h0 * width / w0)
-    elif height and not width:
-        width = round(w0 * height / h0)
-    elif not width and not height:
-        width, height = w0 // 2, h0 // 2
-    img2 = img.resize((width, height), Image.LANCZOS)
-    out = _out(filename, src.suffix or ".png")
-    img2.save(out)
+    try:
+        src = downloads_input_path(path)
+        with open_binary_no_follow(src) as source:
+            with Image.open(source) as img:
+                w0, h0 = img.size
+                if width and not height:
+                    height = round(h0 * width / w0)
+                elif height and not width:
+                    width = round(w0 * height / h0)
+                elif not width and not height:
+                    width, height = w0 // 2, h0 // 2
+                img2 = img.resize((width, height), Image.LANCZOS)
+                out = _out(filename, src.suffix or ".png")
+                img2.save(out)
+    except (OSError, UnsafePathError, ValueError) as exc:
+        return {"skill": "image_resize", "error": str(exc)}
     return {"skill": "image_resize", "path": str(out), "filename": out.name,
             "from": [w0, h0], "to": [width, height]}
 
@@ -66,19 +80,19 @@ def image_convert(path: str, to_format: str, filename: str | None = None) -> dic
         from PIL import Image
     except ImportError:
         return {"skill": "image_convert", "error": "Pillow not installed"}
-    src = Path(path)
-    if not src.is_absolute():
-        src = Path.home() / "Downloads" / path
-    if not src.exists():
-        return {"skill": "image_convert", "error": f"not found: {src}"}
     fmt = to_format.upper().lstrip(".")
     fmt = {"JPG": "JPEG"}.get(fmt, fmt)
-    img = Image.open(src)
-    if fmt == "JPEG" and img.mode != "RGB":
-        img = img.convert("RGB")
     ext = "." + to_format.lower().lstrip(".")
-    out = _out(filename, ext)
-    img.save(out, fmt)
+    try:
+        src = downloads_input_path(path)
+        with open_binary_no_follow(src) as source:
+            with Image.open(source) as img:
+                if fmt == "JPEG" and img.mode != "RGB":
+                    img = img.convert("RGB")
+                out = _out(filename, ext)
+                img.save(out, fmt)
+    except (OSError, UnsafePathError, ValueError) as exc:
+        return {"skill": "image_convert", "error": str(exc)}
     return {"skill": "image_convert", "path": str(out), "filename": out.name,
             "format": fmt}
 
@@ -88,27 +102,31 @@ def image_info(path: str) -> dict:
         from PIL import Image, ExifTags
     except ImportError:
         return {"skill": "image_info", "error": "Pillow not installed"}
-    src = Path(path)
-    if not src.is_absolute():
-        src = Path.home() / "Downloads" / path
-    if not src.exists():
-        return {"skill": "image_info", "error": f"not found: {src}"}
-    img = Image.open(src)
-    exif = {}
     try:
-        raw = img._getexif() or {}
-        for tag, val in raw.items():
-            name = ExifTags.TAGS.get(tag, str(tag))
-            if isinstance(val, (bytes, bytearray)):
-                val = val.hex()[:60]
-            if isinstance(val, (str, int, float)):
-                exif[name] = val
-    except Exception:
-        pass
+        src = downloads_input_path(path)
+        with open_binary_no_follow(src) as source:
+            source_size = os.fstat(source.fileno()).st_size
+            with Image.open(source) as img:
+                image_size = img.size
+                image_mode = img.mode
+                image_format = img.format
+                exif = {}
+                try:
+                    raw = img._getexif() or {}
+                    for tag, val in raw.items():
+                        name = ExifTags.TAGS.get(tag, str(tag))
+                        if isinstance(val, (bytes, bytearray)):
+                            val = val.hex()[:60]
+                        if isinstance(val, (str, int, float)):
+                            exif[name] = val
+                except Exception:
+                    pass
+    except (OSError, UnsafePathError, ValueError) as exc:
+        return {"skill": "image_info", "error": str(exc)}
     return {
         "skill": "image_info",
-        "path": str(src), "size": img.size, "mode": img.mode,
-        "format": img.format, "bytes": src.stat().st_size,
+        "path": str(src), "size": image_size, "mode": image_mode,
+        "format": image_format, "bytes": source_size,
         "exif": exif,
     }
 
@@ -371,31 +389,160 @@ def fetch_rss(url: str, max_items: int = 20) -> dict:
 # ZIP / unzip
 # ============================================================
 def zip_files(paths: list, filename: str | None = None) -> dict:
-    out = _out(filename, ".zip")
-    files_added = []
-    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
-        for p in paths or []:
-            src = Path(p)
-            if not src.is_absolute():
-                src = Path.home() / "Downloads" / p
-            if src.exists() and src.is_file():
-                zf.write(src, src.name)
+    try:
+        sources: list[Path] = []
+        archive_names: set[str] = set()
+        for raw_path in paths or []:
+            src = downloads_input_path(raw_path)
+            archive_name = unicodedata.normalize("NFC", src.name).casefold()
+            if archive_name in archive_names:
+                raise UnsafePathError("ZIP inputs contain duplicate filenames")
+            archive_names.add(archive_name)
+            sources.append(src)
+
+        out = _out(filename, ".zip")
+        files_added = []
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+            for src in sources:
+                with open_binary_no_follow(src) as source:
+                    with archive.open(src.name, "w") as destination:
+                        while chunk := source.read(_ZIP_COPY_CHUNK_BYTES):
+                            destination.write(chunk)
                 files_added.append(src.name)
+    except (OSError, RuntimeError, UnsafePathError, zipfile.BadZipFile) as exc:
+        return {"skill": "zip_files", "error": str(exc)}
     return {"skill": "zip_files", "path": str(out), "filename": out.name, "files": files_added}
 
 
 def unzip_file(path: str, dest_dir: str | None = None) -> dict:
-    src = Path(path)
-    if not src.is_absolute():
-        src = Path.home() / "Downloads" / path
-    if not src.exists():
-        return {"skill": "unzip_file", "error": f"not found: {src}"}
-    dest = Path(dest_dir) if dest_dir else (Path.home() / "Downloads" / src.stem)
-    dest.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(src, "r") as zf:
-        zf.extractall(dest)
-        names = zf.namelist()
-    return {"skill": "unzip_file", "dest": str(dest), "file_count": len(names), "files": names[:30]}
+    try:
+        downloads = ensure_directory_chain(Path.home(), "Downloads", create=True)
+
+        src = downloads_input_path(path)
+
+        raw_destination = Path(dest_dir).expanduser() if dest_dir else Path(src.stem)
+        if raw_destination.is_absolute():
+            try:
+                destination_relative = raw_destination.relative_to(downloads).as_posix()
+            except ValueError as exc:
+                raise UnsafePathError("ZIP destination must stay inside Downloads") from exc
+        else:
+            destination_relative = raw_destination.as_posix()
+        destination_parts = relative_path_parts(destination_relative)
+
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(src, flags)
+        with os.fdopen(descriptor, "rb") as archive_handle:
+            with zipfile.ZipFile(archive_handle, "r") as archive:
+                members = archive.infolist()
+                if len(members) > _MAX_ZIP_MEMBERS:
+                    raise UnsafePathError(
+                        f"ZIP contains more than {_MAX_ZIP_MEMBERS} members"
+                    )
+
+                validated: list[tuple[zipfile.ZipInfo, tuple[str, ...]]] = []
+                seen: set[str] = set()
+                file_paths: set[tuple[str, ...]] = set()
+                total_declared = 0
+                for member in members:
+                    original_name = getattr(member, "orig_filename", member.filename)
+                    if original_name != member.filename:
+                        raise UnsafePathError("ZIP member contains a NUL byte")
+                    parts = relative_path_parts(member.filename.rstrip("/"))
+                    collision_key = unicodedata.normalize(
+                        "NFC", "/".join(parts)
+                    ).casefold()
+                    if collision_key in seen:
+                        raise UnsafePathError("ZIP contains duplicate output paths")
+                    seen.add(collision_key)
+
+                    unix_mode = (member.external_attr >> 16) & 0xFFFF
+                    file_type = stat.S_IFMT(unix_mode)
+                    if member.is_dir():
+                        if file_type not in {0, stat.S_IFDIR}:
+                            raise UnsafePathError("ZIP directory has an unsafe file type")
+                    else:
+                        if file_type not in {0, stat.S_IFREG}:
+                            raise UnsafePathError(
+                                "ZIP symlinks and special files are not allowed"
+                            )
+                        if member.flag_bits & 0x1:
+                            raise UnsafePathError("encrypted ZIP members are not supported")
+                        if member.file_size < 0 or member.compress_size < 0:
+                            raise UnsafePathError("ZIP member has an invalid size")
+                        if member.file_size > _MAX_ZIP_MEMBER_BYTES:
+                            raise UnsafePathError(
+                                f"ZIP member exceeds {_MAX_ZIP_MEMBER_BYTES} bytes"
+                            )
+                        ratio = member.file_size / max(member.compress_size, 1)
+                        if ratio > _MAX_ZIP_COMPRESSION_RATIO:
+                            raise UnsafePathError(
+                                "ZIP member exceeds the compression-ratio limit"
+                            )
+                        total_declared += member.file_size
+                        if total_declared > _MAX_ZIP_TOTAL_BYTES:
+                            raise UnsafePathError(
+                                f"ZIP expands beyond {_MAX_ZIP_TOTAL_BYTES} bytes"
+                            )
+                        file_paths.add(tuple(unicodedata.normalize("NFC", part).casefold() for part in parts))
+                    validated.append((member, parts))
+
+                # Refuse a file named ``a`` alongside ``a/child``. On extract,
+                # that collision otherwise becomes filesystem-dependent.
+                for _member, parts in validated:
+                    folded = tuple(
+                        unicodedata.normalize("NFC", part).casefold()
+                        for part in parts
+                    )
+                    if any(folded[:index] in file_paths for index in range(1, len(folded))):
+                        raise UnsafePathError("ZIP file/directory paths collide")
+
+                dest = ensure_directory_chain(
+                    downloads,
+                    "/".join(destination_parts),
+                    create=True,
+                )
+                extracted: list[str] = []
+                actual_total = 0
+                for member, parts in validated:
+                    relative = "/".join(parts)
+                    if member.is_dir():
+                        ensure_directory_chain(dest, relative, create=True)
+                        continue
+                    member_total = 0
+                    with archive.open(member, "r") as source:
+                        with open_confined_binary_writer(
+                            dest,
+                            relative,
+                            create_parents=True,
+                        ) as (_output, output):
+                            while True:
+                                chunk = source.read(_ZIP_COPY_CHUNK_BYTES)
+                                if not chunk:
+                                    break
+                                member_total += len(chunk)
+                                actual_total += len(chunk)
+                                if member_total > _MAX_ZIP_MEMBER_BYTES:
+                                    raise UnsafePathError(
+                                        "ZIP member exceeded its extraction budget"
+                                    )
+                                if actual_total > _MAX_ZIP_TOTAL_BYTES:
+                                    raise UnsafePathError(
+                                        "ZIP exceeded its total extraction budget"
+                                    )
+                                output.write(chunk)
+                    if member_total != member.file_size:
+                        raise UnsafePathError("ZIP member size changed during extraction")
+                    extracted.append(relative)
+    except (OSError, RuntimeError, UnsafePathError, zipfile.BadZipFile) as exc:
+        return {"skill": "unzip_file", "error": str(exc)}
+
+    return {
+        "skill": "unzip_file",
+        "dest": str(dest),
+        "file_count": len(extracted),
+        "files": extracted[:30],
+    }
 
 
 # ============================================================
@@ -406,19 +553,19 @@ def merge_pdfs(paths: list, filename: str | None = None) -> dict:
         from pypdf import PdfWriter
     except ImportError:
         return {"skill": "merge_pdfs", "error": "pypdf not installed"}
-    w = PdfWriter()
-    merged = []
-    for p in paths or []:
-        src = Path(p)
-        if not src.is_absolute():
-            src = Path.home() / "Downloads" / p
-        if not src.exists():
-            continue
-        w.append(str(src))
-        merged.append(src.name)
-    out = _out(filename, ".pdf")
-    with open(out, "wb") as f:
-        w.write(f)
+    try:
+        sources = [downloads_input_path(path) for path in paths or []]
+        w = PdfWriter()
+        merged = []
+        for src in sources:
+            with open_binary_no_follow(src) as source:
+                w.append(source)
+            merged.append(src.name)
+        out = _out(filename, ".pdf")
+        with open(out, "wb") as f:
+            w.write(f)
+    except (OSError, UnsafePathError, ValueError) as exc:
+        return {"skill": "merge_pdfs", "error": str(exc)}
     return {"skill": "merge_pdfs", "path": str(out), "filename": out.name, "merged": merged}
 
 
@@ -428,37 +575,38 @@ def split_pdf(path: str, pages: str = "all") -> dict:
         from pypdf import PdfReader, PdfWriter
     except ImportError:
         return {"skill": "split_pdf", "error": "pypdf not installed"}
-    src = Path(path)
-    if not src.is_absolute():
-        src = Path.home() / "Downloads" / path
-    if not src.exists():
-        return {"skill": "split_pdf", "error": f"not found: {src}"}
-    r = PdfReader(str(src))
-    outputs = []
-    if pages == "all":
-        for i, page in enumerate(r.pages):
-            w = PdfWriter(); w.add_page(page)
-            out = _out(f"{src.stem}-page{i+1}.pdf", ".pdf")
-            with open(out, "wb") as f:
-                w.write(f)
-            outputs.append(str(out))
-    else:
-        idxs = []
-        for part in pages.split(","):
-            part = part.strip()
-            if "-" in part:
-                a, b = part.split("-")
-                idxs.extend(range(int(a) - 1, int(b)))
-            elif part.isdigit():
-                idxs.append(int(part) - 1)
-        w = PdfWriter()
-        for i in idxs:
-            if 0 <= i < len(r.pages):
-                w.add_page(r.pages[i])
-        out = _out(f"{src.stem}-extract.pdf", ".pdf")
-        with open(out, "wb") as f:
-            w.write(f)
-        outputs.append(str(out))
+    try:
+        src = downloads_input_path(path)
+        outputs = []
+        with open_binary_no_follow(src) as source:
+            r = PdfReader(source)
+            if pages == "all":
+                for i, page in enumerate(r.pages):
+                    w = PdfWriter()
+                    w.add_page(page)
+                    out = _out(f"{src.stem}-page{i+1}.pdf", ".pdf")
+                    with open(out, "wb") as f:
+                        w.write(f)
+                    outputs.append(str(out))
+            else:
+                idxs = []
+                for part in pages.split(","):
+                    part = part.strip()
+                    if "-" in part:
+                        a, b = part.split("-")
+                        idxs.extend(range(int(a) - 1, int(b)))
+                    elif part.isdigit():
+                        idxs.append(int(part) - 1)
+                w = PdfWriter()
+                for i in idxs:
+                    if 0 <= i < len(r.pages):
+                        w.add_page(r.pages[i])
+                out = _out(f"{src.stem}-extract.pdf", ".pdf")
+                with open(out, "wb") as f:
+                    w.write(f)
+                outputs.append(str(out))
+    except (OSError, UnsafePathError, ValueError) as exc:
+        return {"skill": "split_pdf", "error": str(exc)}
     return {"skill": "split_pdf", "count": len(outputs), "files": outputs}
 
 

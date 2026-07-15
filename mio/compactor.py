@@ -17,20 +17,21 @@ that emitted tool_calls is never separated from the role=tool response(s)
 that answer those calls. Splitting a group breaks Qwen's chat template
 (it iterates tool_call_ids) and leaves Kilo with orphan tool results.
 
-The caller holds the GPU lock if stage 2 fires — summarization calls
-`engine.generate()` which must be serialized with the main request's
-forthcoming generate call.
+The caller holds the GPU lock if stage 2 fires. Request-scoped callers may
+also provide a cancellation event, in which case summarization is driven via
+``engine.generate_stream()`` and closed cooperatively on disconnect.
 """
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 
 
 @dataclass
 class CompactStats:
     triggered: bool = False
-    stage: str = "none"       # "none" | "truncation" | "summary"
+    stage: str = "none"  # "none" | "truncation" | "summary"
     before_tokens: int = 0
     after_tokens: int = 0
     tool_results_truncated: int = 0
@@ -55,6 +56,7 @@ class CompactStats:
 @dataclass
 class _Group:
     """An atomic message group that must be kept or dropped as a unit."""
+
     messages: list[dict] = field(default_factory=list)
 
 
@@ -92,8 +94,7 @@ def _tool_placeholder(msg: dict) -> dict:
     call_id = msg.get("tool_call_id") or "unknown"
     name = msg.get("name") or "?"
     placeholder = (
-        f"[compacted: tool={name} call_id={call_id}, "
-        f"original output was {orig_len} chars — elided to save context]"
+        f"[compacted: tool={name} call_id={call_id}, original output was {orig_len} chars — elided to save context]"
     )
     out = dict(msg)
     out["content"] = placeholder
@@ -120,11 +121,7 @@ def _run_truncation(
     for g in head:
         new_msgs: list[dict] = []
         for m in g.messages:
-            if (
-                m.get("role") == "tool"
-                and isinstance(m.get("content"), str)
-                and len(m["content"]) > min_tool_content
-            ):
+            if m.get("role") == "tool" and isinstance(m.get("content"), str) and len(m["content"]) > min_tool_content:
                 new_msgs.append(_tool_placeholder(m))
                 truncated_count += 1
             else:
@@ -153,6 +150,7 @@ def _run_summarization(
     engine,
     protected_tail: int,
     gpu_lock,
+    cancellation_event: threading.Event | None = None,
 ) -> tuple[list[dict], int]:
     """Collapse middle groups into one synthetic user message with a summary.
 
@@ -182,8 +180,7 @@ def _run_summarization(
                 # Render tool_calls as a brief listing so the summarizer knows
                 # what was called.
                 calls = "; ".join(
-                    f"{c.get('function', {}).get('name', '?')}("
-                    f"{c.get('function', {}).get('arguments', '')})"
+                    f"{c.get('function', {}).get('name', '?')}({c.get('function', {}).get('arguments', '')})"
                     for c in m.get("tool_calls") or []
                 )
                 transcript_parts.append(f"[{role}] tool_calls: {calls}")
@@ -200,10 +197,39 @@ def _run_summarization(
     ]
 
     def _do_summarize() -> str:
-        text, _metrics = engine.generate(
-            summarize_msgs, max_tokens=500, tools=None,
+        if cancellation_event is None or not hasattr(engine, "generate_stream"):
+            text, _metrics = engine.generate(
+                summarize_msgs,
+                max_tokens=500,
+                tools=None,
+            )
+            return (text or "").strip()
+
+        source = engine.generate_stream(
+            summarize_msgs,
+            max_tokens=500,
+            tools=None,
         )
-        return (text or "").strip()
+        chunks: list[str] = []
+        try:
+            iterator = iter(source)
+            while not cancellation_event.is_set():
+                try:
+                    chunk, _metrics = next(iterator)
+                except StopIteration:
+                    break
+                if cancellation_event.is_set():
+                    break
+                if chunk:
+                    chunks.append(chunk)
+        finally:
+            close = getattr(source, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+        return "" if cancellation_event.is_set() else "".join(chunks).strip()
 
     if gpu_lock is not None:
         with gpu_lock:
@@ -215,8 +241,7 @@ def _run_summarization(
         # Fallback: use a deterministic placeholder rather than risk sending
         # an empty prompt that confuses the model.
         summary = (
-            f"[prior conversation: {len(middle)} turns compacted — content not "
-            f"summarized (summarizer returned empty)]"
+            f"[prior conversation: {len(middle)} turns compacted — content not summarized (summarizer returned empty)]"
         )
 
     synthetic = {
@@ -244,8 +269,9 @@ def _count_tokens(engine, messages: list[dict], tools: list[dict] | None) -> int
     """
     try:
         return len(engine._apply_chat_template(messages, tools=tools))
-    except Exception as e:
+    except Exception:
         import json as _json
+
         total = 0
         for m in messages:
             c = m.get("content")
@@ -260,8 +286,10 @@ def _count_tokens(engine, messages: list[dict], tools: list[dict] | None) -> int
                         if part.get("type") == "image_url":
                             total += 4000
             else:
-                try: total += len(_json.dumps(c))
-                except Exception: total += 32
+                try:
+                    total += len(_json.dumps(c))
+                except Exception:
+                    total += 32
         # chars → tokens ~= 4:1 for English+code
         return max(1, total // 4)
 
@@ -277,6 +305,7 @@ def compact(
     min_tool_content: int = 500,
     enable_summarization: bool = True,
     gpu_lock=None,
+    cancellation_event: threading.Event | None = None,
 ) -> tuple[list[dict], CompactStats]:
     """Compact `messages` if its rendered prompt exceeds `threshold * context_window`.
 
@@ -292,6 +321,7 @@ def compact(
                         candidates for truncation.
       enable_summarization: if False, skip stage 2 (heuristic-only mode).
       gpu_lock: optional lock to acquire during stage 2 engine.generate().
+      cancellation_event: optional cooperative stop signal for stage 2.
 
     Returns:
       (new_messages, stats). `stats.triggered=False` means no changes.
@@ -318,7 +348,11 @@ def compact(
     # Stage 2 — summarization (only if enabled and stage 1 wasn't enough)
     if enable_summarization:
         summarized, n_sum = _run_summarization(
-            truncated, engine, protected_tail, gpu_lock,
+            truncated,
+            engine,
+            protected_tail,
+            gpu_lock,
+            cancellation_event,
         )
         after2 = _count_tokens(engine, summarized, tools)
         stats.triggered = True

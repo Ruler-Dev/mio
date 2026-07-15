@@ -59,7 +59,7 @@ def bench(tier_name: str, max_tokens: int = 128,
         target_path, lazy=True, split_full_attention_sdpa=True,
     )
     draft, _ = load_draft_bundle(draft_path)
-    print(f"[loaded]", flush=True)
+    print("[loaded]", flush=True)
 
     # Warmup (small run) to amortize one-shot JIT on every cache/kernel path.
     warm_ids = tok.encode("hello world " * 20)
@@ -83,8 +83,10 @@ def bench(tier_name: str, max_tokens: int = 128,
 
         # Vanilla DFlash
         if hasattr(mx, "reset_peak_memory"):
-            try: mx.reset_peak_memory()
-            except Exception: pass
+            try:
+                mx.reset_peak_memory()
+            except Exception:
+                pass
         t0 = time.perf_counter()
         r = generate_dflash_once(
             target_model=target, tokenizer=tok, draft_model=draft,
@@ -102,8 +104,10 @@ def bench(tier_name: str, max_tokens: int = 128,
         # BMP K = 2, 3, 4
         for K in (2, 3, 4):
             if hasattr(mx, "reset_peak_memory"):
-                try: mx.reset_peak_memory()
-                except Exception: pass
+                try:
+                    mx.reset_peak_memory()
+                except Exception:
+                    pass
             t0 = time.perf_counter()
             r = generate_bmp_dflash_once(
                 target_model=target, tokenizer=tok, draft_model=draft,
@@ -121,8 +125,10 @@ def bench(tier_name: str, max_tokens: int = 128,
     del target, draft
     gc.collect()
     if hasattr(mx, "clear_cache"):
-        try: mx.clear_cache()
-        except Exception: pass
+        try:
+            mx.clear_cache()
+        except Exception:
+            pass
 
 
 def main() -> int:

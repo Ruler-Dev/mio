@@ -39,19 +39,21 @@ PROMPTS = [
 def dense_generate(model, tok, prompt: str, max_new: int) -> tuple[str, float, float]:
     """Return (text, prefill_ms, decode_ms)."""
     ids = tok.encode(prompt)
-    prompt_len = len(ids)
     arr = mx.array(ids, dtype=mx.uint32)[None]
     t0 = time.perf_counter()
-    logits = model(arr); mx.eval(logits)
+    logits = model(arr)
+    mx.eval(logits)
     next_tok = int(mx.argmax(logits[:, -1, :], axis=-1).item())
     prefill_ms = (time.perf_counter() - t0) * 1000
 
     cache = None
     from mlx_lm.models import cache as cm
+
     inner = model.model
     cache = [cm.KVCache() for _ in range(len(inner.layers))]
     # Re-prefill using the engine's standard path so cache is consistent for decode.
-    _ = model(arr, cache=cache); mx.eval(_)
+    _ = model(arr, cache=cache)
+    mx.eval(_)
     next_tok = int(mx.argmax(_[:, -1, :], axis=-1).item())
     generated = [next_tok]
 
@@ -63,7 +65,8 @@ def dense_generate(model, tok, prompt: str, max_new: int) -> tuple[str, float, f
         if next_tok in stop_set:
             break
         x = mx.array([[next_tok]], dtype=mx.uint32)
-        logits = model(x, cache=cache); mx.eval(logits)
+        logits = model(x, cache=cache)
+        mx.eval(logits)
         next_tok = int(mx.argmax(logits[:, -1, :], axis=-1).item())
         generated.append(next_tok)
     decode_ms = (time.perf_counter() - t1) * 1000
@@ -97,19 +100,28 @@ def main():
     dense_results = []
     for i, p in enumerate(PROMPTS):
         text, pre_ms, dec_ms = dense_generate(model, tok, p, max_new)
-        dense_results.append({
-            "text": text, "prefill_ms": pre_ms, "decode_ms": dec_ms,
-            "prompt_len": len(tok.encode(p)),
-        })
+        dense_results.append(
+            {
+                "text": text,
+                "prefill_ms": pre_ms,
+                "decode_ms": dec_ms,
+                "prompt_len": len(tok.encode(p)),
+            }
+        )
         print(f"[dense {i}] plen={dense_results[-1]['prompt_len']}  prefill={pre_ms:.0f}ms  text={text[:60]!r}")
 
     # Sparse@100% reference per prompt (used for QUALITY comparison — same forward
     # path as SpecPrefill, just no token dropping. Isolates bf16 RoPE drift from
     # the actual selection effect.)
     sparse100 = SpecPrefillSession(
-        target_model=model, target_tokenizer=tok, speculator_model=model,
-        keep_ratio=0.999, chunk_size=8, score_early_exit=early_exit,
-        always_keep_first=4, always_keep_last=4,
+        target_model=model,
+        target_tokenizer=tok,
+        speculator_model=model,
+        keep_ratio=0.999,
+        chunk_size=8,
+        score_early_exit=early_exit,
+        always_keep_first=4,
+        always_keep_last=4,
     )
     sparse100._extra_keep = True  # marker
     sparse_results = []
@@ -124,8 +136,12 @@ def main():
     rows = []
     for keep in keep_ratios:
         session = SpecPrefillSession(
-            target_model=model, target_tokenizer=tok, speculator_model=model,
-            keep_ratio=keep, chunk_size=8, score_early_exit=early_exit,
+            target_model=model,
+            target_tokenizer=tok,
+            speculator_model=model,
+            keep_ratio=keep,
+            chunk_size=8,
+            score_early_exit=early_exit,
         )
         # Warmup at this ratio
         _ = session.generate("Hello world", max_new_tokens=4)
@@ -149,25 +165,37 @@ def main():
                 id_dense += 1
             if r.text == s["text"]:
                 id_s100 += 1
-            rows.append({
-                "keep": keep, "prompt": i, "speedup": speedup,
-                "pm_d": pm_d, "pm_s": pm_s,
-                "id_dense": int(r.text == d["text"]),
-                "id_s100": int(r.text == s["text"]),
-                "selected": r.selected_tokens, "plen": d["prompt_len"],
-            })
+            rows.append(
+                {
+                    "keep": keep,
+                    "prompt": i,
+                    "speedup": speedup,
+                    "pm_d": pm_d,
+                    "pm_s": pm_s,
+                    "id_dense": int(r.text == d["text"]),
+                    "id_s100": int(r.text == s["text"]),
+                    "selected": r.selected_tokens,
+                    "plen": d["prompt_len"],
+                }
+            )
         mean_speedup = sum(prefill_speedups) / len(prefill_speedups)
         mean_pm_d = sum(prefix_dense) / len(prefix_dense)
         mean_pm_s = sum(prefix_s100) / len(prefix_s100)
-        print(f"\n[keep={keep:.0%}]  mean_speedup={mean_speedup:.2f}×  "
-              f"vs_dense_match={mean_pm_d:.0%} ({id_dense}/8 id)  "
-              f"vs_sparse100_match={mean_pm_s:.0%} ({id_s100}/8 id)")
+        print(
+            f"\n[keep={keep:.0%}]  mean_speedup={mean_speedup:.2f}×  "
+            f"vs_dense_match={mean_pm_d:.0%} ({id_dense}/8 id)  "
+            f"vs_sparse100_match={mean_pm_s:.0%} ({id_s100}/8 id)"
+        )
 
     print("\n=== Detail ===")
-    print(f"{'keep':>6s} {'prompt':>6s} {'plen':>5s} {'sel':>4s} {'speedup':>8s} {'pm_d':>6s} {'pm_s':>6s} {'idd':>3s} {'ids':>3s}")
+    print(
+        f"{'keep':>6s} {'prompt':>6s} {'plen':>5s} {'sel':>4s} {'speedup':>8s} {'pm_d':>6s} {'pm_s':>6s} {'idd':>3s} {'ids':>3s}"
+    )
     for r in rows:
-        print(f"{r['keep']:>6.0%} {r['prompt']:>6d} {r['plen']:>5d} {r['selected']:>4d} "
-              f"{r['speedup']:>8.2f}× {r['pm_d']*100:>5.0f}% {r['pm_s']*100:>5.0f}% {r['id_dense']:>3d} {r['id_s100']:>3d}")
+        print(
+            f"{r['keep']:>6.0%} {r['prompt']:>6d} {r['plen']:>5d} {r['selected']:>4d} "
+            f"{r['speedup']:>8.2f}× {r['pm_d'] * 100:>5.0f}% {r['pm_s'] * 100:>5.0f}% {r['id_dense']:>3d} {r['id_s100']:>3d}"
+        )
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Mio Skill Playground</title>
+<script src="/ui/assets/security.js"></script>
 <style>
 :root {
   --bg: #0a0a14; --panel: #161621; --border: #2a2a38; --accent: #3b82f6;
@@ -46,6 +47,8 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; ba
 .result pre { background: #0f0f18; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 12px; margin: 0; }
 .result.error { border-color: #ef4444; }
 .result.error h3 { color: #ef4444; }
+.risk { display:inline-block; margin-left:8px; padding:2px 7px; border-radius:999px; background:#44231a; color:#fca56c; font:10px ui-monospace,monospace; vertical-align:middle; }
+.risk-note { margin:10px 0 18px; padding:10px 12px; border:1px solid #7c3d25; border-radius:8px; color:#f9b487; background:#281710; font-size:12px; line-height:1.45; }
 .empty { color: var(--muted); padding: 60px 0; text-align: center; font-size: 13px; }
 </style>
 </head>
@@ -117,8 +120,9 @@ function select(name) {
       </div>`;
   }).join('');
   document.getElementById('detail').innerHTML = `
-    <h2>${skill.name}</h2>
+    <h2>${skill.name}${skill.risk !== 'read' ? `<span class="risk">${escapeHTML(skill.risk)}</span>` : ''}</h2>
     <div class="desc">${escapeHTML(skill.description)}</div>
+    ${skill.risk !== 'read' ? `<div class="risk-note">This capability can access or change local resources. It is disabled unless its exact name is present in <code>MIO_WEBUI_SKILL_GRANTS</code>, and every run requires a confirmation.</div>` : ''}
     <form id="runForm" onsubmit="event.preventDefault(); run();">
       ${fields || '<div class="empty">No parameters — just hit Run.</div>'}
       <div class="actions">
@@ -150,10 +154,17 @@ async function run() {
     if (v !== undefined && v !== '') args[key] = v;
   }
   try {
-    const res = await fetch('/ui/api/skills/run', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ name: active, args }),
-    });
+    const skill = SKILLS.find(s => s.name === active);
+    let confirmSensitive = false;
+    if (skill && skill.risk !== 'read') {
+      if (!skill.operator_granted) {
+        showResult({ error: `Disabled by default. Add ${active} to MIO_WEBUI_SKILL_GRANTS and restart Mio.` }, true);
+        btn.disabled = false; btn.textContent = '▶ Run skill'; return;
+      }
+      confirmSensitive = window.confirm(`Run sensitive skill “${active}” (${skill.risk}) with these arguments?`);
+      if (!confirmSensitive) { btn.disabled = false; btn.textContent = '▶ Run skill'; return; }
+    }
+    const res = await window.Mio.security.runSkill(active, args, { confirmSensitive });
     const data = await res.json();
     showResult(data.result || data, !data.ok);
   } catch (e) {

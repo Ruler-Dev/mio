@@ -21,6 +21,8 @@
   ready();
 
   const STORAGE_KEY = "mio.dashboards.session";
+  let activeHost = null;
+  let activeState = null;
 
   function loadSession() {
     try {
@@ -59,6 +61,12 @@
 
   function renderRoot(host) {
     const state = loadSession();
+    state.sources = Array.isArray(state.sources) ? state.sources : [];
+    state.panels = Array.isArray(state.panels) ? state.panels : [];
+    state.nextPanelId = Number.isInteger(state.nextPanelId) ? state.nextPanelId : 1;
+    state.nextSourceId = Number.isInteger(state.nextSourceId) ? state.nextSourceId : 1;
+    activeHost = host;
+    activeState = state;
     host.innerHTML = `
       <div class="view-dashboards">
         <header class="view-header">
@@ -164,7 +172,9 @@
     if (window.Chart) return window.Chart;
     await new Promise((res, rej) => {
       const s = document.createElement("script");
-      s.src = "https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js";
+      s.src = "https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js";
+      s.integrity = "sha384-jb8JQMbMoBUzgWatfe6COACi2ljcDdZQ2OxczGA3bGNeWe+6DChMTBJemed7ZnvJ";
+      s.crossOrigin = "anonymous";
       s.onload = res; s.onerror = rej;
       document.head.appendChild(s);
     });
@@ -276,6 +286,55 @@
     renderPanels(host, state);
   }
 
+  function normalizeImportedPanel(raw, sourceId, id) {
+    const input = raw && typeof raw === "object" ? raw : {};
+    const panelTypes = new Set(["chart", "table", "kpi"]);
+    const chartTypes = new Set(["bar", "line", "pie", "doughnut", "radar", "polarArea", "scatter"]);
+    const clamp = (value, fallback, min, max) => {
+      const number = Number(value);
+      return Number.isFinite(number) ? Math.max(min, Math.min(max, number)) : fallback;
+    };
+    return {
+      id,
+      _mioSourceId: String(sourceId),
+      title: String(input.title || "Mio panel").slice(0, 160),
+      type: panelTypes.has(input.type) ? input.type : "chart",
+      chart_type: chartTypes.has(input.chart_type) ? input.chart_type : "bar",
+      source: input.source == null ? null : String(input.source).slice(0, 160),
+      x: String(input.x || "").slice(0, 160),
+      y: String(input.y || "").slice(0, 160),
+      column: String(input.column || "").slice(0, 160),
+      label: String(input.label || "").slice(0, 240),
+      agg: ["sum", "avg", "count", "min", "max"].includes(input.agg) ? input.agg : undefined,
+      value: ["string", "number", "boolean"].includes(typeof input.value) ? input.value : undefined,
+      labels: Array.isArray(input.labels) ? input.labels.slice(0, 500).map(String) : undefined,
+      values: Array.isArray(input.values) ? input.values.slice(0, 500).map(Number) : undefined,
+      limit: clamp(input.limit, 12, 1, 500),
+      w: clamp(input.w, 6, 1, 12),
+      h: clamp(input.h, 1, 1, 8),
+    };
+  }
+
+  function importPanel(raw, sourceId) {
+    const state = loadSession();
+    state.sources = Array.isArray(state.sources) ? state.sources : [];
+    state.panels = Array.isArray(state.panels) ? state.panels : [];
+    state.nextPanelId = Number.isInteger(state.nextPanelId) ? state.nextPanelId : 1;
+    const stableSourceId = String(sourceId || `panel-${Date.now()}`).slice(0, 160);
+    const existing = state.panels.findIndex((panel) => panel._mioSourceId === stableSourceId);
+    const id = existing >= 0 ? state.panels[existing].id : state.nextPanelId++;
+    const panel = normalizeImportedPanel(raw, stableSourceId, id);
+    if (existing >= 0) state.panels[existing] = panel;
+    else state.panels.push(panel);
+    saveSession(state);
+
+    if (activeHost?.isConnected) {
+      Object.assign(activeState, state);
+      renderPanels(activeHost, activeState);
+    }
+    return panel;
+  }
+
   async function importFile(host, state, file) {
     const text = await file.text();
     let parsed;
@@ -330,4 +389,10 @@
     return String(s ?? "").replace(/[&<>"']/g, (c) =>
       ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[c]));
   }
+
+  window.Mio.dashboards = { importPanel, parseCSV };
+  for (const item of window.Mio.pendingDashboardPanels || []) {
+    importPanel(item.panel, item.sourceId);
+  }
+  window.Mio.pendingDashboardPanels = [];
 })();

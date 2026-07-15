@@ -8,17 +8,23 @@
 - color_palette: generate a 5-color palette from a seed hex.
 - describe_image: best-effort caption + OCR of a local image path.
 """
+
 from __future__ import annotations
 
 import json
-import os
 import re
 import sqlite3
 import time
-from pathlib import Path
 from typing import Any
 
-PIMIO_DIR = Path.home() / ".mio"
+from mio.paths import mio_home
+from mio.webui.safe_files import (
+    UnsafePathError,
+    downloads_input_path,
+    open_binary_no_follow,
+)
+
+PIMIO_DIR = mio_home()
 PIMIO_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -27,17 +33,37 @@ PIMIO_DIR.mkdir(parents=True, exist_ok=True)
 # ============================================================
 _UNIT_CONV = {
     # volume (ml baseline)
-    "tsp": 4.929, "teaspoon": 4.929, "teaspoons": 4.929,
-    "tbsp": 14.79, "tablespoon": 14.79, "tablespoons": 14.79,
-    "cup": 236.6, "cups": 236.6,
-    "ml": 1.0, "milliliter": 1.0, "milliliters": 1.0,
-    "l": 1000.0, "liter": 1000.0, "liters": 1000.0,
-    "fl oz": 29.57, "floz": 29.57, "fluid ounce": 29.57,
+    "tsp": 4.929,
+    "teaspoon": 4.929,
+    "teaspoons": 4.929,
+    "tbsp": 14.79,
+    "tablespoon": 14.79,
+    "tablespoons": 14.79,
+    "cup": 236.6,
+    "cups": 236.6,
+    "ml": 1.0,
+    "milliliter": 1.0,
+    "milliliters": 1.0,
+    "l": 1000.0,
+    "liter": 1000.0,
+    "liters": 1000.0,
+    "fl oz": 29.57,
+    "floz": 29.57,
+    "fluid ounce": 29.57,
     # weight (g baseline)
-    "g": None, "gram": None, "grams": None,
-    "kg": None, "kilogram": None, "kilograms": None,
-    "oz": None, "ounce": None, "ounces": None,
-    "lb": None, "lbs": None, "pound": None, "pounds": None,
+    "g": None,
+    "gram": None,
+    "grams": None,
+    "kg": None,
+    "kilogram": None,
+    "kilograms": None,
+    "oz": None,
+    "ounce": None,
+    "ounces": None,
+    "lb": None,
+    "lbs": None,
+    "pound": None,
+    "pounds": None,
 }
 
 
@@ -137,8 +163,9 @@ def _bk_conn() -> sqlite3.Connection:
     return c
 
 
-def bookmark_save(url: str, title: str | None = None, snippet: str | None = None,
-                  tags: list[str] | None = None) -> dict:
+def bookmark_save(
+    url: str, title: str | None = None, snippet: str | None = None, tags: list[str] | None = None
+) -> dict:
     if not url:
         return {"skill": "bookmark_save", "error": "url required"}
     tags_str = ",".join(tags) if tags else ""
@@ -148,10 +175,13 @@ def bookmark_save(url: str, title: str | None = None, snippet: str | None = None
         "INSERT INTO bookmarks (url, title, snippet, tags, added) VALUES (?, ?, ?, ?, ?) "
         "ON CONFLICT(url) DO UPDATE SET title = excluded.title, snippet = excluded.snippet, "
         "tags = excluded.tags",
-        (url, title or url, snippet or "", tags_str, int(time.time()))
+        (url, title or url, snippet or "", tags_str, int(time.time())),
     )
-    cur.execute("INSERT OR REPLACE INTO bookmarks_fts (rowid, url, title, snippet, tags) "
-                "SELECT id, url, title, snippet, tags FROM bookmarks WHERE url = ?", (url,))
+    cur.execute(
+        "INSERT OR REPLACE INTO bookmarks_fts (rowid, url, title, snippet, tags) "
+        "SELECT id, url, title, snippet, tags FROM bookmarks WHERE url = ?",
+        (url,),
+    )
     c.commit()
     c.close()
     return {"skill": "bookmark_save", "ok": True, "url": url}
@@ -174,9 +204,15 @@ def bookmark_list(tag: str | None = None, limit: int = 50, unread_only: bool = F
     return {
         "skill": "bookmark_list",
         "bookmarks": [
-            {"id": r[0], "url": r[1], "title": r[2], "snippet": r[3],
-             "tags": (r[4] or "").split(",") if r[4] else [],
-             "added": r[5], "read": bool(r[6])}
+            {
+                "id": r[0],
+                "url": r[1],
+                "title": r[2],
+                "snippet": r[3],
+                "tags": (r[4] or "").split(",") if r[4] else [],
+                "added": r[5],
+                "read": bool(r[6]),
+            }
             for r in rows
         ],
     }
@@ -192,17 +228,14 @@ def bookmark_search(query: str, limit: int = 20) -> dict:
         rows = cur.execute(
             "SELECT b.id, b.url, b.title, b.snippet FROM bookmarks_fts f "
             "JOIN bookmarks b ON b.id = f.rowid WHERE bookmarks_fts MATCH ? LIMIT ?",
-            (safe, int(limit))
+            (safe, int(limit)),
         ).fetchall()
     except sqlite3.OperationalError as e:
         return {"skill": "bookmark_search", "error": f"fts5 error: {e}"}
     c.close()
     return {
         "skill": "bookmark_search",
-        "results": [
-            {"id": r[0], "url": r[1], "title": r[2], "snippet": r[3]}
-            for r in rows
-        ],
+        "results": [{"id": r[0], "url": r[1], "title": r[2], "snippet": r[3]} for r in rows],
     }
 
 
@@ -220,39 +253,61 @@ def color_palette(seed: str = "#3b82f6", mode: str = "complementary") -> dict:
     # HSL conversion
     rr, gg, bb = r / 255, g / 255, b / 255
     mx, mn = max(rr, gg, bb), min(rr, gg, bb)
-    h = s_ = l = 0.0
-    l = (mx + mn) / 2
+    h = saturation = lightness = 0.0
+    lightness = (mx + mn) / 2
     if mx != mn:
         d = mx - mn
-        s_ = d / (2 - mx - mn) if l > 0.5 else d / (mx + mn)
-        if mx == rr: h = ((gg - bb) / d + (6 if gg < bb else 0))
-        elif mx == gg: h = (bb - rr) / d + 2
-        else: h = (rr - gg) / d + 4
+        saturation = d / (2 - mx - mn) if lightness > 0.5 else d / (mx + mn)
+        if mx == rr:
+            h = (gg - bb) / d + (6 if gg < bb else 0)
+        elif mx == gg:
+            h = (bb - rr) / d + 2
+        else:
+            h = (rr - gg) / d + 4
         h /= 6
     h *= 360
+
     def hsl(h_, s_, l_):
         h_ = h_ % 360
         import colorsys
+
         r2, g2, b2 = colorsys.hls_to_rgb(h_ / 360, l_, s_)
         return "#" + "".join(f"{int(round(x * 255)):02x}" for x in (r2, g2, b2))
+
     if mode == "complementary":
-        colors = [hsl(h, s_, l), hsl(h + 180, s_, l),
-                  hsl(h, s_, max(0.1, l - 0.2)), hsl(h, s_, min(0.9, l + 0.2)),
-                  hsl(h + 180, s_, min(0.9, l + 0.15))]
+        colors = [
+            hsl(h, saturation, lightness),
+            hsl(h + 180, saturation, lightness),
+            hsl(h, saturation, max(0.1, lightness - 0.2)),
+            hsl(h, saturation, min(0.9, lightness + 0.2)),
+            hsl(h + 180, saturation, min(0.9, lightness + 0.15)),
+        ]
     elif mode == "analogous":
-        colors = [hsl(h - 30, s_, l), hsl(h - 15, s_, l),
-                  hsl(h, s_, l), hsl(h + 15, s_, l), hsl(h + 30, s_, l)]
+        colors = [
+            hsl(h - 30, saturation, lightness),
+            hsl(h - 15, saturation, lightness),
+            hsl(h, saturation, lightness),
+            hsl(h + 15, saturation, lightness),
+            hsl(h + 30, saturation, lightness),
+        ]
     elif mode == "triadic":
-        colors = [hsl(h, s_, l), hsl(h + 120, s_, l), hsl(h + 240, s_, l),
-                  hsl(h, s_, min(0.9, l + 0.2)), hsl(h, s_, max(0.1, l - 0.2))]
+        colors = [
+            hsl(h, saturation, lightness),
+            hsl(h + 120, saturation, lightness),
+            hsl(h + 240, saturation, lightness),
+            hsl(h, saturation, min(0.9, lightness + 0.2)),
+            hsl(h, saturation, max(0.1, lightness - 0.2)),
+        ]
     elif mode == "monochromatic":
-        colors = [hsl(h, s_, max(0.1, l - 0.3)),
-                  hsl(h, s_, max(0.1, l - 0.15)),
-                  hsl(h, s_, l),
-                  hsl(h, s_, min(0.9, l + 0.15)),
-                  hsl(h, s_, min(0.9, l + 0.3))]
+        colors = [
+            hsl(h, saturation, max(0.1, lightness - 0.3)),
+            hsl(h, saturation, max(0.1, lightness - 0.15)),
+            hsl(h, saturation, lightness),
+            hsl(h, saturation, min(0.9, lightness + 0.15)),
+            hsl(h, saturation, min(0.9, lightness + 0.3)),
+        ]
     else:
-        colors = [hsl(h, s_, l)]
+        colors = [hsl(h, saturation, lightness)]
     return {
         "skill": "color_palette",
         "seed": "#" + s,
@@ -267,45 +322,56 @@ def color_palette(seed: str = "#3b82f6", mode: str = "complementary") -> dict:
 def describe_image(path: str) -> dict:
     """Best-effort caption + OCR of a local image. Returns dominant color
     estimate, dimensions, and extracted text if available."""
-    p = Path(path).expanduser()
-    if not p.exists() or not p.is_file():
-        return {"skill": "describe_image", "error": f"no such file: {path}"}
     try:
         from PIL import Image  # type: ignore
     except ImportError:
         return {"skill": "describe_image", "error": "Pillow not installed"}
     try:
-        img = Image.open(p)
-    except Exception as e:
-        return {"skill": "describe_image", "error": f"could not open: {e}"}
-    result = {
-        "skill": "describe_image",
-        "path": str(p),
-        "width": img.width,
-        "height": img.height,
-        "mode": img.mode,
-        "format": (img.format or "").lower(),
-    }
-    # Dominant color — reduce to 5 colors via quantize
-    try:
-        palette_img = img.convert("RGB").resize((64, 64)).quantize(colors=5)
-        pal = palette_img.getpalette()[: 5 * 3]
-        counts = sorted(palette_img.getcolors() or [], key=lambda c: c[0], reverse=True)
-        dominant = []
-        for cnt, idx in counts[:5]:
-            r, g, b = pal[idx * 3], pal[idx * 3 + 1], pal[idx * 3 + 2]
-            dominant.append({"hex": f"#{r:02x}{g:02x}{b:02x}", "weight": cnt})
-        result["dominant_colors"] = dominant
-    except Exception:
-        pass
-    # OCR
-    try:
-        import pytesseract  # type: ignore
-        text = (pytesseract.image_to_string(img) or "").strip()
-        if text:
-            result["ocr_text"] = text[:8000]
-    except Exception:
-        pass
+        p = downloads_input_path(path)
+        with open_binary_no_follow(p, max_bytes=16 * 1024 * 1024) as source:
+            with Image.open(source) as img:
+                result = {
+                    "skill": "describe_image",
+                    "path": str(p),
+                    "width": img.width,
+                    "height": img.height,
+                    "mode": img.mode,
+                    "format": (img.format or "").lower(),
+                }
+                # Dominant color — reduce to 5 colors via quantize
+                try:
+                    palette_img = img.convert("RGB").resize((64, 64)).quantize(colors=5)
+                    pal = palette_img.getpalette()[: 5 * 3]
+                    counts = sorted(
+                        palette_img.getcolors() or [],
+                        key=lambda color: color[0],
+                        reverse=True,
+                    )
+                    dominant = []
+                    for count, index in counts[:5]:
+                        r, g, b = (
+                            pal[index * 3],
+                            pal[index * 3 + 1],
+                            pal[index * 3 + 2],
+                        )
+                        dominant.append({
+                            "hex": f"#{r:02x}{g:02x}{b:02x}",
+                            "weight": count,
+                        })
+                    result["dominant_colors"] = dominant
+                except Exception:
+                    pass
+                # OCR
+                try:
+                    import pytesseract  # type: ignore
+
+                    text = (pytesseract.image_to_string(img) or "").strip()
+                    if text:
+                        result["ocr_text"] = text[:8000]
+                except Exception:
+                    pass
+    except (OSError, UnsafePathError, ValueError) as exc:
+        return {"skill": "describe_image", "error": f"could not open: {exc}"}
     return result
 
 
@@ -340,8 +406,7 @@ def review_code(code: str, language: str = "", focus: str = "") -> dict:
     for i, start in enumerate(func_starts):
         end = func_starts[i + 1] if i + 1 < len(func_starts) else len(lines)
         if end - start > 50:
-            findings.append({"line": start + 1, "kind": "Long function (> 50 lines)",
-                             "text": lines[start].strip()})
+            findings.append({"line": start + 1, "kind": "Long function (> 50 lines)", "text": lines[start].strip()})
     return {
         "skill": "review_code",
         "language": language or "unspecified",
@@ -365,17 +430,23 @@ def explain_regex(pattern: str) -> dict:
     if not pattern:
         return {"skill": "explain_regex", "error": "pattern required"}
     import re as _re
+
     # Tokenize: anchors, character classes, quantifiers, groups, escapes, literals.
     parts: list[dict] = []
     i = 0
     p = pattern
     specials = {
-        "\\d": "any digit (0-9)", "\\D": "any non-digit",
+        "\\d": "any digit (0-9)",
+        "\\D": "any non-digit",
         "\\w": "any word character (letter, digit, underscore)",
         "\\W": "any non-word character",
-        "\\s": "any whitespace", "\\S": "any non-whitespace",
-        "\\b": "word boundary", "\\B": "non-word-boundary",
-        "\\n": "newline", "\\t": "tab", "\\r": "carriage return",
+        "\\s": "any whitespace",
+        "\\S": "any non-whitespace",
+        "\\b": "word boundary",
+        "\\B": "non-word-boundary",
+        "\\n": "newline",
+        "\\t": "tab",
+        "\\r": "carriage return",
         ".": "any character (except newline)",
         "^": "start of string/line",
         "$": "end of string/line",
@@ -383,14 +454,15 @@ def explain_regex(pattern: str) -> dict:
     while i < len(p):
         ch = p[i]
         if ch == "\\" and i + 1 < len(p):
-            tok = p[i:i+2]
-            parts.append({"part": tok, "meaning": specials.get(tok, f"literal '{p[i+1]}'")})
+            tok = p[i : i + 2]
+            parts.append({"part": tok, "meaning": specials.get(tok, f"literal '{p[i + 1]}'")})
             i += 2
             continue
         if ch == "[":
             end = p.find("]", i + 1)
-            if end == -1: break
-            cls = p[i:end+1]
+            if end == -1:
+                break
+            cls = p[i : end + 1]
             parts.append({"part": cls, "meaning": f"character class — any of {cls[1:-1]}"})
             i = end + 1
             continue
@@ -399,32 +471,44 @@ def explain_regex(pattern: str) -> dict:
             depth = 1
             j = i + 1
             while j < len(p) and depth:
-                if p[j] == "\\": j += 2; continue
-                if p[j] == "(": depth += 1
-                elif p[j] == ")": depth -= 1
+                if p[j] == "\\":
+                    j += 2
+                    continue
+                if p[j] == "(":
+                    depth += 1
+                elif p[j] == ")":
+                    depth -= 1
                 j += 1
             grp = p[i:j]
-            if grp.startswith("(?:"): meaning = "non-capturing group"
-            elif grp.startswith("(?="): meaning = "positive lookahead"
-            elif grp.startswith("(?!"): meaning = "negative lookahead"
-            elif grp.startswith("(?<="): meaning = "positive lookbehind"
-            elif grp.startswith("(?<!"): meaning = "negative lookbehind"
-            else: meaning = "capturing group"
+            if grp.startswith("(?:"):
+                meaning = "non-capturing group"
+            elif grp.startswith("(?="):
+                meaning = "positive lookahead"
+            elif grp.startswith("(?!"):
+                meaning = "negative lookahead"
+            elif grp.startswith("(?<="):
+                meaning = "positive lookbehind"
+            elif grp.startswith("(?<!"):
+                meaning = "negative lookbehind"
+            else:
+                meaning = "capturing group"
             parts.append({"part": grp, "meaning": meaning})
             i = j
             continue
         if ch in "*+?" and parts:
-            lazy = (i + 1 < len(p) and p[i+1] == "?")
+            lazy = i + 1 < len(p) and p[i + 1] == "?"
             q = ch + ("?" if lazy else "")
             meaning = {"*": "zero or more", "+": "one or more", "?": "zero or one"}[ch]
-            if lazy: meaning += " (lazy)"
+            if lazy:
+                meaning += " (lazy)"
             parts.append({"part": q, "meaning": "quantifier — " + meaning})
             i += 2 if lazy else 1
             continue
         if ch == "{":
             end = p.find("}", i + 1)
-            if end == -1: break
-            qt = p[i:end+1]
+            if end == -1:
+                break
+            qt = p[i : end + 1]
             parts.append({"part": qt, "meaning": f"quantifier — repeat {qt[1:-1]} times"})
             i = end + 1
             continue
@@ -540,18 +624,24 @@ def url_preview(url: str) -> dict:
     for a social-card-style preview."""
     import re as _re
     import urllib.request as _urlreq
+
     if not url or not (url.startswith("http://") or url.startswith("https://")):
         return {"skill": "url_preview", "error": "http(s) url required"}
     try:
-        req = _urlreq.Request(url, headers={
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                          "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml",
-        })
+        req = _urlreq.Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml",
+            },
+        )
         import ssl
+
         ctx = ssl.create_default_context()
         try:
             import certifi
+
             ctx.load_verify_locations(certifi.where())
         except ImportError:
             pass
@@ -583,6 +673,7 @@ def url_preview(url: str) -> dict:
     og_site = _meta("og:site_name")
 
     from urllib.parse import urlparse
+
     host = urlparse(url).hostname or ""
     return {
         "skill": "url_preview",
@@ -597,28 +688,27 @@ def url_preview(url: str) -> dict:
 def hn_top(limit: int = 10) -> dict:
     """Fetch current top stories from Hacker News (Firebase API, no key)."""
     import urllib.request as _urlreq
+
     try:
-        ids = json.loads(
-            _urlreq.urlopen("https://hacker-news.firebaseio.com/v0/topstories.json",
-                            timeout=10).read()
-        )[: int(limit)]
+        ids = json.loads(_urlreq.urlopen("https://hacker-news.firebaseio.com/v0/topstories.json", timeout=10).read())[
+            : int(limit)
+        ]
     except Exception as e:
         return {"skill": "hn_top", "error": f"fetch failed: {e}"}
     stories = []
     for i in ids:
         try:
-            d = json.loads(
-                _urlreq.urlopen(f"https://hacker-news.firebaseio.com/v0/item/{i}.json",
-                                timeout=6).read()
+            d = json.loads(_urlreq.urlopen(f"https://hacker-news.firebaseio.com/v0/item/{i}.json", timeout=6).read())
+            stories.append(
+                {
+                    "id": d.get("id"),
+                    "title": d.get("title"),
+                    "url": d.get("url") or f"https://news.ycombinator.com/item?id={d.get('id')}",
+                    "score": d.get("score"),
+                    "comments": d.get("descendants"),
+                    "by": d.get("by"),
+                }
             )
-            stories.append({
-                "id": d.get("id"),
-                "title": d.get("title"),
-                "url": d.get("url") or f"https://news.ycombinator.com/item?id={d.get('id')}",
-                "score": d.get("score"),
-                "comments": d.get("descendants"),
-                "by": d.get("by"),
-            })
         except Exception:
             continue
     return {"skill": "hn_top", "count": len(stories), "stories": stories}
@@ -627,13 +717,17 @@ def hn_top(limit: int = 10) -> dict:
 def reddit_top(subreddit: str = "all", limit: int = 10, period: str = "day") -> dict:
     """Fetch top posts from a subreddit (public JSON endpoint)."""
     import urllib.request as _urlreq
+
     sub = (subreddit or "all").strip().strip("/").replace("r/", "")
     period = period if period in ("hour", "day", "week", "month", "year", "all") else "day"
     url = f"https://www.reddit.com/r/{sub}/top.json?t={period}&limit={int(limit)}"
     try:
-        req = _urlreq.Request(url, headers={
-            "User-Agent": "mio/1.0 (+local research)",
-        })
+        req = _urlreq.Request(
+            url,
+            headers={
+                "User-Agent": "mio/1.0 (+local research)",
+            },
+        )
         data = json.loads(_urlreq.urlopen(req, timeout=10).read())
     except Exception as e:
         return {"skill": "reddit_top", "error": f"fetch failed: {e}"}
@@ -641,70 +735,140 @@ def reddit_top(subreddit: str = "all", limit: int = 10, period: str = "day") -> 
     posts = []
     for c in children:
         d = c.get("data") or {}
-        posts.append({
-            "title": d.get("title"),
-            "url": "https://reddit.com" + (d.get("permalink") or ""),
-            "score": d.get("score"),
-            "comments": d.get("num_comments"),
-            "subreddit": d.get("subreddit"),
-            "flair": d.get("link_flair_text"),
-        })
+        posts.append(
+            {
+                "title": d.get("title"),
+                "url": "https://reddit.com" + (d.get("permalink") or ""),
+                "score": d.get("score"),
+                "comments": d.get("num_comments"),
+                "subreddit": d.get("subreddit"),
+                "flair": d.get("link_flair_text"),
+            }
+        )
     return {"skill": "reddit_top", "subreddit": sub, "posts": posts}
 
 
 # A tiny offline quotes library. Curated, attributed.
 _QUOTES = [
-    ("Marcus Aurelius", "stoic", "You have power over your mind — not outside events. Realize this, and you will find strength."),
+    (
+        "Marcus Aurelius",
+        "stoic",
+        "You have power over your mind — not outside events. Realize this, and you will find strength.",
+    ),
     ("Marcus Aurelius", "stoic", "The impediment to action advances action. What stands in the way becomes the way."),
     ("Seneca", "stoic", "We suffer more in imagination than in reality."),
     ("Epictetus", "stoic", "It's not what happens to you, but how you react to it that matters."),
-    ("Viktor Frankl", "freedom", "Between stimulus and response there is a space. In that space is our power to choose our response."),
+    (
+        "Viktor Frankl",
+        "freedom",
+        "Between stimulus and response there is a space. In that space is our power to choose our response.",
+    ),
     ("Richard Feynman", "learning", "What I cannot create, I do not understand."),
     ("Alan Kay", "tech", "The best way to predict the future is to invent it."),
     ("Grace Hopper", "tech", "The most dangerous phrase in the language is, we've always done it this way."),
     ("Ada Lovelace", "tech", "The more I study, the more insatiable do I feel my genius for it to be."),
     ("Leonardo da Vinci", "creativity", "Simplicity is the ultimate sophistication."),
     ("Steve Jobs", "design", "Design is not just what it looks like. Design is how it works."),
-    ("Antoine de Saint-Exupéry", "design", "Perfection is achieved not when there is nothing more to add, but when there is nothing left to take away."),
+    (
+        "Antoine de Saint-Exupéry",
+        "design",
+        "Perfection is achieved not when there is nothing more to add, but when there is nothing left to take away.",
+    ),
     ("Donald Knuth", "tech", "Premature optimization is the root of all evil."),
     ("Linus Torvalds", "tech", "Talk is cheap. Show me the code."),
-    ("Martin Fowler", "tech", "Any fool can write code that a computer can understand. Good programmers write code that humans can understand."),
+    (
+        "Martin Fowler",
+        "tech",
+        "Any fool can write code that a computer can understand. Good programmers write code that humans can understand.",
+    ),
     ("Edsger Dijkstra", "tech", "Computer science is no more about computers than astronomy is about telescopes."),
     ("Albert Einstein", "science", "Imagination is more important than knowledge."),
     ("Carl Sagan", "science", "Somewhere, something incredible is waiting to be known."),
     ("Marie Curie", "science", "Nothing in life is to be feared, it is only to be understood."),
     ("Isaac Asimov", "science", "The most exciting phrase to hear in science is not 'Eureka!' but 'That's funny…'"),
-    ("Maya Angelou", "wisdom", "I've learned that people will forget what you said, but people will never forget how you made them feel."),
+    (
+        "Maya Angelou",
+        "wisdom",
+        "I've learned that people will forget what you said, but people will never forget how you made them feel.",
+    ),
     ("Rumi", "love", "The wound is the place where the light enters you."),
-    ("Haruki Murakami", "writing", "Unfortunately, the clock is ticking, the hours are going by. The past increases, the future recedes."),
+    (
+        "Haruki Murakami",
+        "writing",
+        "Unfortunately, the clock is ticking, the hours are going by. The past increases, the future recedes.",
+    ),
     ("Friedrich Nietzsche", "philosophy", "He who has a why to live can bear almost any how."),
     ("Sun Tzu", "strategy", "The supreme art of war is to subdue the enemy without fighting."),
     ("Lao Tzu", "taoism", "A journey of a thousand miles begins with a single step."),
     ("Confucius", "virtue", "It does not matter how slowly you go so long as you do not stop."),
     ("Aristotle", "virtue", "We are what we repeatedly do. Excellence, then, is not an act, but a habit."),
     ("Charlie Munger", "investing", "Take a simple idea and take it seriously."),
-    ("Warren Buffett", "investing", "It's far better to buy a wonderful company at a fair price than a fair company at a wonderful price."),
+    (
+        "Warren Buffett",
+        "investing",
+        "It's far better to buy a wonderful company at a fair price than a fair company at a wonderful price.",
+    ),
     ("Paul Graham", "startups", "Startups are counterintuitive. The things that matter are subtle."),
-    ("Peter Thiel", "startups", "The best entrepreneurs know this: every great business is built around a secret that's hidden from the outside."),
+    (
+        "Peter Thiel",
+        "startups",
+        "The best entrepreneurs know this: every great business is built around a secret that's hidden from the outside.",
+    ),
     ("Jeff Bezos", "business", "Your brand is what other people say about you when you're not in the room."),
     ("Reid Hoffman", "career", "An entrepreneur is someone who jumps off a cliff and builds a plane on the way down."),
     ("Nelson Mandela", "leadership", "It always seems impossible until it's done."),
     ("Eleanor Roosevelt", "courage", "Do one thing every day that scares you."),
-    ("Theodore Roosevelt", "effort", "Nothing in the world is worth having or worth doing unless it means effort, pain, difficulty."),
-    ("Winston Churchill", "perseverance", "Success is not final, failure is not fatal: it is the courage to continue that counts."),
-    ("Ralph Waldo Emerson", "self", "Do not go where the path may lead, go instead where there is no path and leave a trail."),
+    (
+        "Theodore Roosevelt",
+        "effort",
+        "Nothing in the world is worth having or worth doing unless it means effort, pain, difficulty.",
+    ),
+    (
+        "Winston Churchill",
+        "perseverance",
+        "Success is not final, failure is not fatal: it is the courage to continue that counts.",
+    ),
+    (
+        "Ralph Waldo Emerson",
+        "self",
+        "Do not go where the path may lead, go instead where there is no path and leave a trail.",
+    ),
     ("Thoreau", "simplicity", "Our life is frittered away by detail. Simplify, simplify."),
     ("Oscar Wilde", "individuality", "Be yourself; everyone else is already taken."),
-    ("Mark Twain", "humor", "The two most important days in your life are the day you are born and the day you find out why."),
+    (
+        "Mark Twain",
+        "humor",
+        "The two most important days in your life are the day you are born and the day you find out why.",
+    ),
     ("Shakespeare", "classic", "To thine own self be true."),
     ("Rumi", "spirit", "You are not a drop in the ocean. You are the entire ocean in a drop."),
     ("Anaïs Nin", "writing", "We write to taste life twice, in the moment and in retrospect."),
-    ("Virginia Woolf", "writing", "Lock up your libraries if you like; but there is no gate, no lock, no bolt that you can set upon the freedom of my mind."),
-    ("Toni Morrison", "writing", "If there's a book that you want to read, but it hasn't been written yet, then you must write it."),
-    ("Ursula K. Le Guin", "writing", "The only thing that makes life possible is permanent, intolerable uncertainty: not knowing what comes next."),
-    ("James Baldwin", "writing", "Not everything that is faced can be changed, but nothing can be changed until it is faced."),
+    (
+        "Virginia Woolf",
+        "writing",
+        "Lock up your libraries if you like; but there is no gate, no lock, no bolt that you can set upon the freedom of my mind.",
+    ),
+    (
+        "Toni Morrison",
+        "writing",
+        "If there's a book that you want to read, but it hasn't been written yet, then you must write it.",
+    ),
+    (
+        "Ursula K. Le Guin",
+        "writing",
+        "The only thing that makes life possible is permanent, intolerable uncertainty: not knowing what comes next.",
+    ),
+    (
+        "James Baldwin",
+        "writing",
+        "Not everything that is faced can be changed, but nothing can be changed until it is faced.",
+    ),
     ("Hemingway", "writing", "Write hard and clear about what hurts."),
-    ("Kurt Vonnegut", "writing", "We have to continually be jumping off cliffs and developing our wings on the way down."),
+    (
+        "Kurt Vonnegut",
+        "writing",
+        "We have to continually be jumping off cliffs and developing our wings on the way down.",
+    ),
     ("Dorothy Parker", "humor", "I hate writing, I love having written."),
     ("John Lennon", "life", "Life is what happens to you while you're busy making other plans."),
     ("Bob Dylan", "change", "The times they are a-changin'."),
@@ -712,7 +876,11 @@ _QUOTES = [
     ("MLK", "justice", "The arc of the moral universe is long, but it bends toward justice."),
     ("Malala Yousafzai", "courage", "One child, one teacher, one book, one pen can change the world."),
     ("Barack Obama", "hope", "Change will not come if we wait for some other person or some other time."),
-    ("Anne Frank", "hope", "How wonderful it is that nobody need wait a single moment before starting to improve the world."),
+    (
+        "Anne Frank",
+        "hope",
+        "How wonderful it is that nobody need wait a single moment before starting to improve the world.",
+    ),
     ("Gandhi", "change", "Be the change that you wish to see in the world."),
     ("Simone de Beauvoir", "feminism", "One is not born, but rather becomes, a woman."),
     ("Audre Lorde", "justice", "Your silence will not protect you."),
@@ -720,13 +888,13 @@ _QUOTES = [
 ]
 
 
-def http_request(url: str, method: str = "GET", headers: dict | None = None,
-                  body: str = "", timeout: int = 15) -> dict:
+def http_request(url: str, method: str = "GET", headers: dict | None = None, body: str = "", timeout: int = 15) -> dict:
     """Issue a one-shot HTTP request and return status, headers, body,
     and timing. Good for quick API debugging."""
     import urllib.request as _urlreq
     import urllib.error as _urlerr
     import time as _t
+
     if not url or not url.startswith(("http://", "https://")):
         return {"skill": "http_request", "error": "http(s) url required"}
     method = (method or "GET").upper()
@@ -735,6 +903,7 @@ def http_request(url: str, method: str = "GET", headers: dict | None = None,
     if body:
         if isinstance(body, (dict, list)):
             import json as _json
+
             data = _json.dumps(body).encode("utf-8")
             req_headers.setdefault("Content-Type", "application/json")
         else:
@@ -743,9 +912,11 @@ def http_request(url: str, method: str = "GET", headers: dict | None = None,
     t0 = _t.time()
     try:
         import ssl as _ssl
+
         ctx = _ssl.create_default_context()
         try:
             import certifi
+
             ctx.load_verify_locations(certifi.where())
         except ImportError:
             pass
@@ -779,24 +950,27 @@ def reading_briefing(limit: int = 10) -> dict:
     bms = listed.get("bookmarks", [])
     summary = []
     for bm in bms:
-        summary.append({
-            "title": bm.get("title") or bm.get("url"),
-            "url": bm.get("url"),
-            "tags": bm.get("tags", []),
-            "snippet": (bm.get("snippet") or "")[:200],
-        })
+        summary.append(
+            {
+                "title": bm.get("title") or bm.get("url"),
+                "url": bm.get("url"),
+                "tags": bm.get("tags", []),
+                "snippet": (bm.get("snippet") or "")[:200],
+            }
+        )
     return {
         "skill": "reading_briefing",
         "count": len(summary),
         "items": summary,
         "note": "Use this as a briefing scaffold — the model should weave "
-                "these links into a short 'what's in your reading list' summary.",
+        "these links into a short 'what's in your reading list' summary.",
     }
 
 
 def quote(topic: str = "", author: str = "") -> dict:
     """Random famous quote, optionally filtered by topic or author."""
     import random
+
     pool = list(_QUOTES)
     if topic:
         pool = [q for q in pool if topic.lower() in q[1].lower()]
@@ -853,7 +1027,10 @@ def import_shadertoy(id_or_url: str) -> dict:
     """Fetch a shader from shadertoy.com by ID or URL and return it
     wrapped in a self-contained WebGL2 HTML artifact that runs the
     mainImage() with iTime / iResolution / iMouse uniforms."""
-    import re as _re, urllib.request as _req, json as _json
+    import re as _re
+    import urllib.request as _req
+    import json as _json
+
     raw = (id_or_url or "").strip()
     if not raw:
         return {"skill": "import_shadertoy", "error": "id or URL required"}
@@ -874,7 +1051,7 @@ def import_shadertoy(id_or_url: str) -> dict:
             break
     if not code.strip():
         return {"skill": "import_shadertoy", "error": "no image-pass code found"}
-    title  = info.get("name", "") or sid
+    title = info.get("name", "") or sid
     author = info.get("username", "")
     esc = code.replace("\\", "\\\\").replace("`", "\\`")
     html = (
@@ -921,10 +1098,10 @@ def import_shadertoy(id_or_url: str) -> dict:
         "</script></body></html>"
     )
     return {
-        "skill":   "import_shadertoy",
-        "id":      info.get("id") or sid,
-        "title":   title,
-        "author":  author,
+        "skill": "import_shadertoy",
+        "id": info.get("id") or sid,
+        "title": title,
+        "author": author,
         "artifact_html": html,
     }
 
@@ -938,9 +1115,11 @@ def import_shadertoy(id_or_url: str) -> dict:
 # Responses are newline-delimited JSON. We wrap each primitive in a
 # short-timeout socket roundtrip so the skill can't hang the agent.
 
+
 def _blender_send(payload: dict, host: str = "localhost", port: int = 9876, timeout: float = 15.0) -> dict:
     import json as _json
     import socket as _socket
+
     try:
         with _socket.create_connection((host, port), timeout=timeout) as s:
             s.settimeout(timeout)
@@ -963,12 +1142,15 @@ def _blender_send(payload: dict, host: str = "localhost", port: int = 9876, time
                     continue
         return _json.loads(b"".join(chunks).decode()) if chunks else {}
     except (ConnectionRefusedError, OSError) as e:
-        return {"_error": str(e), "_hint": (
-            "Blender isn't reachable on localhost:9876. Install the Mio / "
-            "blender-mcp addon (https://github.com/ahujasid/blender-mcp) "
-            "inside Blender, enable it, and click 'Start MCP server' in "
-            "the sidebar."
-        )}
+        return {
+            "_error": str(e),
+            "_hint": (
+                "Blender isn't reachable on localhost:9876. Install the Mio / "
+                "blender-mcp addon (https://github.com/ahujasid/blender-mcp) "
+                "inside Blender, enable it, and click 'Start MCP server' in "
+                "the sidebar."
+            ),
+        }
 
 
 def blender_status() -> dict:
@@ -1004,10 +1186,10 @@ def blender_exec(code: str) -> dict:
         return {"skill": "blender_exec", "ok": False, "error": r["_error"], "hint": r.get("_hint")}
     result = r.get("result") or r
     return {
-        "skill":  "blender_exec",
-        "ok":     not bool(result.get("error")),
+        "skill": "blender_exec",
+        "ok": not bool(result.get("error")),
         "stdout": result.get("stdout") or result.get("output") or "",
-        "error":  result.get("error"),
+        "error": result.get("error"),
         "snippet": code[:200],
     }
 
@@ -1030,9 +1212,10 @@ def blender_snapshot() -> dict:
     stdout = (r.get("stdout") or "").strip()
     path = stdout.splitlines()[-1] if stdout else ""
     from urllib.parse import quote as _q
+
     return {
-        "skill":    "blender_snapshot",
-        "ok":       True,
-        "path":     path,
-        "url":      f"/ui/files/{_q(path.rsplit('/', 1)[-1])}" if path else "",
+        "skill": "blender_snapshot",
+        "ok": True,
+        "path": path,
+        "url": f"/ui/files/{_q(path.rsplit('/', 1)[-1])}" if path else "",
     }

@@ -7,6 +7,8 @@ Uses the vendored mio.dflash runtime (the fast DFlash path that benchmarks
 from __future__ import annotations
 
 import json
+import threading
+import time
 from collections.abc import Generator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,6 +31,9 @@ class GenerationMetrics:
     total_time_s: float = 0.0
     cycles: int = 0
     fallback_ar: bool = False
+    fallback_reason: str | None = None
+    metrics_scope: str = "request"  # request, or batch for MLX aggregate timings
+    batch_size: int = 1
     warm_offset: int = 0        # tokens skipped via prefix cache (0 = cold/miss)
     cache_entries: int = 0      # prefix-cache size at the time of this call
 
@@ -285,6 +290,16 @@ class MioEngine:
         for cached_tokens_tuple, entry in self._prefix_cache.items():
             cached_tokens = list(cached_tokens_tuple)
             match = self._longest_common_prefix(cached_tokens, prompt_tokens)
+            # Runtime warm-start must always leave at least one uncached prompt
+            # token so it can produce the first next-token logit.
+            if match >= len(prompt_tokens):
+                continue
+            # Qwen hybrid targets combine attention KV caches with recurrent
+            # GDN state.  The latter is not rewindable, so a divergent cached
+            # tail may only be reused when *every* target cache can trim it.
+            needs_rewind = match < len(cached_tokens)
+            if needs_rewind and not self._warm_state_can_rewind(entry):
+                continue
             if match > best_match and match >= self._prefix_cache_min_tokens:
                 best_key = cached_tokens_tuple
                 best_entry = entry
@@ -301,6 +316,18 @@ class MioEngine:
         # writing at position best_match.
         self._truncate_warm_state(entry, best_match)
         return entry
+
+    @staticmethod
+    def _warm_state_can_rewind(entry: dict) -> bool:
+        target_cache = entry.get("target_cache")
+        if not target_cache:
+            return True
+        try:
+            from mlx_lm.models import cache as cache_mod
+
+            return bool(cache_mod.can_trim_prompt_cache(target_cache))
+        except (AttributeError, TypeError):
+            return False
 
     @staticmethod
     def _truncate_warm_state(entry: dict, length: int) -> None:
@@ -512,6 +539,66 @@ class MioEngine:
             eos_ids.append(int(eos_id))
         return eos_ids
 
+    def _resolve_sampling(
+        self,
+        temperature: float | None,
+        top_p: float | None,
+        top_k: int | None,
+        seed: int | None,
+    ) -> tuple[float, float, int, int | None]:
+        """Resolve and validate the sampling contract shared by every backend."""
+
+        # ``None`` is Mio's fast/speculative default.  A positive value is an
+        # explicit request for stochastic target-only sampling; it must never
+        # silently disable DFlash merely because an older persisted tier used
+        # the historical 0.6 recommendation.
+        resolved_temperature = 0.0 if temperature is None else float(temperature)
+        resolved_top_p = float(self.tier_config.top_p) if top_p is None else float(top_p)
+        resolved_top_k = int(self.tier_config.top_k) if top_k is None else int(top_k)
+        resolved_seed = None if seed is None else int(seed)
+        if not 0.0 <= resolved_temperature <= 2.0:
+            raise ValueError("temperature must be between 0 and 2")
+        if not 0.0 < resolved_top_p <= 1.0:
+            raise ValueError("top_p must be greater than 0 and at most 1")
+        if resolved_top_k < 0:
+            raise ValueError("top_k must be non-negative")
+        if resolved_seed is not None and not 0 <= resolved_seed <= (2**63 - 1):
+            raise ValueError("seed must be between 0 and 2^63-1")
+        return resolved_temperature, resolved_top_p, resolved_top_k, resolved_seed
+
+    @staticmethod
+    def _make_sampler(
+        temperature: float,
+        top_p: float,
+        top_k: int,
+        seed: int | None,
+    ):
+        """Build the canonical MLX-LM sampler and initialize its RNG stream."""
+
+        import mlx.core as mx
+        from mlx_lm.sample_utils import make_sampler
+
+        if seed is not None:
+            mx.random.seed(seed)
+        return make_sampler(temp=temperature, top_p=top_p, top_k=top_k)
+
+    @staticmethod
+    def _truncate_at_stop(text: str, stop: list[str] | None) -> tuple[str, bool]:
+        matches = [text.find(value) for value in (stop or []) if value and value in text]
+        if not matches:
+            return text, False
+        return text[: min(matches)], True
+
+    def _adjust_completion_metrics(self, metrics: GenerationMetrics, text: str) -> None:
+        """Keep usage coherent when textual stop/tool trimming shortens output."""
+
+        try:
+            count = len(self._tokenizer.encode(text, add_special_tokens=False))
+        except TypeError:
+            count = len(self._tokenizer.encode(text))
+        metrics.completion_tokens = count
+        metrics.total_tokens = metrics.prompt_tokens + count
+
     def _metrics_from_result(self, result: dict[str, Any]) -> GenerationMetrics:
         gen_ids = result.get("generated_token_ids", [])
         elapsed_us = result.get("elapsed_us", 0)
@@ -540,6 +627,7 @@ class MioEngine:
             total_time_s=elapsed_us / 1e6,
             cycles=result.get("cycles_completed", 0),
             fallback_ar=result.get("fallback_ar", False),
+            fallback_reason=result.get("fallback_reason"),
             warm_offset=int(result.get("warm_offset", 0) or 0),
             cache_entries=len(self._prefix_cache),
         )
@@ -551,21 +639,54 @@ class MioEngine:
         temperature: float | None = None,
         stop: list[str] | None = None,
         tools: list[dict] | None = None,
+        tool_required: bool = False,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        seed: int | None = None,
     ) -> tuple[str, GenerationMetrics]:
         if not self._loaded:
             raise RuntimeError("Engine not loaded.")
 
-        max_tokens = max_tokens or self.tier_config.max_output_tokens
+        configured_bmp_paths = int(getattr(self.tier_config, "bmp_paths", 1) or 1)
+        bmp_nonstream = self._draft_model is not None and configured_bmp_paths >= 2
+        if any(value for value in (stop or []) if value) and not bmp_nonstream:
+            chunks: list[str] = []
+            final_metrics: GenerationMetrics | None = None
+            for chunk, metrics in self.generate_stream(
+                messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                stop=stop,
+                tools=tools,
+                tool_required=tool_required,
+                top_p=top_p,
+                top_k=top_k,
+                seed=seed,
+            ):
+                if chunk:
+                    chunks.append(chunk)
+                if metrics is not None:
+                    final_metrics = metrics
+            if final_metrics is None:
+                raise RuntimeError("streaming stop path ended without generation metrics")
+            return "".join(chunks), final_metrics
+
+        max_tokens = self.tier_config.max_output_tokens if max_tokens is None else max_tokens
+        temperature, top_p, top_k, seed = self._resolve_sampling(
+            temperature, top_p, top_k, seed
+        )
+        sampling = temperature > 0.0
+        sampler = self._make_sampler(temperature, top_p, top_k, seed)
         prompt_tokens = self._apply_chat_template(messages, tools=tools)
         stop_ids = self._eos_token_ids()
         # Non-streaming path keeps simpler behaviour: suppress EOS entirely
         # when tools are present and trim at the last </tool_call>. Streaming
         # path (used by Kilo) gets the smarter per-step relaxation.
-        suppress_ids = list(stop_ids) if tools else None
+        suppress_ids = list(stop_ids) if tools and tool_required else None
 
         tq_bits = self._resolved_tq_bits()
         pq_bits = self._resolved_pq_bits()
-        bmp_paths = int(getattr(self.tier_config, "bmp_paths", 1) or 1)
+        bmp_paths = configured_bmp_paths
         ddtree_budget = self._resolved_ddtree_budget()
 
         if self._draft_model is not None and bmp_paths >= 2:
@@ -573,7 +694,29 @@ class MioEngine:
             if tq_bits is not None or pq_bits is not None:
                 bmp_paths = 1
 
-        if ddtree_budget > 0:
+        if sampling:
+            # The vendored DFlash and DDTree verifiers use greedy exact-match
+            # acceptance.  Applying a stochastic sampler only to their bonus
+            # token would bias the distribution, so stochastic requests take
+            # Mio's optimized target-only baseline instead.
+            from mio.dflash.runtime import generate_baseline_once
+
+            result = generate_baseline_once(
+                target_model=self._target_model,
+                tokenizer=self._tokenizer,
+                prompt="",
+                max_new_tokens=max_tokens,
+                stop_token_ids=stop_ids,
+                suppress_token_ids=suppress_ids,
+                prompt_tokens_override=prompt_tokens,
+                quantize_kv_cache=False,
+                tq_bits=tq_bits,
+                pq_bits=pq_bits,
+                sampler=sampler,
+            )
+            result["fallback_ar"] = True
+            result["fallback_reason"] = "stochastic_sampling_requires_target_only"
+        elif ddtree_budget > 0:
             # DDTree owns its own cache policy: PQ/TQ off, 8-bit KV on for some
             # compression, sequential-forward commit for quantized compatibility.
             self._prepare_ddtree_env()
@@ -646,11 +789,16 @@ class MioEngine:
             self._pending_assistant_prefill = ""
         # With EOS suppressed we may overshoot past </tool_call>. Trim to the
         # end of the last complete tool call block.
+        trimmed = False
         if tools:
             end = text.rfind("</tool_call>")
             if end >= 0:
                 text = text[: end + len("</tool_call>")]
+                trimmed = True
+        text, stopped = self._truncate_at_stop(text, stop)
         metrics = self._metrics_from_result(result)
+        if trimmed or stopped:
+            self._adjust_completion_metrics(metrics, text)
         self._last_metrics = metrics
         return text, metrics
 
@@ -660,6 +808,10 @@ class MioEngine:
         *,
         max_tokens: int | list[int] | None = None,
         temperature: float | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        seed: int | None = None,
+        stop: list[list[str] | None] | None = None,
         prefill_batch_size: int = 8,
         completion_batch_size: int = 32,
         prefill_step_size: int = 2048,
@@ -673,7 +825,8 @@ class MioEngine:
         the ordinary ``generate`` method latency-oriented.
 
         Sampling is intentionally uniform within one call; ``mio.batch``
-        groups requests by temperature before invoking this method.
+        groups requests by the complete sampler configuration before invoking
+        this method. Textual stop strings are applied independently per output.
         """
 
         if not self._loaded:
@@ -682,36 +835,64 @@ class MioEngine:
             return []
         if len(messages_batch) == 1:
             one_max = max_tokens[0] if isinstance(max_tokens, list) else max_tokens
+            one_stop = stop[0] if stop else None
             return [
                 self.generate(
                     messages_batch[0],
                     max_tokens=one_max,
                     temperature=temperature,
+                    top_p=top_p,
+                    top_k=top_k,
+                    seed=seed,
+                    stop=one_stop,
                 )
             ]
 
-        import mlx_lm
-        from mlx_lm.sample_utils import make_sampler
-
-        prompts = [self._apply_chat_template(messages) for messages in messages_batch]
+        if stop is None:
+            stops: list[list[str] | None] = [None] * len(messages_batch)
+        elif len(stop) != len(messages_batch):
+            raise ValueError("stop list must match the number of prompts")
+        else:
+            stops = stop
         if max_tokens is None:
             resolved_max: int | list[int] = self.tier_config.max_output_tokens
         elif isinstance(max_tokens, list):
-            if len(max_tokens) != len(prompts):
+            if len(max_tokens) != len(messages_batch):
                 raise ValueError("max_tokens list must match the number of prompts")
-            resolved_max = [
-                max(1, min(int(value or self.tier_config.max_output_tokens), 32768))
-                for value in max_tokens
-            ]
+            if any(int(value) < 1 for value in max_tokens):
+                raise ValueError("every max_tokens value must be positive")
+            resolved_max = [min(int(value), 32768) for value in max_tokens]
         else:
             resolved_max = max(1, min(int(max_tokens), 32768))
 
-        temp = self.tier_config.temperature if temperature is None else float(temperature)
-        sampler = make_sampler(
-            temp=max(0.0, temp),
-            top_p=float(self.tier_config.top_p),
-            top_k=int(self.tier_config.top_k),
+        temperature, top_p, top_k, seed = self._resolve_sampling(
+            temperature, top_p, top_k, seed
         )
+        if seed is not None and temperature > 0.0:
+            # MLX continuous batching owns one RNG stream for the whole active
+            # batch, so a seeded request would otherwise change output when a
+            # neighbour is inserted or reordered.  Preserve the public seed
+            # contract by resetting the same seed for each independent request.
+            return [
+                self.generate(
+                    messages,
+                    max_tokens=(
+                        resolved_max[index]
+                        if isinstance(resolved_max, list)
+                        else resolved_max
+                    ),
+                    temperature=temperature,
+                    top_p=top_p,
+                    top_k=top_k,
+                    seed=seed,
+                    stop=stops[index],
+                )
+                for index, messages in enumerate(messages_batch)
+            ]
+        import mlx_lm
+
+        prompts = [self._apply_chat_template(messages) for messages in messages_batch]
+        sampler = self._make_sampler(temperature, top_p, top_k, seed)
         response = mlx_lm.batch_generate(
             self._target_model,
             self._tokenizer,
@@ -724,7 +905,8 @@ class MioEngine:
         )
         stats = response.stats
         results: list[tuple[str, GenerationMetrics]] = []
-        for prompt, text in zip(prompts, response.texts, strict=True):
+        for prompt, text, request_stop in zip(prompts, response.texts, stops, strict=True):
+            text, _ = self._truncate_at_stop(text, request_stop)
             completion_tokens = len(self._tokenizer.encode(text, add_special_tokens=False))
             metrics = GenerationMetrics(
                 prompt_tokens=len(prompt),
@@ -739,6 +921,9 @@ class MioEngine:
                 peak_memory_gb=float(stats.peak_memory),
                 total_time_s=float(stats.prompt_time) + float(stats.generation_time),
                 fallback_ar=True,
+                fallback_reason="continuous_batch_uses_target_only",
+                metrics_scope="batch",
+                batch_size=len(messages_batch),
             )
             results.append((text, metrics))
         self._last_metrics = results[-1][1]
@@ -754,11 +939,113 @@ class MioEngine:
         temperature: float | None = None,
         stop: list[str] | None = None,
         tools: list[dict] | None = None,
+        tool_required: bool = False,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        seed: int | None = None,
+    ) -> Generator[tuple[str, GenerationMetrics | None], None, None]:
+        """Stream generation while withholding partial textual stop matches."""
+
+        stops = [value for value in (stop or []) if value]
+        stop_signal = threading.Event()
+        raw = self._generate_stream_raw(
+            messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            tools=tools,
+            tool_required=tool_required,
+            top_p=top_p,
+            top_k=top_k,
+            seed=seed,
+            stop_signal=stop_signal,
+            decode_chunk_tokens=1 if stops else 8,
+        )
+        if not stops:
+            yield from raw
+            return
+
+        buffer = ""
+        emitted: list[str] = []
+        stopped = False
+        try:
+            for chunk, metrics in raw:
+                if metrics is not None:
+                    if buffer and not stopped:
+                        emitted.append(buffer)
+                        yield buffer, None
+                        buffer = ""
+                    self._adjust_completion_metrics(metrics, "".join(emitted))
+                    self._last_metrics = metrics
+                    yield "", metrics
+                    continue
+                if not chunk or stopped:
+                    continue
+
+                buffer += chunk
+                match_positions = [buffer.find(value) for value in stops if value in buffer]
+                if match_positions:
+                    before = buffer[: min(match_positions)]
+                    if before:
+                        emitted.append(before)
+                        yield before, None
+                    buffer = ""
+                    stopped = True
+                    stop_signal.set()
+                    continue
+
+                # Keep only a suffix that could still grow into a stop string.
+                # Everything before it is safe to expose to the client.
+                hold = 0
+                for value in stops:
+                    limit = min(len(value) - 1, len(buffer))
+                    for size in range(limit, 0, -1):
+                        if buffer.endswith(value[:size]):
+                            hold = max(hold, size)
+                            break
+                safe = buffer[:-hold] if hold else buffer
+                buffer = buffer[-hold:] if hold else ""
+                if safe:
+                    emitted.append(safe)
+                    yield safe, None
+        finally:
+            close = getattr(raw, "close", None)
+            if callable(close):
+                close()
+
+    def _new_streaming_detokenizer(self):
+        """Create request-local, UTF-8-safe incremental tokenizer state."""
+
+        try:
+            detokenizer = self._tokenizer.detokenizer
+        except (AttributeError, TypeError):
+            from mlx_lm.tokenizer_utils import NaiveStreamingDetokenizer
+
+            detokenizer = NaiveStreamingDetokenizer(self._tokenizer)
+        detokenizer.reset()
+        return detokenizer
+
+    def _generate_stream_raw(
+        self,
+        messages: list[dict],
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        tools: list[dict] | None = None,
+        tool_required: bool = False,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        seed: int | None = None,
+        stop_signal: threading.Event | None = None,
+        decode_chunk_tokens: int = 8,
     ) -> Generator[tuple[str, GenerationMetrics | None], None, None]:
         if not self._loaded:
             raise RuntimeError("Engine not loaded.")
 
-        max_tokens = max_tokens or self.tier_config.max_output_tokens
+        max_tokens = self.tier_config.max_output_tokens if max_tokens is None else max_tokens
+        temperature, top_p, top_k, seed = self._resolve_sampling(
+            temperature, top_p, top_k, seed
+        )
+        sampling = temperature > 0.0
+        sampler = self._make_sampler(temperature, top_p, top_k, seed)
         prompt_tokens = self._apply_chat_template(messages, tools=tools)
         stop_ids = self._eos_token_ids()
         # Tool-calling path: suppress EOS for the first N tokens so the model
@@ -766,9 +1053,9 @@ class MioEngine:
         # re-enable EOS so natural end-of-turn after a tool call terminates
         # cleanly and the draft model's EOS predictions are accepted (keeps
         # DFlash acceptance healthy).
-        suppress_ids = list(stop_ids) if tools else None
-        relax_after = 40 if tools else 0
-        relax_ids = list(stop_ids) if tools else None
+        suppress_ids = list(stop_ids) if tools and tool_required else None
+        relax_after = 40 if tools and tool_required else 0
+        relax_ids = list(stop_ids) if tools and tool_required else None
 
         tq_bits = self._resolved_tq_bits()
         pq_bits = self._resolved_pq_bits()
@@ -778,10 +1065,27 @@ class MioEngine:
         # is driving: tree_aware verify mutates caches beyond what a dict
         # snapshot models.
         warm_state = None
-        if ddtree_budget == 0 and self._prefix_cache_enabled():
+        if not sampling and ddtree_budget == 0 and self._prefix_cache_enabled():
             warm_state = self._prefix_cache_lookup(prompt_tokens)
 
-        if ddtree_budget > 0:
+        if sampling:
+            from mio.dflash.runtime import stream_baseline_generate
+
+            stream = stream_baseline_generate(
+                target_model=self._target_model,
+                tokenizer=self._tokenizer,
+                prompt="",
+                max_new_tokens=max_tokens,
+                stop_token_ids=stop_ids,
+                suppress_token_ids=suppress_ids,
+                prompt_tokens_override=prompt_tokens,
+                quantize_kv_cache=False,
+                tq_bits=tq_bits,
+                pq_bits=pq_bits,
+                sampler=sampler,
+                fallback_reason="stochastic_sampling_requires_target_only",
+            )
+        elif ddtree_budget > 0:
             self._prepare_ddtree_env()
             from mio.ddtree.runtime import stream_ddtree_generate
             stream = stream_ddtree_generate(
@@ -829,40 +1133,109 @@ class MioEngine:
             )
 
         decode_pending: list[int] = []
+        decode_chunk_tokens = max(1, int(decode_chunk_tokens))
+        detokenizer = self._new_streaming_detokenizer()
+        special_ids = {
+            int(token_id)
+            for token_id in (getattr(self._tokenizer, "all_special_ids", None) or [])
+        }
+
+        def flush_decode(*, final: bool = False) -> str:
+            for token_id in decode_pending:
+                if int(token_id) not in special_ids:
+                    detokenizer.add_token(int(token_id))
+            decode_pending.clear()
+            if final:
+                detokenizer.finalize()
+            return str(detokenizer.last_segment)
+
         prefill_us = 0
         prefill_emitted = False
+        generation_tokens = 0
+        acceptance_ratio = 0.0
+        cycles_completed = 0
+        warm_offset = 0
+        summary_emitted = False
+        started = time.perf_counter()
 
-        for event in stream:
-            ev_type = event.get("event")
+        try:
+            for event in stream:
+                ev_type = event.get("event")
 
-            if ev_type == "prefill":
-                prefill_us = event.get("prefill_us", 0)
-                if self._pending_assistant_prefill and not prefill_emitted:
-                    yield self._pending_assistant_prefill, None
-                    prefill_emitted = True
+                if ev_type == "prefill":
+                    prefill_us = event.get("prefill_us", 0)
+                    warm_offset = int(event.get("warm_offset", 0) or 0)
+                    if self._pending_assistant_prefill and not prefill_emitted:
+                        yield self._pending_assistant_prefill, None
+                        prefill_emitted = True
+                        if stop_signal is not None and stop_signal.is_set():
+                            break
 
-            elif ev_type == "token":
-                decode_pending.append(event["token_id"])
-                if len(decode_pending) >= 8:
-                    chunk = self._tokenizer.decode(decode_pending, skip_special_tokens=True)
-                    decode_pending.clear()
+                elif ev_type == "token":
+                    generation_tokens = int(
+                        event.get("generated_tokens", generation_tokens + 1)
+                    )
+                    acceptance_ratio = float(
+                        event.get("acceptance_ratio", acceptance_ratio) or 0.0
+                    )
+                    cycles_completed = int(
+                        event.get("cycles_completed", cycles_completed) or 0
+                    )
+                    decode_pending.append(event["token_id"])
+                    if len(decode_pending) >= decode_chunk_tokens:
+                        chunk = flush_decode()
+                        if chunk:
+                            yield chunk, None
+                            if stop_signal is not None and stop_signal.is_set():
+                                break
+
+                elif ev_type == "summary":
+                    generation_tokens = int(
+                        event.get("generation_tokens", generation_tokens) or generation_tokens
+                    )
+                    acceptance_ratio = float(
+                        event.get("acceptance_ratio", acceptance_ratio) or 0.0
+                    )
+                    cycles_completed = int(
+                        event.get("cycles_completed", cycles_completed) or 0
+                    )
+                    chunk = flush_decode(final=True)
                     if chunk:
                         yield chunk, None
+                    # Belt-and-braces: emit prefill if no prefill event fired.
+                    if self._pending_assistant_prefill and not prefill_emitted:
+                        yield self._pending_assistant_prefill, None
+                        prefill_emitted = True
+                    self._pending_assistant_prefill = ""
+                    event.setdefault("prefill_us", prefill_us)
+                    metrics = self._metrics_from_result(event)
+                    self._last_metrics = metrics
+                    if not sampling and self._prefix_cache_enabled():
+                        self._prefix_cache_store(prompt_tokens, event)
+                    summary_emitted = True
+                    yield "", metrics
+        finally:
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
 
-            elif ev_type == "summary":
-                if decode_pending:
-                    chunk = self._tokenizer.decode(decode_pending, skip_special_tokens=True)
-                    decode_pending.clear()
-                    if chunk:
-                        yield chunk, None
-                # Belt-and-braces: emit prefill if no prefill event fired.
-                if self._pending_assistant_prefill and not prefill_emitted:
-                    yield self._pending_assistant_prefill, None
-                    prefill_emitted = True
-                self._pending_assistant_prefill = ""
-                event.setdefault("prefill_us", prefill_us)
-                metrics = self._metrics_from_result(event)
-                self._last_metrics = metrics
-                if self._prefix_cache_enabled():
-                    self._prefix_cache_store(prompt_tokens, event)
-                yield "", metrics
+        if stop_signal is not None and stop_signal.is_set() and not summary_emitted:
+            self._pending_assistant_prefill = ""
+            elapsed_us = (time.perf_counter() - started) * 1e6
+            stopped_result = {
+                "prompt_token_count": len(prompt_tokens),
+                "generation_tokens": generation_tokens,
+                "prefill_us": prefill_us,
+                "elapsed_us": elapsed_us,
+                "acceptance_ratio": acceptance_ratio,
+                "cycles_completed": cycles_completed,
+                "warm_offset": warm_offset,
+                "fallback_ar": sampling,
+                "fallback_reason": (
+                    "stochastic_sampling_requires_target_only" if sampling else None
+                ),
+                "stopped_early": True,
+            }
+            metrics = self._metrics_from_result(stopped_result)
+            self._last_metrics = metrics
+            yield "", metrics

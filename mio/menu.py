@@ -8,7 +8,7 @@ from rich.prompt import Prompt
 from rich.table import Table
 
 from mio.config import MioConfig
-from mio.models.registry import DEFAULT_TIERS, KNOWN_MODELS, SUPPORTED_ADAPTERS
+from mio.models.registry import KNOWN_MODELS, SUPPORTED_ADAPTERS
 
 console = Console()
 

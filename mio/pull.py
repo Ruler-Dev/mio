@@ -31,8 +31,8 @@ def list_available() -> None:
     console.print("[bold]All model keys:[/bold]\n")
     for key, entry in KNOWN_MODELS.items():
         console.print(f"  [dim]{key:32s}[/dim] {entry.description}")
-    console.print(f"\nUsage: [bold]mio pull <tier|model-key>[/bold]")
-    console.print(f"Example: [bold]mio pull large-moe[/bold]")
+    console.print("\nUsage: [bold]mio pull <tier|model-key>[/bold]")
+    console.print("Example: [bold]mio pull large-moe[/bold]")
 
 
 def pull_model(key: str) -> bool:
@@ -76,7 +76,7 @@ def pull_model(key: str) -> bool:
 
     if success:
         console.print(f"\n[green bold]Pull complete: {key}[/green bold]")
-        console.print(f"Run [bold]mio[/bold] to launch the agent, or [bold]mio serve[/bold] for the API.")
+        console.print("Run [bold]mio[/bold] to launch the agent, or [bold]mio serve[/bold] for the API.")
     return success
 
 

@@ -38,8 +38,7 @@
     if (window.toast) window.toast('Compressing older messages…');
 
     // Fire a one-shot WS call that bypasses the main chat flow
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(proto + '//' + location.host + '/ui/ws/chat');
+    const ws = window.Mio.security.openWebSocket('/ui/ws/chat');
     let buf = '';
     ws.onopen = () => {
       ws.send(JSON.stringify({

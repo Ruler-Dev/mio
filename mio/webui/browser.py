@@ -79,17 +79,12 @@ def search_web(query: str, max_results: int = 5) -> list[SearchResult]:
 
 
 def fetch_page(url: str) -> str:
-    """Fetch a page's text content via agent-browser or urllib."""
-    if is_available():
-        _run(["open", url])
-        _run(["wait", "--load", "networkidle"])
-        resp = _run(["get", "text", "body"])
-        _run(["close"])
-        if resp.get("success"):
-            text = resp.get("data", {}).get("text", "")
-            if text.strip():
-                return text
+    """Fetch public HTTP(S) text through Mio's DNS-pinned transport.
 
+    A general browser process re-resolves hostnames and can therefore be used
+    for DNS rebinding into loopback/private services. Search may still use the
+    browser on a fixed DuckDuckGo origin; arbitrary result URLs do not.
+    """
     text = _fetch_fallback(url)
     if text.strip():
         return text
@@ -107,7 +102,11 @@ def _reddit_resolve_case(url: str) -> str | None:
     """If `url` targets a reddit subreddit with wrong casing, return the
     canonical URL. Otherwise return None.
     """
-    import re, json as _json, ssl, urllib.parse, urllib.request
+    import json as _json
+    import re
+    import ssl
+    import urllib.parse
+    import urllib.request
 
     m = re.match(r"^(https?://(?:www\.|old\.)?reddit\.com)/r/([^/?#]+)(/.*)?$", url)
     if not m:
@@ -210,36 +209,14 @@ def _search_fallback(query: str, max_results: int) -> list[SearchResult]:
 def _fetch_fallback(url: str) -> str:
     """Fetch page content with urllib.
 
-    Uses a realistic Chrome User-Agent plus Accept/Accept-Language headers so
-    sites that sniff minimal UAs (Forbes, TechCrunch, Yahoo Finance, etc.) are
-    less likely to return an anti-bot wall. Follows redirects and extracts
-    text from <article>/<main> when present for better signal-to-noise.
+    Uses the shared public-IP-only, DNS-pinned transport, follows validated
+    redirects, caps the response, and extracts text from ``article``/``main``
+    when present for better signal-to-noise.
     """
-    import ssl
-    import urllib.request
+    from mio.webui.flow_runner import _fetch_pinned_http
 
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/131.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "identity",
-        "Cache-Control": "no-cache",
-    }
-    req = urllib.request.Request(url, headers=headers)
-    ctx = ssl.create_default_context()
     try:
-        import certifi
-        ctx.load_verify_locations(certifi.where())
-    except ImportError:
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-    try:
-        with urllib.request.urlopen(req, timeout=20, context=ctx) as response:
-            html = response.read().decode("utf-8", errors="replace")
+        html = _fetch_pinned_http(url, "GET", None).decode("utf-8", errors="replace")
         import re
         # Drop noise
         html = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL)

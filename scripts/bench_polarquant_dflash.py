@@ -146,7 +146,7 @@ def main() -> int:
     # Ratios against baseline dflash
     base = next((r for r in rows if r["mode"] == "baseline"), None)
     if base:
-        print(f"\nSpeedup vs plain dflash (gen_tps):")
+        print("\nSpeedup vs plain dflash (gen_tps):")
         for r in rows:
             if r["mode"] != "baseline":
                 ratio = r["generation_tps"] / max(base["generation_tps"], 1e-9)

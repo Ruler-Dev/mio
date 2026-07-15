@@ -9,10 +9,8 @@ alone misses them. We also explicitly rebind known call-site modules
 (e.g. `mio.dflash.runtime`).
 """
 
-import importlib
 import sys
 
-import mlx.core as mx
 import mlx_lm.models.base as _base
 
 from mio.turboquant.attention_fused import turboquant_fused_sdpa

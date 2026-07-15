@@ -11,7 +11,6 @@ import math
 
 import mlx.core as mx
 
-from mio.turboquant.kernels import unpack_2bit_indices
 from mio.turboquant.qjl import unpack_sign_bits
 
 

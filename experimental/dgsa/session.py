@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Optional
 
 import mlx.core as mx
 from mlx_lm.models.cache import ArraysCache, KVCache
@@ -48,7 +47,7 @@ def _make_target_cache(model) -> list:
         or getattr(model, "model", None)
         or model
     )
-    return [ArraysCache(size=2) if l.is_linear else KVCache() for l in inner.layers]
+    return [ArraysCache(size=2) if layer.is_linear else KVCache() for layer in inner.layers]
 
 
 def _select(strategy: str, model, ids_arr: mx.array, prompt_len: int, **kwargs) -> mx.array:

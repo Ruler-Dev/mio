@@ -14,41 +14,271 @@ Serves the single-page UI and provides:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import io
 import json
+import math
+import mimetypes
+import os
 import re
+import stat
+import subprocess
+import sys
 import threading
 import time
+import unicodedata
 import uuid
+import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
+
+from mio.paths import mio_home
+from mio.persistence import atomic_write_bytes, atomic_write_json
+from mio.prompt_policy import PromptMode, PromptPolicy, apply_prompt_policy
+from mio.webui.image_proxy import ImageFetchError, fetch_image
+from mio.webui.safe_files import (
+    UnsafePathError,
+    confined_markdown_tree,
+    confined_path,
+    iter_confined_regular_files,
+    mio_state_directory,
+    mio_state_root,
+    open_binary_no_follow,
+    read_text_no_follow,
+    validate_directory,
+    write_confined_bytes,
+    write_confined_text,
+)
 
 router = APIRouter(prefix="/ui")
 
 # --- Globals set by mount_webui() ---
 _manager = None
 _caveman_level = "full"
+_prompt_policy = PromptPolicy()
 _gpu_lock = threading.Lock()
 _sessions_dir: Path | None = None
 _system_prompt: str | None = None
-_temperature: float = 0.6  # Qwen3.5/3.6 recommended for coding
+_temperature: float = 0.0  # exact greedy DFlash default; positive values are explicit sampling
 _max_tokens: int = 16384
 
+_WS_STREAM_QUEUE_MAXSIZE = 16
+_WS_STREAM_JOIN_TIMEOUT_SECONDS = 1.0
 
-def mount_webui(manager, *, caveman_level: str = "full", gpu_lock=None, sessions_dir: Path | None = None):
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+_UPLOAD_CHUNK_BYTES = 1024 * 1024
+_MAX_SHARED_ARTIFACT_BYTES = 5 * 1024 * 1024
+_MAX_SHARED_ARTIFACTS = 128
+_MAX_LOCAL_NOTE_BYTES = 2 * 1024 * 1024
+_MAX_PROJECT_FILE_BYTES = 25 * 1024 * 1024
+_FILE_STREAM_CHUNK_BYTES = 1024 * 1024
+_MAX_WEBUI_COMPLETION_TOKENS = 32_768
+
+
+def _validate_identifier(value: Any, *, label: str = "identifier") -> str:
+    """Return a storage-safe identifier or reject it.
+
+    Session and flow IDs become filenames.  Replacing suspicious characters is
+    unsafe here because two attacker-controlled values can collapse to the same
+    path; strict validation keeps the mapping one-to-one.
+    """
+    if not isinstance(value, str) or not _IDENTIFIER_RE.fullmatch(value):
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid {label}: use 1-64 ASCII letters, digits, '-' or '_'",
+        )
+    return value
+
+
+def _json_storage_path(root: Path | None, identifier: Any, *, label: str) -> Path:
+    if root is None:
+        raise HTTPException(status_code=503, detail=f"{label} storage is not initialized")
+    safe = _validate_identifier(identifier, label=f"{label} id")
+    try:
+        root_path = validate_directory(root)
+        return confined_path(
+            root_path,
+            f"{safe}.json",
+            allow_nested=False,
+        )
+    except UnsafePathError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid {label} path") from exc
+
+
+def _regular_files_confined(
+    root: Path | None,
+    pattern: str = "*.json",
+    *,
+    recursive: bool = False,
+    max_files: int = 10_000,
+) -> list[Path]:
+    """Enumerate regular files without following symlinks at any path level."""
+    if root is None:
+        return []
+    lexical_root = Path(root).expanduser()
+    if lexical_root.is_symlink() or not lexical_root.is_dir():
+        return []
+    resolved_root = lexical_root.resolve()
+    iterator = lexical_root.rglob(pattern) if recursive else lexical_root.glob(pattern)
+    files: list[Path] = []
+    scanned = 0
+    for candidate in iterator:
+        scanned += 1
+        if scanned > max(0, int(max_files)):
+            break
+        try:
+            relative = candidate.relative_to(lexical_root)
+            cursor = lexical_root
+            linked = False
+            for part in relative.parts:
+                cursor = cursor / part
+                if cursor.is_symlink():
+                    linked = True
+                    break
+            if linked or not stat.S_ISREG(candidate.lstat().st_mode):
+                continue
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(resolved_root)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        files.append(resolved)
+    return files
+
+
+def _safe_upload_name(filename: str | None) -> str:
+    """Normalize an untrusted browser filename without creating hidden files."""
+    raw = unicodedata.normalize("NFKC", filename or "upload")
+    # Treat Windows separators as path separators even on macOS/Linux.
+    raw = raw.replace("\\", "/").rsplit("/", 1)[-1]
+    raw = re.sub(r"[\x00-\x1f\x7f<>:\"|?*]", "_", raw)
+    raw = re.sub(r"\s+", " ", raw).strip(" .")
+    if not raw:
+        raw = "upload"
+    if raw.startswith("."):
+        raw = "upload-" + raw.lstrip(".")
+    # Stay below common 255-byte filesystem limits, preserving the extension.
+    raw = raw[:512]
+    suffix = Path(raw).suffix[:24]
+    stem = raw[: -len(suffix)] if suffix else raw
+    while len((stem + suffix).encode("utf-8")) > 180 and stem:
+        stem = stem[:-1]
+    return (stem or "upload") + suffix
+
+
+def _downloads_dir() -> Path:
+    return Path.home() / "Downloads"
+
+
+def _validated_downloads_dir(*, create: bool = False) -> Path:
+    directory = _downloads_dir().expanduser()
+    if directory.is_symlink():
+        raise UnsafePathError("symlinked Downloads directory is not allowed")
+    if create:
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return validate_directory(directory)
+
+
+def _write_unique_download(name: str, data: bytes) -> Path:
+    """Create, but never overwrite, a file in Downloads."""
+    if _safe_upload_name(name) != name:
+        raise HTTPException(status_code=400, detail="invalid download filename")
+    try:
+        directory = _validated_downloads_dir(create=True)
+    except UnsafePathError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    requested = Path(name)
+    stem, suffix = requested.stem, requested.suffix
+    for index in range(1000):
+        candidate_name = name if index == 0 else f"{stem} ({index}){suffix}"
+        try:
+            candidate = confined_path(directory, candidate_name, allow_nested=False)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(candidate, flags, 0o600)
+            try:
+                with os.fdopen(descriptor, "wb") as handle:
+                    descriptor = -1
+                    handle.write(data)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+            return candidate
+        except FileExistsError:
+            continue
+        except UnsafePathError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except OSError:
+            if "candidate" in locals():
+                candidate.unlink(missing_ok=True)
+            raise
+    raise HTTPException(status_code=409, detail="too many files with the same name")
+
+
+def _json_for_inline_script(value: Any) -> str:
+    """Serialize JSON that cannot terminate its containing script element."""
+    return (
+        json.dumps(value, ensure_ascii=False)
+        .replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
+
+
+def _validate_webui_max_tokens(value: Any) -> int:
+    """Accept only JSON integers within Mio's bounded WebUI generation cap."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("max_tokens must be an integer between 1 and 32768")
+    if not 1 <= value <= _MAX_WEBUI_COMPLETION_TOKENS:
+        raise ValueError("max_tokens must be an integer between 1 and 32768")
+    return value
+
+
+def mount_webui(
+    manager,
+    *,
+    caveman_level: str = "full",
+    prompt_policy: PromptPolicy | None = None,
+    gpu_lock=None,
+    sessions_dir: Path | None = None,
+):
     """Initialize the webui module with server state."""
-    global _manager, _caveman_level, _gpu_lock, _sessions_dir
+    global _manager, _caveman_level, _prompt_policy, _gpu_lock, _sessions_dir
     _manager = manager
-    _caveman_level = caveman_level
+    _prompt_policy = prompt_policy or PromptPolicy.resolve(caveman=caveman_level)
+    _caveman_level = (
+        _prompt_policy.level.value if _prompt_policy.mode is PromptMode.CAVEMAN else "off"
+    )
     if gpu_lock is not None:
         _gpu_lock = gpu_lock
-    _sessions_dir = sessions_dir or Path.home() / ".mio" / "sessions"
+    _sessions_dir = sessions_dir or mio_home() / "sessions"
     _sessions_dir.mkdir(parents=True, exist_ok=True)
     # Start the scheduler (asyncio loop); safe if no loop is running yet
     from mio.webui import scheduler as _sched
-    _sched.init(manager)
+    _sched.init(manager, gpu_lock=_gpu_lock)
+    from mio.webui.flow_skills import configure_runtime as _configure_flow_skills
+
+    _configure_flow_skills(manager, _gpu_lock)
+
+
+def _resolve_chat_prompt_policy(data: dict) -> PromptPolicy:
+    """Resolve per-request modern flags without legacy UI defaults erasing Ponytail."""
+    if "prompt_mode" in data:
+        return PromptPolicy.resolve(
+            prompt_mode=data.get("prompt_mode"),
+            prompt_level=data.get("prompt_level"),
+        )
+    if "caveman" in data and _prompt_policy.mode is not PromptMode.PONYTAIL:
+        return PromptPolicy.resolve(caveman=str(data["caveman"]))
+    return _prompt_policy
 
 
 # --- UI page ---
@@ -56,13 +286,31 @@ def mount_webui(manager, *, caveman_level: str = "full", gpu_lock=None, sessions
 @router.get("", response_class=HTMLResponse)
 @router.get("/", response_class=HTMLResponse)
 async def serve_ui():
+    # ``mount_webui`` may run before Uvicorn has installed an event loop.
+    # Retrying here guarantees the scheduler is attached to the live loop.
+    from mio.webui import scheduler as _sched
+
+    _sched.init(_manager, gpu_lock=_gpu_lock)
     html_path = Path(__file__).parent / "mio_ui.html"
     # Prevent the browser from caching the shell — asset modules are
     # referenced by path and will pick up their own Cache-Control headers.
     return HTMLResponse(
         html_path.read_text(),
         headers={"Cache-Control": "no-cache, no-store, must-revalidate",
-                 "Pragma": "no-cache"},
+                 "Pragma": "no-cache",
+                 "Content-Security-Policy": (
+                     "default-src 'self'; "
+                     "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com https://esm.sh; "
+                     "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+                     "font-src 'self' data:; img-src 'self' data: blob:; "
+                     "connect-src 'self' ws://127.0.0.1:* ws://localhost:* ws://[::1]:* "
+                     "wss://127.0.0.1:* wss://localhost:* wss://[::1]:*; worker-src 'self' blob:; "
+                     "frame-src 'self' blob: https://www.youtube.com https://www.youtube-nocookie.com; "
+                     "object-src 'none'; base-uri 'none'; "
+                     "frame-ancestors 'none'; form-action 'self'"
+                 ),
+                 "Referrer-Policy": "no-referrer",
+                 "X-Content-Type-Options": "nosniff"},
     )
 
 
@@ -113,28 +361,55 @@ async def serve_dashboard():
 async def list_skills():
     """Return the full skill registry as JSON (name + description + schema)."""
     from mio.webui.skills import SKILLS
+    from mio.web_security import webui_skill_operator_granted, webui_skill_risk
+
     result = []
     for name, spec in sorted(SKILLS.items()):
         result.append({
             "name": name,
             "description": spec.get("description", ""),
             "parameters": spec.get("parameters", {}),
+            "risk": webui_skill_risk(name),
+            "operator_granted": webui_skill_operator_granted(name),
         })
     return {"skills": result}
 
 
 @router.post("/api/skills/run")
-async def run_skill(body: dict):
+async def run_skill(body: dict, request: Request):
     """Execute a single skill directly for the playground. Not a normal
     chat path — just runs the skill function with the given JSON args.
     """
     from mio.webui.skills import SKILLS, execute_skill
+    from mio.web_security import (
+        DANGEROUS_ACTION_HEADER,
+        webui_skill_direct_authorized,
+        webui_skill_operator_granted,
+        webui_skill_risk,
+    )
+
     name = (body or {}).get("name", "")
-    args = (body or {}).get("args", {}) or {}
+    args = (body or {}).get("args", (body or {}).get("arguments", {})) or {}
     if name not in SKILLS:
         return {"error": f"unknown skill: {name}"}
+    risk = webui_skill_risk(name)
+    if not webui_skill_direct_authorized(
+        name,
+        confirmed=(body or {}).get("confirm_sensitive"),
+        action_header=request.headers.get(DANGEROUS_ACTION_HEADER),
+    ):
+        reason = (
+            "operator grant required: add the exact skill name to "
+            "MIO_WEBUI_SKILL_GRANTS and restart Mio"
+            if not webui_skill_operator_granted(name)
+            else "explicit confirmation required for this invocation"
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={"error": "sensitive_skill_denied", "skill": name, "risk": risk, "reason": reason},
+        )
     try:
-        result = execute_skill(name, args)
+        result = await asyncio.to_thread(execute_skill, name, args)
         return {"ok": True, "result": result}
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
@@ -149,7 +424,7 @@ _prompts_file: Path | None = None
 def _prompts_path() -> Path:
     global _prompts_file
     if _prompts_file is None:
-        _prompts_file = Path.home() / ".mio" / "prompts.json"
+        _prompts_file = mio_home() / "prompts.json"
     return _prompts_file
 
 
@@ -165,8 +440,7 @@ def _load_prompts() -> list:
 
 def _save_prompts(prompts: list) -> None:
     p = _prompts_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(prompts, indent=2, ensure_ascii=False))
+    atomic_write_json(p, prompts)
 
 
 @router.get("/api/prompts")
@@ -200,7 +474,7 @@ async def delete_prompt(pid: str):
 
 # --- Persistent memory (facts the model remembers across chats) ---
 def _memory_path() -> Path:
-    return Path.home() / ".mio" / "memory.json"
+    return mio_home() / "memory.json"
 
 
 def _load_memory() -> list:
@@ -215,8 +489,7 @@ def _load_memory() -> list:
 
 def _save_memory(mem: list) -> None:
     p = _memory_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(mem, indent=2, ensure_ascii=False))
+    atomic_write_json(p, mem)
 
 
 @router.get("/api/memory")
@@ -244,7 +517,7 @@ async def delete_memory(mid: str):
 
 # --- Projects (shared system prompt + knowledge base per project) ---
 def _projects_path() -> Path:
-    return Path.home() / ".mio" / "projects.json"
+    return mio_home() / "projects.json"
 
 
 def _load_projects() -> list:
@@ -259,8 +532,7 @@ def _load_projects() -> list:
 
 def _save_projects(projs: list) -> None:
     p = _projects_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(projs, indent=2, ensure_ascii=False))
+    atomic_write_json(p, projs)
 
 
 @router.get("/api/projects")
@@ -271,7 +543,15 @@ async def list_projects():
 @router.post("/api/projects")
 async def save_project(body: dict):
     projs = _load_projects()
-    pid = body.get("id") or str(uuid.uuid4())[:8]
+    pid = _validate_identifier(body.get("id") or str(uuid.uuid4())[:8], label="project id")
+    raw_files = body.get("files", [])
+    files = []
+    if isinstance(raw_files, list):
+        for filename in raw_files[:64]:
+            if not isinstance(filename, str):
+                continue
+            if _safe_upload_name(filename) == filename and "/" not in filename and "\\" not in filename:
+                files.append(filename)
     entry = {
         "id": pid,
         "name": body.get("name", "Untitled"),
@@ -279,7 +559,7 @@ async def save_project(body: dict):
         "system_prompt": body.get("system_prompt", ""),
         "color": body.get("color", "#3b82f6"),
         "icon": body.get("icon", ""),           # optional emoji/icon
-        "files": body.get("files", []),          # list of filenames in ~/Downloads
+        "files": files,                           # validated filenames in ~/Downloads
         # Optional per-workspace model / context overrides. Unset = use
         # global defaults. The UI reads these to pre-apply a tier before
         # sending the first message of a session in that workspace.
@@ -328,6 +608,9 @@ async def get_config():
         "loaded_tiers": tiers,
         "all_tiers": all_tiers,
         "caveman": _caveman_level,
+        "prompt_mode": _prompt_policy.mode.value,
+        "prompt_level": _prompt_policy.level.value if _prompt_policy.mode is not PromptMode.NONE else None,
+        "prompt_policy": _prompt_policy.label,
         "active_tier": tiers[0] if tiers else None,
         "system_prompt": _system_prompt or "",
         "temperature": _temperature,
@@ -337,18 +620,54 @@ async def get_config():
 
 @router.post("/api/config")
 async def update_config(body: dict):
-    global _caveman_level, _system_prompt, _temperature, _max_tokens
-    if "caveman" in body:
-        _caveman_level = body["caveman"]
+    global _caveman_level, _prompt_policy, _system_prompt, _temperature, _max_tokens
+    candidate_policy = _prompt_policy
+    try:
+        if "prompt_mode" in body:
+            candidate_policy = PromptPolicy.resolve(
+                prompt_mode=body.get("prompt_mode"),
+                prompt_level=body.get("prompt_level"),
+            )
+        elif "caveman" in body:
+            candidate_policy = PromptPolicy.resolve(caveman=str(body["caveman"]))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    candidate_system_prompt = _system_prompt
     if "system_prompt" in body:
-        _system_prompt = body["system_prompt"] or None
+        candidate_system_prompt = body["system_prompt"] or None
+    candidate_temperature = _temperature
     if "temperature" in body:
-        _temperature = float(body["temperature"])
+        try:
+            candidate_temperature = float(body["temperature"])
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="temperature must be numeric") from exc
+        if not math.isfinite(candidate_temperature) or not 0.0 <= candidate_temperature <= 2.0:
+            raise HTTPException(status_code=400, detail="temperature must be between 0 and 2")
+    candidate_max_tokens = _max_tokens
     if "max_tokens" in body:
-        _max_tokens = int(body["max_tokens"])
+        try:
+            candidate_max_tokens = _validate_webui_max_tokens(body["max_tokens"])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # Publish only after every supplied setting validates, avoiding partial
+    # mutation when one field in a multi-setting request is malformed.
+    _prompt_policy = candidate_policy
+    _caveman_level = (
+        candidate_policy.level.value
+        if candidate_policy.mode is PromptMode.CAVEMAN
+        else "off"
+    )
+    _system_prompt = candidate_system_prompt
+    _temperature = candidate_temperature
+    _max_tokens = candidate_max_tokens
     return {
         "ok": True,
         "caveman": _caveman_level,
+        "prompt_mode": _prompt_policy.mode.value,
+        "prompt_level": _prompt_policy.level.value if _prompt_policy.mode is not PromptMode.NONE else None,
+        "prompt_policy": _prompt_policy.label,
         "system_prompt": _system_prompt or "",
         "temperature": _temperature,
         "max_tokens": _max_tokens,
@@ -386,27 +705,39 @@ async def get_model_info():
 
 @router.post("/api/tier")
 async def switch_tier(body: dict):
-    import asyncio
-
     tier = body.get("tier")
     if not tier or not _manager:
         return {"error": "invalid request"}
     if tier not in _manager.config.tiers:
         return {"error": f"unknown tier: {tier}", "available": list(_manager.config.tiers.keys())}
-    loaded = _manager.loaded_tiers()
-    if tier in loaded:
-        return {"ok": True, "tier": tier, "already_loaded": True}
+    manager = _manager
 
-    loop = asyncio.get_event_loop()
-
-    def _switch():
+    def _switch() -> bool:
         with _gpu_lock:
-            for t in list(loaded):
-                _manager.unload_tier(t)
-            _manager.load_tier(tier)
+            # Snapshot only after taking the same lifecycle lock used by
+            # generation and the model endpoints.  Two concurrent switch
+            # requests can therefore never act on the same stale tier list.
+            loaded = manager.loaded_tiers()
+            already_loaded = tier in loaded
 
-    await loop.run_in_executor(None, _switch)
-    return {"ok": True, "tier": tier}
+            # Loading is the transactional prepare step.  ``ModelManager``
+            # publishes an engine only after ``engine.load()`` succeeds, so a
+            # load failure leaves every currently serving tier untouched.
+            if not already_loaded:
+                manager.load_tier(tier)
+            for loaded_tier in loaded:
+                if loaded_tier != tier:
+                    manager.unload_tier(loaded_tier)
+            return already_loaded
+
+    try:
+        already_loaded = await asyncio.to_thread(_switch)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"could not switch to tier '{tier}': {exc}",
+        ) from exc
+    return {"ok": True, "tier": tier, "already_loaded": already_loaded}
 
 
 # --- Session persistence ---
@@ -416,7 +747,11 @@ async def list_sessions(project_id: str | None = None):
     if not _sessions_dir or not _sessions_dir.exists():
         return {"sessions": []}
     sessions = []
-    for f in sorted(_sessions_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+    for f in sorted(
+        _regular_files_confined(_sessions_dir),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    ):
         try:
             meta = json.loads(f.read_text())
             pid = meta.get("project_id")
@@ -439,30 +774,41 @@ async def list_sessions(project_id: str | None = None):
 
 @router.get("/api/sessions/{session_id}")
 async def load_session(session_id: str):
-    path = _sessions_dir / f"{session_id}.json"
+    path = _json_storage_path(_sessions_dir, session_id, label="session")
     if not path.exists():
-        return {"error": "not found"}
-    return json.loads(path.read_text())
+        raise HTTPException(status_code=404, detail="session not found")
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=500, detail="session data is unreadable") from exc
 
 
 @router.post("/api/sessions")
 async def save_session(body: dict):
-    session_id = body.get("id") or str(uuid.uuid4())[:8]
-    path = _sessions_dir / f"{session_id}.json"
-    body["id"] = session_id
-    body["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-    if "title" not in body or not body["title"]:
-        msgs = body.get("messages", [])
-        first_user = next((m["content"][:60] for m in msgs if m.get("role") == "user"), "New Chat")
-        body["title"] = first_user
+    payload = dict(body or {})
+    session_id = payload.get("id") or str(uuid.uuid4())[:8]
+    path = _json_storage_path(_sessions_dir, session_id, label="session")
+    payload["id"] = session_id
+    payload["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    if not payload.get("title"):
+        messages = payload.get("messages", [])
+        first_user = next(
+            (
+                str(message.get("content", ""))[:60]
+                for message in messages
+                if isinstance(message, dict) and message.get("role") == "user"
+            ),
+            "New Chat",
+        )
+        payload["title"] = first_user or "New Chat"
     # project_id optional — sessions can be grouped under a project
-    path.write_text(json.dumps(body, ensure_ascii=False, indent=2))
-    return {"id": session_id, "title": body["title"], "project_id": body.get("project_id")}
+    atomic_write_json(path, payload)
+    return {"id": session_id, "title": payload["title"], "project_id": payload.get("project_id")}
 
 
 @router.delete("/api/sessions/{session_id}")
 async def delete_session(session_id: str):
-    path = _sessions_dir / f"{session_id}.json"
+    path = _json_storage_path(_sessions_dir, session_id, label="session")
     if path.exists():
         path.unlink()
     return {"ok": True}
@@ -474,12 +820,9 @@ async def delete_session(session_id: str):
 # it can embed the PDF in an iframe or offer download links. Restricted to
 # plain filenames (no path traversal) from that directory only.
 
-import mimetypes
-from fastapi.responses import FileResponse, Response
-
 _ALLOWED_EXT = {
     ".pdf", ".docx", ".xlsx", ".pptx", ".png", ".jpg", ".jpeg", ".svg",
-    ".csv", ".ics", ".sqlite", ".db",
+    ".webp", ".gif", ".csv", ".ics", ".sqlite", ".db", ".md", ".txt", ".html",
 }
 
 
@@ -491,11 +834,18 @@ _shared_artifacts: dict[str, dict] = {}
 
 @router.post("/api/share")
 async def share_artifact(body: dict):
-    art_id = body.get("identifier") or str(uuid.uuid4())[:8]
+    art_id = _validate_identifier(
+        body.get("identifier") or str(uuid.uuid4())[:8], label="artifact id"
+    )
+    content = str(body.get("content", ""))
+    if len(content.encode("utf-8")) > _MAX_SHARED_ARTIFACT_BYTES:
+        raise HTTPException(status_code=413, detail="artifact exceeds the 5 MiB limit")
+    if art_id not in _shared_artifacts and len(_shared_artifacts) >= _MAX_SHARED_ARTIFACTS:
+        _shared_artifacts.pop(next(iter(_shared_artifacts)))
     _shared_artifacts[art_id] = {
-        "type": body.get("type", "text/html"),
-        "title": body.get("title", "Artifact"),
-        "content": body.get("content", ""),
+        "type": str(body.get("type", "text/html"))[:160],
+        "title": str(body.get("title", "Artifact"))[:500],
+        "content": content,
         "language": body.get("language", ""),
         "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
@@ -504,11 +854,12 @@ async def share_artifact(body: dict):
 
 @router.get("/share/{art_id}", response_class=HTMLResponse)
 async def view_shared_artifact(art_id: str):
+    art_id = _validate_identifier(art_id, label="artifact id")
     art = _shared_artifacts.get(art_id)
     if not art:
         return HTMLResponse(status_code=404, content="Artifact not found or expired.")
     import html as _html
-    j = json.dumps(art)
+    j = _json_for_inline_script(art)
     page = f"""<!doctype html><html><head><meta charset="utf-8"><title>{_html.escape(art['title'])}</title>
 <style>body{{margin:0;font-family:-apple-system,sans-serif;background:#111;color:#eee}}
 .hdr{{padding:10px 16px;border-bottom:1px solid #333;font-size:13px;display:flex;gap:12px;align-items:center}}
@@ -522,11 +873,14 @@ pre{{background:#1a1a1a;color:#eee;padding:16px;box-sizing:border-box;overflow:a
 const mount = document.getElementById('mount');
 if (art.type === 'text/html' || art.type.startsWith('application/vnd.pimio.') || art.type.startsWith('application/vnd.ant.')) {{
   const f = document.createElement('iframe');
-  f.sandbox = 'allow-scripts allow-same-origin';
+  f.sandbox = 'allow-scripts';
   f.srcdoc = art.content;
   mount.appendChild(f);
 }} else if (art.type === 'image/svg+xml') {{
-  mount.innerHTML = art.content;
+  const f = document.createElement('iframe');
+  f.sandbox = '';
+  f.srcdoc = art.content;
+  mount.appendChild(f);
 }} else {{
   const p = document.createElement('pre');
   p.textContent = art.content;
@@ -535,21 +889,29 @@ if (art.type === 'text/html' || art.type.startsWith('application/vnd.pimio.') ||
     return HTMLResponse(page)
 
 
-# --- File upload (attachments) ---
-from fastapi import UploadFile, File
-
-
 @router.post("/api/upload")
 async def upload_attachment(file: UploadFile = File(...)):
     """Accept an attachment, store it in ~/Downloads, extract text if PDF/txt/md,
     and return a summary the client can inject into the next message.
     """
-    name = (file.filename or "upload").replace("/", "_").replace("\\", "_")
-    from pathlib import Path as _Path
-    out = _Path.home() / "Downloads" / name
-    out.parent.mkdir(exist_ok=True)
-    data = await file.read()
-    out.write_bytes(data)
+    name = _safe_upload_name(file.filename)
+    declared_size = getattr(file, "size", None)
+    if declared_size is not None and declared_size > _MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="upload exceeds the 25 MiB limit")
+
+    chunks = bytearray()
+    while True:
+        chunk = await file.read(_UPLOAD_CHUNK_BYTES)
+        if not chunk:
+            break
+        if len(chunks) + len(chunk) > _MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="upload exceeds the 25 MiB limit")
+        chunks.extend(chunk)
+    data = bytes(chunks)
+    if not data:
+        raise HTTPException(status_code=400, detail="empty upload")
+    out = _write_unique_download(name, data)
+    name = out.name
 
     ext = ("." + name.rsplit(".", 1)[-1]).lower() if "." in name else ""
     text = ""
@@ -599,7 +961,6 @@ async def upload_attachment(file: UploadFile = File(...)):
     }
     # Images return a URL the UI can render as a thumbnail
     if ext in (".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"):
-        from urllib.parse import quote
         result["url"] = "/ui/files/" + quote(name)
         result["is_image"] = True
     return result
@@ -627,10 +988,6 @@ async def ingest_from_browser(body: dict):
     chat UI can @-mention it.
     """
     import datetime as _dt
-    import hashlib
-    import json as _json
-    from pathlib import Path as _P
-
     url = (body or {}).get("url") or ""
     if not url:
         return {"error": "url required"}
@@ -644,11 +1001,13 @@ async def ingest_from_browser(body: dict):
     tags = body.get("tags") or []
     target = (body.get("target") or "rag").strip().lower()
 
-    root = _P.home() / ".mio" / "ingest"
-    root.mkdir(parents=True, exist_ok=True)
+    try:
+        root = mio_state_directory("ingest", create=True)
+    except UnsafePathError as exc:
+        return {"error": str(exc)}
     stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     slug = hashlib.sha1(url.encode()).hexdigest()[:8]
-    md_path = root / f"{stamp}-{slug}.md"
+    filename = f"{stamp}-{slug}.md"
 
     frontmatter = (
         "---\n"
@@ -659,7 +1018,14 @@ async def ingest_from_browser(body: dict):
         f"selection_only: {bool(selection)}\n"
         "---\n\n"
     )
-    md_path.write_text(frontmatter + f"# {title}\n\n" + effective_text)
+    try:
+        md_path = write_confined_text(
+            root,
+            filename,
+            frontmatter + f"# {title}\n\n" + effective_text,
+        )
+    except (OSError, UnsafePathError) as exc:
+        return {"error": str(exc)}
 
     summary = effective_text[:280].replace("\n", " ")
     doc_id = f"{stamp}-{slug}"
@@ -669,8 +1035,8 @@ async def ingest_from_browser(body: dict):
     if target in ("rag", ""):
         try:
             from mio.webui.skills_rag import index_folder
-            index_folder(str(root))
-            indexed = True
+            index_result = index_folder(str(root))
+            indexed = not bool(index_result.get("error"))
         except Exception:
             pass
 
@@ -695,21 +1061,33 @@ async def list_ingested(limit: int = 100, tag: str | None = None):
     tags, fetched). Filter by `tag` query param to see only items with
     that tag.
     """
-    from pathlib import Path as _P
     import re as _re
-    root = _P.home() / ".mio" / "ingest"
-    if not root.exists():
+
+    try:
+        root = mio_state_directory("ingest")
+    except UnsafePathError:
         return {"items": [], "tags": []}
     items = []
     all_tags: set[str] = set()
-    for p in sorted(root.glob("*.md"), reverse=True):
-        head = p.read_text()[:2048]
+    paths = iter_confined_regular_files(
+        root,
+        suffixes={".md"},
+        recursive=False,
+        max_bytes=8 * 1024 * 1024,
+    )
+    for p in sorted(paths, reverse=True):
+        try:
+            head = read_text_no_follow(p, max_bytes=8 * 1024 * 1024)[:2048]
+        except (OSError, UnsafePathError):
+            continue
         title = url = ""
         tags: list[str] = []
         m = _re.search(r"^title:\s*['\"]?(.*?)['\"]?$", head, _re.MULTILINE)
-        if m: title = m.group(1)
+        if m:
+            title = m.group(1)
         m = _re.search(r"^source:\s*(.*?)$", head, _re.MULTILINE)
-        if m: url = m.group(1)
+        if m:
+            url = m.group(1)
         m = _re.search(r"^tags:\s*(\[.*?\])$", head, _re.MULTILINE)
         if m:
             try:
@@ -791,24 +1169,28 @@ async def rag_search(q: str, limit: int = 10, label: str | None = None):
 # configured vault. The vault path persists in ~/.mio/obsidian.json;
 # everything is confined to that path (no traversal outside).
 
-def _obsidian_config_path() -> Path:
-    return Path.home() / ".mio" / "obsidian.json"
+def _obsidian_config_path(*, create_parent: bool = False) -> Path:
+    root = mio_state_root(create=create_parent)
+    return confined_path(root, "obsidian.json")
 
 
 def _load_obsidian_config() -> dict:
-    p = _obsidian_config_path()
-    if not p.exists():
+    try:
+        p = _obsidian_config_path()
+    except UnsafePathError:
+        return {}
+    if not p.exists() or p.is_symlink():
         return {}
     try:
-        return json.loads(p.read_text())
-    except Exception:
+        return json.loads(read_text_no_follow(p, max_bytes=64 * 1024))
+    except (OSError, UnsafePathError, ValueError):
         return {}
 
 
 def _save_obsidian_config(cfg: dict) -> None:
-    p = _obsidian_config_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
+    root = mio_state_root(create=True)
+    path = confined_path(root, "obsidian.json", allow_nested=False)
+    atomic_write_json(path, cfg)
 
 
 def _obsidian_vault() -> Path | None:
@@ -816,28 +1198,30 @@ def _obsidian_vault() -> Path | None:
     vp = cfg.get("vault_path")
     if not vp:
         return None
-    return Path(vp).expanduser()
+    try:
+        return validate_directory(Path(vp).expanduser())
+    except UnsafePathError:
+        return None
 
 
 def _obsidian_safe_join(vault: Path, rel: str) -> Path | None:
     """Resolve rel under vault, refusing any path that escapes it."""
     if not rel:
         return None
-    p = (vault / rel).resolve()
     try:
-        p.relative_to(vault.resolve())
-    except ValueError:
+        return confined_path(vault, rel)
+    except UnsafePathError:
         return None
-    return p
 
 
 @router.get("/api/obsidian/config")
 async def obsidian_get_config():
     cfg = _load_obsidian_config()
     vp = cfg.get("vault_path") or ""
-    vault_exists = False
-    if vp:
-        vault_exists = Path(vp).expanduser().exists()
+    try:
+        vault_exists = bool(vp) and bool(validate_directory(Path(vp).expanduser()))
+    except UnsafePathError:
+        vault_exists = False
     return {"vault_path": vp, "vault_exists": vault_exists}
 
 
@@ -846,10 +1230,11 @@ async def obsidian_set_config(body: dict):
     vp = (body or {}).get("vault_path", "").strip()
     if not vp:
         return {"error": "vault_path required"}
-    expanded = Path(vp).expanduser()
-    if not expanded.exists():
-        return {"error": f"path does not exist: {vp}"}
-    _save_obsidian_config({"vault_path": str(expanded)})
+    try:
+        expanded = validate_directory(Path(vp).expanduser())
+        _save_obsidian_config({"vault_path": str(expanded)})
+    except (OSError, UnsafePathError) as exc:
+        return {"error": str(exc)}
     return {"ok": True, "vault_path": str(expanded)}
 
 
@@ -858,40 +1243,7 @@ async def obsidian_tree():
     vault = _obsidian_vault()
     if not vault:
         return {"error": "vault not configured"}
-    if not vault.exists():
-        return {"error": f"vault missing: {vault}"}
-
-    def walk(d: Path, depth: int = 0) -> list:
-        if depth > 12:
-            return []
-        items = []
-        try:
-            entries = sorted(d.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
-        except PermissionError:
-            return []
-        for entry in entries:
-            name = entry.name
-            if name.startswith(".") or name == "node_modules":
-                continue
-            rel = str(entry.relative_to(vault))
-            if entry.is_dir():
-                items.append({
-                    "type": "folder",
-                    "name": name,
-                    "path": rel,
-                    "children": walk(entry, depth + 1),
-                })
-            elif entry.suffix.lower() in (".md", ".markdown"):
-                items.append({
-                    "type": "note",
-                    "name": name,
-                    "path": rel,
-                    "size": entry.stat().st_size,
-                    "mtime": entry.stat().st_mtime,
-                })
-        return items
-
-    return {"vault_path": str(vault), "tree": walk(vault)}
+    return {"vault_path": str(vault), "tree": confined_markdown_tree(vault)}
 
 
 @router.get("/api/obsidian/note")
@@ -900,11 +1252,11 @@ async def obsidian_read_note(path: str):
     if not vault:
         return {"error": "vault not configured"}
     p = _obsidian_safe_join(vault, path)
-    if not p or not p.exists() or not p.is_file():
+    if not p or not p.exists() or p.is_symlink() or not p.is_file():
         return {"error": "note not found"}
     try:
-        content = p.read_text()
-    except Exception as e:
+        content = read_text_no_follow(p, max_bytes=8 * 1024 * 1024)
+    except (OSError, UnsafePathError) as e:
         return {"error": str(e)}
     return {
         "path":    path,
@@ -927,11 +1279,15 @@ async def obsidian_write_note(body: dict):
     # Ensure .md suffix so Obsidian picks it up.
     if not rel.lower().endswith((".md", ".markdown")):
         rel += ".md"
-    p = _obsidian_safe_join(vault, rel)
-    if not p:
-        return {"error": "invalid path"}
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(content)
+    try:
+        write_confined_text(
+            vault,
+            rel,
+            content,
+            create_parents=True,
+        )
+    except (OSError, UnsafePathError) as exc:
+        return {"error": str(exc)}
     return {"ok": True, "path": rel, "size": len(content.encode("utf-8"))}
 
 
@@ -956,7 +1312,6 @@ async def design_export(body: dict):
     import io
     import zipfile as _zip
     import re as _re
-    from fastapi.responses import StreamingResponse
 
     body = body or {}
     title    = (body.get("title") or "mio-design").strip() or "mio-design"
@@ -1038,7 +1393,7 @@ async def design_export(body: dict):
 # --- Flow Mode (visual agent graphs) ------------------------------
 
 def _flows_dir() -> Path:
-    p = Path.home() / ".mio" / "flows"
+    p = mio_home() / "flows"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -1046,14 +1401,18 @@ def _flows_dir() -> Path:
 @router.get("/api/flows")
 async def list_flows():
     flows = []
-    for p in sorted(_flows_dir().glob("*.json"), key=lambda x: -x.stat().st_mtime):
+    candidates = _regular_files_confined(_flows_dir())
+    for p in sorted(candidates, key=lambda x: -x.stat().st_mtime):
         try:
             data = json.loads(p.read_text())
+            skill = data.get("skill") if isinstance(data.get("skill"), dict) else {}
             flows.append({
                 "id":       p.stem,
                 "name":     data.get("name", p.stem),
                 "nodes":    len(data.get("nodes", {})),
                 "updated":  p.stat().st_mtime,
+                "exposed":  bool(skill.get("exposed")),
+                "skill_name": skill.get("name") if skill.get("exposed") else None,
             })
         except Exception:
             continue
@@ -1062,73 +1421,125 @@ async def list_flows():
 
 @router.get("/api/flows/{flow_id}")
 async def get_flow(flow_id: str):
-    safe = flow_id.replace("/", "_").replace("..", "_")
-    p = _flows_dir() / f"{safe}.json"
+    p = _json_storage_path(_flows_dir(), flow_id, label="flow")
     if not p.exists():
-        return {"error": "not found"}
+        raise HTTPException(status_code=404, detail="flow not found")
     return json.loads(p.read_text())
 
 
 @router.post("/api/flows")
 async def save_flow(body: dict):
-    fid = (body or {}).get("id") or str(uuid.uuid4())[:8]
-    safe = fid.replace("/", "_").replace("..", "_")
-    p = _flows_dir() / f"{safe}.json"
+    body = body or {}
+    fid = body.get("id") or str(uuid.uuid4())[:8]
+    safe = _validate_identifier(fid, label="flow id")
+    p = _json_storage_path(_flows_dir(), safe, label="flow")
+    nodes = body.get("nodes", {})
+    if not isinstance(nodes, dict):
+        raise HTTPException(status_code=400, detail="flow nodes must be an object")
+    if len(nodes) > 200:
+        raise HTTPException(status_code=413, detail="flow exceeds the 200-node limit")
+    try:
+        graph_bytes = len(json.dumps(nodes, ensure_ascii=False).encode("utf-8"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="flow nodes must be JSON serializable") from exc
+    if graph_bytes > 2 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="flow graph exceeds the 2 MiB limit")
+    existing_skill: dict[str, Any] = {"exposed": False}
+    if p.is_file():
+        try:
+            existing = json.loads(p.read_text())
+            executable_unchanged = (
+                existing.get("nodes") == nodes
+                and existing.get("edges", []) == body.get("edges", [])
+            )
+            if executable_unchanged and isinstance(existing.get("skill"), dict):
+                existing_skill = existing["skill"]
+        except (OSError, json.JSONDecodeError, AttributeError):
+            pass
     data = {
-        "id":      fid,
+        "id":      safe,
         "name":    body.get("name", "Untitled flow"),
-        "nodes":   body.get("nodes", {}),
+        "nodes":   nodes,
         "edges":   body.get("edges", []),
+        "skill":   existing_skill,
         "updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
-    p.write_text(json.dumps(data, indent=2))
-    return {"ok": True, "id": fid}
+    atomic_write_json(p, data)
+    return {"ok": True, "id": safe}
 
 
 @router.delete("/api/flows/{flow_id}")
 async def delete_flow(flow_id: str):
-    safe = flow_id.replace("/", "_").replace("..", "_")
-    p = _flows_dir() / f"{safe}.json"
+    p = _json_storage_path(_flows_dir(), flow_id, label="flow")
     if p.exists() and p.is_file():
         p.unlink()
     return {"ok": True}
+
+
+@router.post("/api/flows/{flow_id}/expose")
+async def expose_flow(flow_id: str, body: dict | None = None):
+    """Publish one graph behind Mio's bounded list/run flow-skill tools."""
+    from mio.webui.flow_skills import FlowSkillError, publish_flow
+
+    body = body or {}
+    try:
+        return publish_flow(
+            flow_id,
+            name=str(body.get("name") or ""),
+            description=str(body.get("description") or ""),
+            root=_flows_dir(),
+        )
+    except FlowSkillError as exc:
+        status = 409 if "already in use" in str(exc) else 400
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+
+@router.delete("/api/flows/{flow_id}/expose")
+async def unexpose_flow(flow_id: str):
+    from mio.webui.flow_skills import FlowSkillError, unpublish_flow
+
+    try:
+        return unpublish_flow(flow_id, root=_flows_dir())
+    except FlowSkillError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/api/flows/{flow_id}/run")
 async def start_flow_run(flow_id: str, body: dict | None = None):
     """Kick off a flow execution. Returns { run_id } which the client
     uses to subscribe to /api/flows/runs/{run_id}/events for SSE."""
-    safe = flow_id.replace("/", "_").replace("..", "_")
-    p = _flows_dir() / f"{safe}.json"
+    p = _json_storage_path(_flows_dir(), flow_id, label="flow")
     if not p.exists():
-        return {"error": "flow not found"}
+        raise HTTPException(status_code=404, detail="flow not found")
     flow = json.loads(p.read_text())
     from mio.webui.flow_runner import start_run
     env = (body or {}).get("env") or {}
-    run_id = start_run(flow, env)
+    run_id = start_run(flow, env, manager=_manager, gpu_lock=_gpu_lock)
     return {"run_id": run_id}
 
 
 @router.get("/api/flows/runs/{run_id}/events")
 async def flow_run_events(run_id: str):
     """SSE stream of per-node events for a running flow."""
-    from fastapi.responses import StreamingResponse
-    from mio.webui.flow_runner import get_run
+    from mio.webui.flow_runner import discard_run, get_run
     run = get_run(run_id)
     if not run:
         return {"error": "run not found"}
 
     async def gen():
-        while True:
-            try:
-                evt = await asyncio.wait_for(run.queue.get(), timeout=60)
-                yield "data: " + json.dumps(evt) + "\n\n"
-                if evt.get("type") == "run_finished":
-                    break
-            except asyncio.TimeoutError:
-                yield ": ping\n\n"
-                if run.done:
-                    break
+        try:
+            while True:
+                try:
+                    evt = await asyncio.wait_for(run.queue.get(), timeout=60)
+                    yield "data: " + json.dumps(evt) + "\n\n"
+                    if evt.get("type") == "run_finished":
+                        break
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+                    if run.done:
+                        break
+        finally:
+            discard_run(run_id)
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
@@ -1144,13 +1555,15 @@ async def knowledge_graph():
            session↔session (@-mention or title similarity skipped for
            v1), artifact→session (reverse).
     """
-    from pathlib import Path as _P
     nodes = []
     edges = []
 
     # Sessions + their artifacts
     if _sessions_dir and _sessions_dir.exists():
-        for p in sorted(_sessions_dir.glob("*.json"), key=lambda x: -x.stat().st_mtime)[:120]:
+        for p in sorted(
+            _regular_files_confined(_sessions_dir),
+            key=lambda x: -x.stat().st_mtime,
+        )[:120]:
             try:
                 data = json.loads(p.read_text())
             except Exception:
@@ -1173,25 +1586,39 @@ async def knowledge_graph():
                       "label": pr.get("name", pr["id"])[:42]})
 
     # Ingested docs
-    ing = _P.home() / ".mio" / "ingest"
-    if ing.exists():
-        for p in sorted(ing.glob("*.md"), reverse=True)[:60]:
-            nodes.append({
-                "id": f"doc:{p.stem}", "type": "doc",
-                "label": p.stem.split("-", 2)[-1][:42],
-            })
+    try:
+        ing = mio_state_directory("ingest")
+        ingest_files = sorted(
+            iter_confined_regular_files(
+                ing,
+                suffixes={".md"},
+                recursive=False,
+            ),
+            reverse=True,
+        )[:60]
+    except UnsafePathError:
+        ingest_files = []
+    for p in ingest_files:
+        nodes.append({
+            "id": f"doc:{p.stem}", "type": "doc",
+            "label": p.stem.split("-", 2)[-1][:42],
+        })
 
     # Obsidian notes (top-level files only — keeps the graph tractable)
-    try:
-        cfg = _load_obsidian_config()
-        vp = cfg.get("vault_path")
-        if vp:
-            vault = _P(vp).expanduser()
-            if vault.exists():
-                for p in list(vault.glob("*.md"))[:40]:
-                    nodes.append({"id": f"note:{p.name}", "type": "note", "label": p.stem[:42]})
-    except Exception:
-        pass
+    vault = _obsidian_vault()
+    if vault is not None:
+        for p in list(
+            iter_confined_regular_files(
+                vault,
+                suffixes={".md", ".markdown"},
+                recursive=False,
+            )
+        )[:40]:
+            nodes.append({
+                "id": f"note:{p.name}",
+                "type": "note",
+                "label": p.stem[:42],
+            })
 
     return {"nodes": nodes, "edges": edges}
 
@@ -1200,7 +1627,7 @@ async def knowledge_graph():
 
 @router.get("/api/scratchpad")
 async def scratchpad_get():
-    p = Path.home() / ".mio" / "scratchpad.md"
+    p = mio_home() / "scratchpad.md"
     if not p.exists():
         return {"content": ""}
     return {"content": p.read_text(), "path": str(p)}
@@ -1208,10 +1635,15 @@ async def scratchpad_get():
 
 @router.post("/api/scratchpad")
 async def scratchpad_set(body: dict):
-    p = Path.home() / ".mio" / "scratchpad.md"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text((body or {}).get("content", ""))
-    return {"ok": True, "size": p.stat().st_size}
+    p = mio_home() / "scratchpad.md"
+    content = (body or {}).get("content", "")
+    if not isinstance(content, str):
+        raise HTTPException(status_code=400, detail="scratchpad content must be text")
+    payload = content.encode("utf-8")
+    if len(payload) > _MAX_LOCAL_NOTE_BYTES:
+        raise HTTPException(status_code=413, detail="scratchpad exceeds the 2 MiB limit")
+    atomic_write_bytes(p, payload)
+    return {"ok": True, "size": len(payload)}
 
 
 # --- Daily Note --------------------------------------------------
@@ -1219,7 +1651,7 @@ async def scratchpad_set(body: dict):
 def _journal_path(date_str: str | None = None) -> Path:
     import datetime as _dt
     d = date_str or _dt.date.today().isoformat()
-    p = Path.home() / ".mio" / "journal" / f"{d}.md"
+    p = mio_home() / "journal" / f"{d}.md"
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -1250,16 +1682,20 @@ async def journal_today():
 async def journal_save(body: dict):
     p = _journal_path()
     content = (body or {}).get("content", "")
-    p.write_text(content)
-    return {"ok": True, "path": str(p), "size": len(content.encode())}
+    if not isinstance(content, str):
+        raise HTTPException(status_code=400, detail="journal content must be text")
+    payload = content.encode("utf-8")
+    if len(payload) > _MAX_LOCAL_NOTE_BYTES:
+        raise HTTPException(status_code=413, detail="journal entry exceeds the 2 MiB limit")
+    atomic_write_bytes(p, payload)
+    return {"ok": True, "path": str(p), "size": len(payload)}
 
 
 @router.post("/api/reveal")
 async def reveal_in_finder(body: dict):
     """Open a local path in the user's file browser (Finder on macOS)."""
-    import subprocess, sys
     from pathlib import Path as _P
-    path_str = (body or {}).get("path", "").strip() or "~/.mio"
+    path_str = (body or {}).get("path", "").strip() or str(mio_home())
     p = _P(path_str).expanduser()
     p.mkdir(parents=True, exist_ok=True)
     try:
@@ -1281,21 +1717,15 @@ async def export_workspace():
     can re-download those. Includes sessions, projects, memory, journal,
     todos/habits SQLite dbs, ingest, obsidian config, rag.sqlite.
     """
-    import io, zipfile as _zip
-    from pathlib import Path as _P
-    from fastapi.responses import StreamingResponse
-
-    root = _P.home() / ".mio"
+    root = mio_home()
     if not root.exists():
         return {"error": "no ~/.mio yet"}
 
     SKIP_DIRS = {"image-cache", "web-cache", "files-cache", "__pycache__"}
 
     buf = io.BytesIO()
-    with _zip.ZipFile(buf, "w", compression=_zip.ZIP_DEFLATED) as z:
-        for path in root.rglob("*"):
-            if not path.is_file():
-                continue
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
+        for path in _regular_files_confined(root, "*", recursive=True):
             rel = path.relative_to(root)
             if any(part in SKIP_DIRS for part in rel.parts):
                 continue
@@ -1331,12 +1761,14 @@ async def obsidian_reindex():
 async def delete_ingested(doc_id: str):
     """Remove a stashed ingest file (and leave the RAG index to self-heal
     on next re-index — cheap)."""
-    from pathlib import Path as _P
-    root = _P.home() / ".mio" / "ingest"
-    # Prevent path traversal
-    safe = doc_id.replace("/", "_").replace("..", "_")
-    target = root / f"{safe}.md"
-    if target.exists() and target.is_file() and target.resolve().is_relative_to(root.resolve()):
+    if not _IDENTIFIER_RE.fullmatch(doc_id):
+        return {"deleted": False, "error": "invalid id"}
+    try:
+        root = mio_state_directory("ingest")
+        target = confined_path(root, f"{doc_id}.md", must_exist=True)
+    except UnsafePathError:
+        return {"deleted": False, "error": "not found"}
+    if target.is_file() and not target.is_symlink():
         target.unlink()
         return {"deleted": True, "id": doc_id}
     return {"deleted": False, "error": "not found"}
@@ -1349,7 +1781,11 @@ async def global_search(q: str, limit: int = 30):
         return {"results": []}
     ql = q.lower()
     results = []
-    for f in sorted(_sessions_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+    for f in sorted(
+        _regular_files_confined(_sessions_dir),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    ):
         try:
             meta = json.loads(f.read_text())
             title = meta.get("title", "Untitled")
@@ -1384,33 +1820,32 @@ async def global_search(q: str, limit: int = 30):
 # download poster URLs at skill-run time into ~/.mio/image-cache/ and
 # rewrite the artifact JSON to reference local /ui/img/<hash>.<ext>
 # paths, so the artifact keeps working forever even offline.
-import urllib.request as _urlreq
-import hashlib as _hl
-import mimetypes as _mt
 _img_proxy_cache: dict[str, tuple[bytes, str]] = {}
 
-PIMIO_DIR = Path.home() / ".mio"
-IMAGE_CACHE_DIR = PIMIO_DIR / "image-cache"
-WEB_CACHE_DIR = PIMIO_DIR / "web-cache"
-FILES_CACHE_DIR = PIMIO_DIR / "files-cache"
-for _d in (IMAGE_CACHE_DIR, WEB_CACHE_DIR, FILES_CACHE_DIR):
-    _d.mkdir(parents=True, exist_ok=True)
+PIMIO_DIR = mio_state_root(create=True)
+IMAGE_CACHE_DIR = mio_state_directory("image-cache", create=True)
+WEB_CACHE_DIR = mio_state_directory("web-cache", create=True)
+FILES_CACHE_DIR = mio_state_directory("files-cache", create=True)
 
 # Extensions we accept for the served cache (prevents arbitrary-read)
-_IMG_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".avif"}
+_IMG_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif"}
 
 
 def web_cache_get(url: str) -> str | None:
     """Return cached page text for `url` or None."""
     if not url:
         return None
-    key = _hl.sha1(url.encode()).hexdigest()
-    p = WEB_CACHE_DIR / f"{key}.json"
-    if not p.exists():
-        return None
+    key = hashlib.sha1(url.encode()).hexdigest()
     try:
-        return json.loads(p.read_text())["content"]
-    except Exception:
+        p = confined_path(
+            WEB_CACHE_DIR,
+            f"{key}.json",
+            must_exist=True,
+            allow_nested=False,
+        )
+        payload = read_text_no_follow(p, max_bytes=16 * 1024 * 1024)
+        return json.loads(payload)["content"]
+    except (KeyError, OSError, TypeError, ValueError, UnsafePathError):
         return None
 
 
@@ -1418,15 +1853,22 @@ def web_cache_put(url: str, content: str) -> None:
     """Persist page text keyed by URL."""
     if not url or content is None:
         return
-    key = _hl.sha1(url.encode()).hexdigest()
-    p = WEB_CACHE_DIR / f"{key}.json"
+    key = hashlib.sha1(url.encode()).hexdigest()
     try:
-        p.write_text(json.dumps({
-            "url": url,
-            "fetched_at": int(time.time()),
-            "content": content,
-        }, ensure_ascii=False))
-    except Exception:
+        path = confined_path(
+            WEB_CACHE_DIR,
+            f"{key}.json",
+            allow_nested=False,
+        )
+        atomic_write_json(
+            path,
+            {
+                "url": url,
+                "fetched_at": int(time.time()),
+                "content": content,
+            },
+        )
+    except (OSError, TypeError, ValueError, UnsafePathError):
         pass
 
 
@@ -1434,11 +1876,11 @@ def _dir_stats(p: Path, suffixes: set[str] | None = None) -> dict:
     """Return {count, bytes} for files inside `p`, optionally filtered."""
     count = 0
     total = 0
-    if not p.exists():
+    try:
+        files = iter_confined_regular_files(p, recursive=False)
+    except UnsafePathError:
         return {"count": 0, "bytes": 0}
-    for f in p.iterdir():
-        if not f.is_file():
-            continue
+    for f in files:
         if suffixes and f.suffix.lower() not in suffixes:
             continue
         try:
@@ -1452,33 +1894,17 @@ def _dir_stats(p: Path, suffixes: set[str] | None = None) -> dict:
 def _clear_dir(p: Path) -> int:
     """Unlink every file in `p`. Returns count of files removed."""
     n = 0
-    if not p.exists():
+    try:
+        files = list(iter_confined_regular_files(p, recursive=False))
+    except UnsafePathError:
         return 0
-    for f in p.iterdir():
-        if f.is_file():
-            try:
-                f.unlink()
-                n += 1
-            except Exception:
-                pass
+    for f in files:
+        try:
+            f.unlink()
+            n += 1
+        except OSError:
+            pass
     return n
-
-
-def _guess_ext(url: str, content_type: str | None) -> str:
-    # Prefer Content-Type, then URL extension, default to .jpg
-    if content_type:
-        ct = content_type.split(";")[0].strip().lower()
-        ext = _mt.guess_extension(ct) or ""
-        if ext == ".jpe":
-            ext = ".jpg"
-        if ext in _IMG_EXTS:
-            return ext
-    tail = url.rsplit("?", 1)[0].rsplit("#", 1)[0].rsplit(".", 1)
-    if len(tail) == 2:
-        candidate = "." + tail[1].lower()
-        if candidate in _IMG_EXTS:
-            return candidate
-    return ".jpg"
 
 
 def cache_image_to_disk(url: str) -> str | None:
@@ -1488,35 +1914,23 @@ def cache_image_to_disk(url: str) -> str | None:
     """
     if not url or not (url.startswith("http://") or url.startswith("https://")):
         return None
-    key = _hl.sha1(url.encode()).hexdigest()
+    key = hashlib.sha1(url.encode()).hexdigest()
     # If any file with this hash stem already exists, reuse it.
-    for existing in IMAGE_CACHE_DIR.glob(key + ".*"):
-        if existing.suffix.lower() in _IMG_EXTS:
-            return f"/ui/img/{existing.name}"
     try:
-        req = _urlreq.Request(url, headers={
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
-        })
-        import ssl as _ssl
-        ctx = _ssl.create_default_context()
-        try:
-            import certifi
-            ctx.load_verify_locations(certifi.where())
-        except ImportError:
-            pass
-        with _urlreq.urlopen(req, timeout=20, context=ctx) as r:
-            data = r.read()
-            mime = r.headers.get("Content-Type", "")
-    except Exception:
-        return None
-    if not data:
-        return None
-    ext = _guess_ext(url, mime)
-    path = IMAGE_CACHE_DIR / f"{key}{ext}"
-    try:
-        path.write_bytes(data)
-    except Exception:
+        for existing in iter_confined_regular_files(
+            IMAGE_CACHE_DIR,
+            suffixes=_IMG_EXTS,
+            recursive=False,
+        ):
+            if existing.stem == key:
+                return f"/ui/img/{existing.name}"
+        payload = fetch_image(url, allowed_hosts=None)
+        path = write_confined_bytes(
+            IMAGE_CACHE_DIR,
+            f"{key}{payload.extension}",
+            payload.data,
+        )
+    except (ImageFetchError, OSError, UnsafePathError):
         return None
     return f"/ui/img/{path.name}"
 
@@ -1524,40 +1938,27 @@ def cache_image_to_disk(url: str) -> str | None:
 @router.get("/proxy-image")
 async def proxy_image(url: str):
     from fastapi.responses import Response as _R
-    # Only proxy http(s), never file://, etc.
-    if not (url.startswith("http://") or url.startswith("https://")):
-        return _R(status_code=400, content="invalid url")
-    # Short allowlist to prevent using our server as an arbitrary proxy
-    allowed_hosts = (
-        "myanimelist.net", "cdn.myanimelist.net",
-        "i.ytimg.com", "yt3.ggpht.com",
-        "commons.wikimedia.org", "upload.wikimedia.org",
-        "tvmaze.com", "static.tvmaze.com",
-    )
-    host = url.split("/")[2] if "://" in url else ""
-    if not any(host.endswith(h) for h in allowed_hosts):
-        return _R(status_code=403, content="host not allowed")
-    key = _hl.sha1(url.encode()).hexdigest()
+    key = hashlib.sha1(url.encode()).hexdigest()
     if key in _img_proxy_cache:
         data, mime = _img_proxy_cache[key]
         return _R(content=data, media_type=mime, headers={"Cache-Control": "max-age=3600"})
     try:
-        req = _urlreq.Request(url, headers={
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
-        })
-        import ssl as _ssl
-        ctx = _ssl.create_default_context()
-        try:
-            import certifi
-            ctx.load_verify_locations(certifi.where())
-        except ImportError:
-            pass
-        with _urlreq.urlopen(req, timeout=20, context=ctx) as r:
-            data = r.read()
-            mime = r.headers.get("Content-Type", "image/jpeg")
-    except Exception as e:
-        return _R(status_code=502, content=f"fetch failed: {e}")
+        payload = await asyncio.to_thread(fetch_image, url)
+        data = payload.data
+        mime = payload.media_type
+    except ImageFetchError as exc:
+        message = str(exc)
+        if "host is not allowed" in message:
+            status = 403
+        elif "URL" in message or "http://" in message or "host is required" in message:
+            status = 400
+        elif "Content-Type" in message or "supported raster image" in message:
+            status = 415
+        else:
+            status = 502
+        return _R(status_code=status, content=message)
+    except OSError as exc:
+        return _R(status_code=502, content=f"fetch failed: {exc}")
     _img_proxy_cache[key] = (data, mime)
     # Cap the cache at ~200 entries
     if len(_img_proxy_cache) > 200:
@@ -1599,44 +2000,150 @@ async def cache_clear(payload: dict):
 # ---- Chat import (ChatGPT / Claude exports) ----
 
 
+_MAX_IMPORT_CONVERSATIONS = 1_000
+_MAX_IMPORT_MAPPING_NODES = 20_000
+_MAX_IMPORT_MESSAGES = 8_192
+_MAX_IMPORT_MESSAGE_BYTES = 2 * 1024 * 1024
+_MAX_IMPORT_SESSION_BYTES = 16 * 1024 * 1024
+
+
+def _bounded_import_text(value: Any, *, label: str) -> str:
+    if not isinstance(value, str):
+        return ""
+    if len(value.encode("utf-8")) > _MAX_IMPORT_MESSAGE_BYTES:
+        raise ValueError(f"{label} exceeds the 2 MiB limit")
+    return value
+
+
+def _chatgpt_active_branch(raw: dict, mapping: dict) -> list[dict]:
+    """Return one selected ChatGPT branch without recursion.
+
+    ChatGPT exports retain alternative edits as sibling nodes.  Flattening a
+    depth-first traversal merges mutually exclusive replies into one false
+    transcript.  ``current_node`` identifies the selected leaf; older exports
+    without it fall back deterministically to the most recently created leaf.
+    """
+    if len(mapping) > _MAX_IMPORT_MAPPING_NODES:
+        raise ValueError("ChatGPT mapping exceeds the 20,000-node limit")
+    if not mapping:
+        return []
+
+    ordered_ids: list[str] = []
+    parent_ids: set[str] = set()
+    for node_id, node in mapping.items():
+        if not isinstance(node_id, str) or not isinstance(node, dict):
+            raise ValueError("ChatGPT mapping contains an invalid node")
+        ordered_ids.append(node_id)
+        parent = node.get("parent")
+        if parent is not None:
+            if not isinstance(parent, str) or parent not in mapping:
+                raise ValueError("ChatGPT mapping contains an invalid parent")
+            parent_ids.add(parent)
+
+    selected = raw.get("current_node")
+    if selected is not None:
+        if not isinstance(selected, str) or selected not in mapping:
+            raise ValueError("ChatGPT current_node is missing from the mapping")
+    else:
+        leaves = [node_id for node_id in ordered_ids if node_id not in parent_ids]
+        if not leaves:
+            raise ValueError("ChatGPT mapping has no acyclic leaf")
+        positions = {node_id: index for index, node_id in enumerate(ordered_ids)}
+
+        def leaf_rank(node_id: str) -> tuple[float, int]:
+            message = mapping[node_id].get("message")
+            created = message.get("create_time") if isinstance(message, dict) else None
+            try:
+                timestamp = float(created) if isinstance(created, (int, float)) else float("-inf")
+            except (OverflowError, ValueError):
+                timestamp = float("-inf")
+            if not math.isfinite(timestamp):
+                timestamp = float("-inf")
+            return timestamp, positions[node_id]
+
+        selected = max(leaves, key=leaf_rank)
+
+    lineage: list[dict] = []
+    seen: set[str] = set()
+    node_id: str | None = selected
+    while node_id is not None:
+        if node_id in seen:
+            raise ValueError("ChatGPT mapping contains a parent cycle")
+        if len(lineage) >= _MAX_IMPORT_MESSAGES:
+            raise ValueError("ChatGPT branch exceeds the 8,192-node limit")
+        seen.add(node_id)
+        node = mapping[node_id]
+        lineage.append(node)
+        node_id = node.get("parent")
+    lineage.reverse()
+    return lineage
+
+
+def _chatgpt_message_text(message: dict) -> str:
+    content = message.get("content")
+    if not isinstance(content, dict):
+        return ""
+    parts = content.get("parts")
+    if not isinstance(parts, list):
+        return ""
+    text_parts: list[str] = []
+    for part in parts:
+        if isinstance(part, str):
+            text_parts.append(part)
+        elif isinstance(part, dict) and isinstance(part.get("text"), str):
+            text_parts.append(part["text"])
+    return _bounded_import_text("\n".join(text_parts), label="imported message")
+
+
 def _normalize_imported_chat(raw: dict) -> list[dict]:
     """Given one conversation dict from either ChatGPT (conversations.json)
     or Claude export format, return a list of Mio-shaped messages."""
     # ChatGPT format: has mapping = {"uuid": {"message": {...}, "children": [...]}}
     if "mapping" in raw:
+        mapping = raw.get("mapping")
+        if not isinstance(mapping, dict):
+            raise ValueError("ChatGPT mapping must be an object")
         msgs: list[dict] = []
-        # Walk the tree in depth-first order
-        root_ids = [k for k, v in raw["mapping"].items() if not v.get("parent")]
-        def walk(node_id):
-            node = raw["mapping"].get(node_id)
-            if not node:
-                return
+        for node in _chatgpt_active_branch(raw, mapping):
             msg = node.get("message")
-            if msg and msg.get("content") and msg.get("author"):
-                role = msg["author"]["role"]
-                content = msg["content"]
-                text = ""
-                if content.get("content_type") == "text":
-                    text = "\n".join(content.get("parts", []) or [])
-                elif content.get("parts"):
-                    text = "\n".join(str(p) for p in content["parts"] if p)
-                if text.strip() and role in ("user", "assistant"):
-                    msgs.append({"role": role, "content": text})
-            for child in node.get("children", []):
-                walk(child)
-        for r in root_ids:
-            walk(r)
+            if not isinstance(msg, dict):
+                continue
+            author = msg.get("author")
+            role = author.get("role") if isinstance(author, dict) else None
+            text = _chatgpt_message_text(msg)
+            if text.strip() and role in ("user", "assistant"):
+                msgs.append({"role": role, "content": text})
         return msgs
     # Claude export format: {"chat_messages": [{"text": "...", "sender": "human|assistant"}]}
     if "chat_messages" in raw:
-        out = []
-        for m in raw.get("chat_messages", []):
-            role = "user" if m.get("sender") == "human" else "assistant"
-            out.append({"role": role, "content": m.get("text", "")})
+        messages = raw.get("chat_messages")
+        if not isinstance(messages, list) or len(messages) > _MAX_IMPORT_MESSAGES:
+            raise ValueError("Claude messages must be a list of at most 8,192 items")
+        out: list[dict] = []
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            sender = message.get("sender")
+            if sender not in ("human", "assistant"):
+                continue
+            role = "user" if sender == "human" else "assistant"
+            text = _bounded_import_text(message.get("text"), label="imported message")
+            if text.strip():
+                out.append({"role": role, "content": text})
         return out
     # Mio native: already {"messages": [...]}
     if "messages" in raw:
-        return [{"role": m.get("role"), "content": m.get("content", "")} for m in raw["messages"]]
+        messages = raw.get("messages")
+        if not isinstance(messages, list) or len(messages) > _MAX_IMPORT_MESSAGES:
+            raise ValueError("Mio messages must be a list of at most 8,192 items")
+        out = []
+        for message in messages:
+            if not isinstance(message, dict) or message.get("role") not in ("user", "assistant"):
+                continue
+            text = _bounded_import_text(message.get("content"), label="imported message")
+            if text.strip():
+                out.append({"role": message["role"], "content": text})
+        return out
     return []
 
 
@@ -1654,25 +2161,49 @@ async def import_chats(body: dict):
     if data is None:
         return {"error": "no data"}
     items = data if isinstance(data, list) else [data]
-    created = 0
+    if len(items) > _MAX_IMPORT_CONVERSATIONS:
+        raise HTTPException(status_code=413, detail="import exceeds the 1,000-conversation limit")
+    source = (body or {}).get("source", "auto")
+    if source not in ("auto", "chatgpt", "claude", "mio"):
+        raise HTTPException(status_code=400, detail="unknown chat import source")
+
+    prepared: list[dict] = []
     for raw in items:
         if not isinstance(raw, dict):
             continue
-        msgs = _normalize_imported_chat(raw)
+        try:
+            msgs = _normalize_imported_chat(raw)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if not msgs:
             continue
-        title = raw.get("title") or raw.get("name") or (msgs[0]["content"][:60] if msgs else "Imported")
+        text_bytes = sum(
+            len(message["content"].encode("utf-8")) + len(message["role"])
+            for message in msgs
+        )
+        if text_bytes > _MAX_IMPORT_SESSION_BYTES:
+            raise HTTPException(status_code=413, detail="imported conversation exceeds 16 MiB")
+        raw_title = raw.get("title") or raw.get("name") or msgs[0]["content"][:60]
+        title = _bounded_import_text(raw_title, label="imported title")[:200] or "Imported"
         sid = str(uuid.uuid4())[:8]
         payload = {
             "id": sid,
             "title": title,
             "messages": msgs,
             "updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "imported_from": (body or {}).get("source", "auto"),
+            "imported_from": source,
         }
-        (_sessions_dir / f"{sid}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2))
-        created += 1
-    return {"ok": True, "created": created}
+        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        if len(encoded) > _MAX_IMPORT_SESSION_BYTES:
+            raise HTTPException(status_code=413, detail="imported conversation exceeds 16 MiB")
+        prepared.append(payload)
+
+    # Validate the full batch before creating its first session so malformed
+    # later conversations cannot produce a surprising partial import.
+    for payload in prepared:
+        path = _json_storage_path(_sessions_dir, payload["id"], label="session")
+        atomic_write_json(path, payload)
+    return {"ok": True, "created": len(prepared)}
 
 
 # ---- Stats + attachments dashboards ----
@@ -1692,7 +2223,7 @@ async def stats_summary():
     skills_used: dict[str, int] = collections.defaultdict(int)
     artifact_types: dict[str, int] = collections.defaultdict(int)
     personas_used: dict[str, int] = collections.defaultdict(int)
-    for f in _sessions_dir.glob("*.json"):
+    for f in _regular_files_confined(_sessions_dir):
         try:
             meta = json.loads(f.read_text())
         except Exception:
@@ -1700,7 +2231,8 @@ async def stats_summary():
         sessions += 1
         day = (meta.get("updated") or "")[:10]
         msgs = meta.get("messages") or []
-        if day: by_day[day] += len(msgs)
+        if day:
+            by_day[day] += len(msgs)
         for m in msgs:
             total_msgs += 1
             if m.get("role") == "user":
@@ -1734,20 +2266,17 @@ async def stats_summary():
 async def list_attachments():
     """Walk ~/Downloads for likely Mio-generated files (by extension) and
     return them as an attachment library."""
-    dl = Path.home() / "Downloads"
-    if not dl.exists():
+    try:
+        downloads = _validated_downloads_dir()
+    except UnsafePathError:
         return {"files": []}
-    allowed = {".pdf", ".docx", ".xlsx", ".pptx", ".png", ".jpg", ".jpeg",
-               ".svg", ".csv", ".ics", ".md", ".sqlite", ".db", ".html", ".txt"}
     files = []
-    for f in dl.iterdir():
-        if not f.is_file():
-            continue
-        if f.suffix.lower() not in allowed:
+    for f in iter_confined_regular_files(downloads, recursive=False):
+        if f.suffix.lower() not in _ALLOWED_EXT:
             continue
         try:
-            st = f.stat()
-        except Exception:
+            st = f.stat(follow_symlinks=False)
+        except OSError:
             continue
         files.append({
             "name": f.name,
@@ -1762,7 +2291,7 @@ async def list_attachments():
 
 # ---- Chat templates ----
 
-_TEMPLATES_FILE = Path.home() / ".mio" / "chat-templates.json"
+_TEMPLATES_FILE = mio_home() / "chat-templates.json"
 
 
 def _load_chat_templates() -> list:
@@ -1775,7 +2304,7 @@ def _load_chat_templates() -> list:
 
 
 def _save_chat_templates(items: list) -> None:
-    _TEMPLATES_FILE.write_text(json.dumps(items, ensure_ascii=False, indent=2))
+    atomic_write_json(_TEMPLATES_FILE, items)
 
 
 @router.get("/api/chat-templates")
@@ -1824,19 +2353,25 @@ async def schedules_list():
 @router.post("/api/schedules")
 async def schedules_create(body: dict):
     from mio.webui import scheduler as _sched
-    return _sched.create_schedule(
-        name=(body or {}).get("name", ""),
-        prompt=(body or {}).get("prompt", ""),
-        cadence=(body or {}).get("cadence"),
-        tier=(body or {}).get("tier"),
-        enabled=(body or {}).get("enabled", True),
-    )
+    try:
+        return _sched.create_schedule(
+            name=(body or {}).get("name", ""),
+            prompt=(body or {}).get("prompt", ""),
+            cadence=(body or {}).get("cadence"),
+            tier=(body or {}).get("tier"),
+            enabled=(body or {}).get("enabled", True),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.patch("/api/schedules/{sched_id}")
 async def schedules_update(sched_id: str, body: dict):
     from mio.webui import scheduler as _sched
-    return _sched.update_schedule(sched_id, body or {})
+    try:
+        return _sched.update_schedule(sched_id, body or {})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.delete("/api/schedules/{sched_id}")
@@ -1850,18 +2385,21 @@ async def schedules_delete(sched_id: str):
 @router.get("/api/webhooks")
 async def webhooks_list():
     from mio.webui import webhooks as _wh
-    return {"webhooks": _wh.load_webhooks(), "recent": _wh.recent_runs()}
+    return {"webhooks": _wh.public_webhooks(), "recent": _wh.recent_runs()}
 
 
 @router.post("/api/webhooks")
 async def webhooks_create(body: dict):
     from mio.webui import webhooks as _wh
-    return _wh.create_webhook(
-        slug=(body or {}).get("slug", ""),
-        prompt=(body or {}).get("prompt", ""),
-        tier=(body or {}).get("tier"),
-        secret=(body or {}).get("secret"),
-    )
+    try:
+        return _wh.create_webhook(
+            slug=(body or {}).get("slug", ""),
+            prompt=(body or {}).get("prompt", ""),
+            tier=(body or {}).get("tier"),
+            secret=(body or {}).get("secret"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.delete("/api/webhooks/{slug}")
@@ -1871,38 +2409,48 @@ async def webhooks_delete(slug: str):
 
 
 @router.post("/api/webhook/{slug}")
-async def webhook_fire(slug: str, body: dict | None = None):
+async def webhook_fire(slug: str, request: Request, body: dict | None = None):
     """Fire a configured webhook. POST body is JSON; its keys substitute
-    into the prompt template's {{key}} slots. If the webhook has a
-    `secret`, expect it in the payload's `secret` field.
+    into the prompt template's {{key}} slots. Authentication always uses the
+    ``X-Mio-Webhook-Secret`` header; secrets in JSON are never accepted or
+    forwarded into the model prompt.
     """
     from mio.webui import webhooks as _wh
     hook = next((h for h in _wh.load_webhooks() if h["slug"] == slug), None)
     if not hook:
-        return {"error": "unknown webhook"}
+        raise HTTPException(status_code=404, detail="unknown webhook")
     payload = body or {}
-    if hook.get("secret") and payload.get("secret") != hook["secret"]:
-        return {"error": "bad secret"}
+    supplied_secret = request.headers.get("x-mio-webhook-secret")
+    if not _wh.verify_secret(hook, supplied_secret):
+        raise HTTPException(status_code=401, detail="invalid webhook secret")
+    # A field named ``secret`` is application data only in legacy callers.  Do
+    # not let it enter substitutions or persisted run logs.
+    payload = {key: value for key, value in payload.items() if key != "secret"}
     prompt = _wh.render_prompt(hook.get("prompt", ""), payload)
     if not _manager:
         return {"error": "no model loaded"}
-    loaded = _manager.loaded_tiers()
-    if not loaded:
-        return {"error": "no tiers loaded"}
-    tier = hook.get("tier") if hook.get("tier") in loaded else loaded[0]
-    engine = _manager.get_engine(tier)
-    out_parts: list[str] = []
+    manager = _manager
+
+    def _generate() -> tuple[str, str]:
+        with _gpu_lock:
+            loaded = manager.loaded_tiers()
+            if not loaded:
+                raise RuntimeError("no tiers loaded")
+            tier = hook.get("tier") if hook.get("tier") in loaded else loaded[0]
+            engine = manager.get_engine(tier)
+            text, _metrics = engine.generate(
+                [{"role": "user", "content": prompt}],
+                max_tokens=2048,
+            )
+        return tier, text
+
     try:
-        for chunk_text, _m in engine.generate_stream(
-            [{"role": "user", "content": prompt}],
-            max_tokens=2048,
-        ):
-            out_parts.append(chunk_text)
+        tier, output = await asyncio.to_thread(_generate)
     except Exception as e:
         result = {"error": f"{type(e).__name__}: {e}"}
         _wh.append_log(slug, payload, result)
         return result
-    result = {"ok": True, "slug": slug, "tier": tier, "output": "".join(out_parts)}
+    result = {"ok": True, "slug": slug, "tier": tier, "output": output}
     _wh.append_log(slug, payload, result)
     return result
 
@@ -1930,7 +2478,7 @@ async def serve_asset(path: str):
         return _R(status_code=400, content="unsupported extension")
     if not p.exists() or not p.is_file():
         return _R(status_code=404, content="not found")
-    mime = _mt.guess_type(str(p))[0] or "application/octet-stream"
+    mime = mimetypes.guess_type(str(p))[0] or "application/octet-stream"
     # Zero-cache while we're iterating fast. Switch back to a longer
     # max-age once the module set is stable.
     return _FR(str(p), media_type=mime, headers={
@@ -1945,40 +2493,77 @@ async def serve_cached_image(filename: str):
     (<sha1>.<ext>). Filenames are chosen by cache_image_to_disk, never
     by user input — but still validate to be safe.
     """
-    from fastapi.responses import FileResponse as _FR, Response as _R
+    from fastapi.responses import Response as _R
     if "/" in filename or "\\" in filename or ".." in filename:
         return _R(status_code=400, content="invalid filename")
     ext = ("." + filename.rsplit(".", 1)[-1]).lower() if "." in filename else ""
     if ext not in _IMG_EXTS:
         return _R(status_code=400, content="unsupported extension")
-    p = IMAGE_CACHE_DIR / filename
-    if not p.exists() or not p.is_file():
+    try:
+        p = confined_path(
+            IMAGE_CACHE_DIR,
+            filename,
+            must_exist=True,
+            allow_nested=False,
+        )
+        with open_binary_no_follow(p, max_bytes=8 * 1024 * 1024) as handle:
+            data = handle.read()
+    except (OSError, UnsafePathError):
         return _R(status_code=404, content="not cached")
-    mime = _mt.guess_type(filename)[0] or "image/jpeg"
+    mime = mimetypes.guess_type(filename)[0] or "image/jpeg"
+    headers = {"Cache-Control": "max-age=31536000, immutable", "X-Content-Type-Options": "nosniff"}
     # Long cache — filenames are content-addressed by URL hash, so they
     # never change meaning.
-    return _FR(str(p), media_type=mime, headers={"Cache-Control": "max-age=31536000, immutable"})
+    return _R(content=data, media_type=mime, headers=headers)
 
 
 @router.get("/files/{filename}")
 async def serve_generated_file(filename: str, download: int = 0):
-    if "/" in filename or "\\" in filename or ".." in filename:
+    if _safe_upload_name(filename) != filename or ".." in filename:
         return Response(status_code=400, content="invalid filename")
     ext = ("." + filename.rsplit(".", 1)[-1]).lower() if "." in filename else ""
     if ext not in _ALLOWED_EXT:
         return Response(status_code=400, content="unsupported file type")
-    from pathlib import Path as _Path
-    p = _Path.home() / "Downloads" / filename
-    if not p.exists() or not p.is_file():
+    try:
+        downloads = _validated_downloads_dir()
+        p = confined_path(
+            downloads,
+            filename,
+            must_exist=True,
+            allow_nested=False,
+        )
+        # Open once before sending headers so symlinks/special files fail as
+        # a normal 404 rather than midway through the response.
+        with open_binary_no_follow(p):
+            pass
+    except (OSError, UnsafePathError):
         return Response(status_code=404, content="not found")
     mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
     # ?download=1 → attachment (triggers Save dialog). Default is inline so
     # PDFs can render in an <iframe> rather than being downloaded.
     disposition = "attachment" if download else "inline"
-    return FileResponse(
-        str(p),
+    ascii_filename = filename.encode("ascii", errors="ignore").decode() or "download"
+    headers = {
+        "Content-Disposition": (
+            f'{disposition}; filename="{ascii_filename}"; filename*=UTF-8\'\'{quote(filename)}'
+        ),
+        "X-Content-Type-Options": "nosniff",
+    }
+    if ext in {".html", ".svg"}:
+        # HTML and SVG are active document formats when opened directly.
+        # Keep generated/uploaded previews scriptless and origin-isolated.
+        headers["Content-Security-Policy"] = (
+            "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'"
+        )
+    def stream_file():
+        with open_binary_no_follow(p) as handle:
+            while chunk := handle.read(_FILE_STREAM_CHUNK_BYTES):
+                yield chunk
+
+    return StreamingResponse(
+        stream_file(),
         media_type=mime,
-        headers={"Content-Disposition": f'{disposition}; filename="{filename}"'},
+        headers=headers,
     )
 
 
@@ -1986,7 +2571,20 @@ async def serve_generated_file(filename: str, download: int = 0):
 
 @router.websocket("/ws/chat")
 async def ws_chat(websocket: WebSocket):
-    await websocket.accept()
+    from mio.web_security import reject_untrusted_websocket
+
+    if await reject_untrusted_websocket(websocket):
+        return
+    offered_protocols = {
+        protocol.strip()
+        for protocol in websocket.headers.get("sec-websocket-protocol", "").split(",")
+        if protocol.strip()
+    }
+    # Browser clients offer the stable application protocol plus a separate
+    # CSRF-bearing protocol.  Echo only the stable value: selecting one of the
+    # offered protocols is required by stricter WebSocket implementations,
+    # while the secret never appears in the response headers.
+    await websocket.accept(subprotocol="mio-ui" if "mio-ui" in offered_protocols else None)
     try:
         while True:
             data = await websocket.receive_json()
@@ -2105,9 +2703,212 @@ def _auto_artifact_from_skill(skill: str, args: dict, result: dict) -> dict | No
     return None
 
 
+@dataclass(frozen=True, slots=True)
+class _WebUIRoundResult:
+    text: str
+    metrics: dict | None
+    completed: bool
+    failed: bool
+
+
+async def _stream_webui_round(
+    websocket: WebSocket,
+    *,
+    manager: Any,
+    tier: str,
+    gpu_lock: Any,
+    messages: list[dict],
+    max_tokens: int,
+    temperature: float,
+    tools: list[dict] | None,
+    is_first: bool,
+) -> _WebUIRoundResult:
+    """Bridge one synchronous MLX stream into a bounded WebSocket stream.
+
+    Generation owns the lifecycle GPU lock from engine lookup through source
+    closure, so a concurrent unload cannot invalidate weights mid-stream.
+    The producer blocks on a small asyncio queue and observes cancellation
+    while waiting for both queue capacity and the GPU lock.
+    """
+    from concurrent.futures import CancelledError as FutureCancelledError
+    from concurrent.futures import TimeoutError as FutureTimeoutError
+
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=_WS_STREAM_QUEUE_MAXSIZE)
+    sentinel = object()
+    error_tag = object()
+    cancelled = threading.Event()
+
+    def put_from_thread(item: object) -> bool:
+        if cancelled.is_set():
+            return False
+        put_coro = queue.put(item)
+        try:
+            future = asyncio.run_coroutine_threadsafe(put_coro, loop)
+        except RuntimeError:
+            put_coro.close()
+            return False
+        while not cancelled.is_set():
+            try:
+                future.result(timeout=0.1)
+                return True
+            except FutureTimeoutError:
+                continue
+            except (FutureCancelledError, RuntimeError):
+                return False
+        future.cancel()
+        return False
+
+    def produce() -> None:
+        acquired_gpu = False
+        source = None
+        try:
+            while not cancelled.is_set():
+                if gpu_lock.acquire(timeout=0.1):
+                    acquired_gpu = True
+                    break
+            if not acquired_gpu:
+                return
+
+            # Model load/unload uses this same outer lock. Resolve only now,
+            # never from a stale reference captured before the wait.
+            active_engine = manager.get_engine(tier)
+            if cancelled.is_set():
+                return
+            source = active_engine.generate_stream(
+                messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                tools=tools,
+            )
+            iterator = iter(source)
+            while not cancelled.is_set():
+                try:
+                    chunk_text, chunk_metrics = next(iterator)
+                except StopIteration:
+                    break
+                event: dict[str, Any] = {"type": "token", "text": chunk_text}
+                if chunk_metrics:
+                    event["metrics"] = {
+                        "prompt_tokens": chunk_metrics.prompt_tokens,
+                        "completion_tokens": chunk_metrics.completion_tokens,
+                        "prompt_tps": round(chunk_metrics.prompt_tps, 1),
+                        "generation_tps": round(chunk_metrics.generation_tps, 1),
+                        "acceptance_ratio": round(chunk_metrics.acceptance_ratio, 2),
+                    }
+                if not put_from_thread(event):
+                    break
+        except Exception as exc:
+            if not cancelled.is_set():
+                put_from_thread((error_tag, f"{type(exc).__name__}: {exc}"))
+        finally:
+            if source is not None:
+                close = getattr(source, "close", None)
+                if close is not None:
+                    try:
+                        close()
+                    except Exception:
+                        pass
+            if acquired_gpu:
+                gpu_lock.release()
+            if not cancelled.is_set():
+                put_from_thread(sentinel)
+            try:
+                from mio import server as server_module
+
+                server_module._unregister_stream_producer(threading.current_thread())
+            except Exception:
+                pass
+
+    producer_thread = threading.Thread(
+        target=produce,
+        name=f"mio-ui-{tier}-{uuid.uuid4().hex[:8]}",
+        daemon=True,
+    )
+    try:
+        from mio import server as server_module
+
+        server_module._register_stream_producer(producer_thread, cancelled)
+    except Exception:
+        pass
+    try:
+        producer_thread.start()
+    except BaseException:
+        cancelled.set()
+        try:
+            from mio import server as server_module
+
+            server_module._unregister_stream_producer(producer_thread)
+        except Exception:
+            pass
+        raise
+
+    async def send_json(payload: dict) -> None:
+        try:
+            await websocket.send_json(payload)
+        except BaseException:
+            cancelled.set()
+            raise
+
+    chunks: list[str] = []
+    metrics: dict | None = None
+    completed = False
+    failed = False
+    try:
+        if not is_first:
+            await send_json({"type": "followup_start"})
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=15.0)
+            except asyncio.TimeoutError:
+                await send_json({"type": "keepalive"})
+                continue
+            if item is sentinel:
+                completed = True
+                break
+            if (
+                isinstance(item, tuple)
+                and len(item) == 2
+                and item[0] is error_tag
+            ):
+                failed = True
+                await send_json({"type": "error", "message": item[1]})
+                break
+            if isinstance(item, dict):
+                text = item.get("text")
+                if text:
+                    chunks.append(text)
+                item_metrics = item.get("metrics")
+                if isinstance(item_metrics, dict):
+                    metrics = item_metrics
+                await send_json(item)
+    finally:
+        cancelled.set()
+        if producer_thread.is_alive():
+            await asyncio.to_thread(
+                producer_thread.join,
+                _WS_STREAM_JOIN_TIMEOUT_SECONDS,
+            )
+
+    return _WebUIRoundResult(
+        text="".join(chunks),
+        metrics=metrics,
+        completed=completed,
+        failed=failed,
+    )
+
+
 async def _handle_chat(websocket: WebSocket, data: dict):
     """Handle a chat request over WebSocket with streaming and skill execution."""
     import asyncio
+
+    try:
+        max_tokens = _validate_webui_max_tokens(
+            data["max_tokens"] if "max_tokens" in data else _max_tokens
+        )
+    except ValueError as exc:
+        await websocket.send_json({"type": "error", "message": str(exc)})
+        return
 
     messages = data.get("messages", [])
     # /remember <fact> — store in persistent memory without consulting the model
@@ -2127,31 +2928,43 @@ async def _handle_chat(websocket: WebSocket, data: dict):
                                            "metrics": {"completion_tokens": 0, "generation_tps": 0, "prompt_tokens": 0, "prompt_tps": 0, "acceptance_ratio": 0}})
                 return
     tier = data.get("tier")
-    max_tokens = data.get("max_tokens") or _max_tokens
     system_prompt = data.get("system_prompt") or _system_prompt
-    caveman = data.get("caveman") or _caveman_level
+    prompt_policy = _resolve_chat_prompt_policy(data)
     use_skills = data.get("skills", True)
+    requested_skill_grants = data.get("skill_grants", [])
+    if not isinstance(requested_skill_grants, list):
+        requested_skill_grants = []
+    requested_skill_grants = [str(name) for name in requested_skill_grants[:32]]
     temperature = data.get("temperature")
     if temperature is None:
         temperature = _temperature
 
-    if not _manager:
+    manager = _manager
+    if manager is None:
         await websocket.send_json({"type": "error", "message": "No model loaded"})
         return
 
-    # Resolve engine
-    loaded = _manager.loaded_tiers()
+    # Select a tier, but do not retain an engine reference here. The stream
+    # producer resolves it after acquiring the lifecycle GPU lock.
+    loaded = manager.loaded_tiers()
     if not loaded:
         await websocket.send_json({"type": "error", "message": "No tiers loaded"})
         return
     tier = tier if tier in loaded else loaded[0]
-    engine = _manager.get_engine(tier)
 
     # Inject skills as tools
     tools = None
     if use_skills:
-        from mio.webui.skills import get_tools_spec
-        tools = get_tools_spec()
+        from mio.webui.skills import SKILLS, get_tools_spec
+        from mio.web_security import webui_model_skill_allowed
+
+        tools = get_tools_spec(
+            allowed_names={
+                name
+                for name in SKILLS
+                if webui_model_skill_allowed(name, requested_skill_grants)
+            }
+        )
 
     # Build the effective system prompt. We always inject today's date and
     # (when tools are enabled) a short browsing protocol, then append any
@@ -2415,20 +3228,48 @@ async def _handle_chat(websocket: WebSocket, data: dict):
                 if proj.get("system_prompt"):
                     base_sys += "\n\nProject '" + proj.get("name", "") + "' context:\n" + proj["system_prompt"]
                 # Attach project files as extracted text (PDFs) or raw
-                for fname in proj.get("files", []):
-                    fpath = Path.home() / "Downloads" / fname
-                    if not fpath.exists():
+                try:
+                    downloads = _validated_downloads_dir()
+                except UnsafePathError:
+                    downloads = None
+                for fname in proj.get("files", [])[:64]:
+                    if (
+                        downloads is None
+                        or not isinstance(fname, str)
+                        or _safe_upload_name(fname) != fname
+                    ):
+                        continue
+                    try:
+                        fpath = confined_path(
+                            downloads,
+                            fname,
+                            must_exist=True,
+                            allow_nested=False,
+                        )
+                    except UnsafePathError:
                         continue
                     try:
                         if fname.lower().endswith(".pdf"):
                             import pdfplumber
-                            with pdfplumber.open(str(fpath)) as pdf:
-                                text = "\n\n".join((p.extract_text() or "") for p in pdf.pages[:20])
+                            with open_binary_no_follow(
+                                fpath,
+                                max_bytes=_MAX_PROJECT_FILE_BYTES,
+                            ) as source:
+                                with pdfplumber.open(source) as pdf:
+                                    text = "\n\n".join(
+                                        (page.extract_text() or "")
+                                        for page in pdf.pages[:20]
+                                    )
                         else:
-                            text = fpath.read_text(errors="replace")
+                            text = read_text_no_follow(
+                                fpath,
+                                max_bytes=_MAX_PROJECT_FILE_BYTES,
+                            )
                         if text.strip():
                             base_sys += f"\n\n=== Project file: {fname} ===\n{text[:8000]}\n=== end {fname} ==="
                     except Exception:
+                        # Project attachments are optional context; malformed
+                        # third-party PDF/text inputs must not abort the chat.
                         pass
                 break
     # Style preset
@@ -2453,23 +3294,14 @@ async def _handle_chat(websocket: WebSocket, data: dict):
     else:
         messages = [{"role": "system", "content": base_sys}] + messages
 
-    # Inject caveman
-    if caveman and caveman != "off":
-        from mio.agent import CAVEMAN_LEVELS
-        ctext = CAVEMAN_LEVELS.get(caveman, "")
-        if ctext:
-            sys_msg = next((m for m in messages if m.get("role") == "system"), None)
-            if sys_msg:
-                sys_msg["content"] = (sys_msg["content"] or "") + "\n\n" + ctext
-            else:
-                messages = [{"role": "system", "content": ctext}] + messages
+    messages = apply_prompt_policy(messages, prompt_policy)
 
     # Snapshot the final system prompt for /api/debug/last-prompt
     try:
         global _last_system_prompt
         _sys = next((m.get("content") for m in messages if m.get("role") == "system"), None)
         _last_system_prompt = (
-            f"# caveman={caveman} · style={style!r} · project={project_id!r} · "
+            f"# prompt={prompt_policy.label} · style={style!r} · project={project_id!r} · "
             f"skills={use_skills}\n\n{_sys or '(no system message)'}"
         )
     except Exception:
@@ -2477,63 +3309,6 @@ async def _handle_chat(websocket: WebSocket, data: dict):
 
     # Send start event
     await websocket.send_json({"type": "start", "tier": tier})
-
-    loop = asyncio.get_event_loop()
-    SENTINEL = object()
-
-    async def _stream_one_round(round_messages: list[dict], is_first: bool) -> tuple[str, dict | None]:
-        """Run one model generation round, forwarding tokens to the WS.
-        Returns (full_text, final_metrics).
-        """
-        q: asyncio.Queue = asyncio.Queue()
-
-        def _produce():
-            try:
-                with _gpu_lock:
-                    for chunk_text, chunk_metrics in engine.generate_stream(
-                        round_messages, max_tokens=max_tokens,
-                        temperature=temperature, tools=tools,
-                    ):
-                        event = {"type": "token", "text": chunk_text}
-                        if chunk_metrics:
-                            event["metrics"] = {
-                                "prompt_tokens": chunk_metrics.prompt_tokens,
-                                "completion_tokens": chunk_metrics.completion_tokens,
-                                "prompt_tps": round(chunk_metrics.prompt_tps, 1),
-                                "generation_tps": round(chunk_metrics.generation_tps, 1),
-                                "acceptance_ratio": round(chunk_metrics.acceptance_ratio, 2),
-                            }
-                        loop.call_soon_threadsafe(q.put_nowait, event)
-            except Exception as e:
-                loop.call_soon_threadsafe(q.put_nowait, {"type": "error", "message": str(e)})
-            finally:
-                loop.call_soon_threadsafe(q.put_nowait, SENTINEL)
-
-        threading.Thread(target=_produce, daemon=True).start()
-
-        if not is_first:
-            await websocket.send_json({"type": "followup_start"})
-
-        chunks: list[str] = []
-        metrics: dict | None = None
-        while True:
-            try:
-                item = await asyncio.wait_for(q.get(), timeout=15.0)
-            except asyncio.TimeoutError:
-                await websocket.send_json({"type": "keepalive"})
-                continue
-            if item is SENTINEL:
-                break
-            if isinstance(item, dict):
-                if item.get("type") == "error":
-                    await websocket.send_json(item)
-                    break
-                if item.get("text"):
-                    chunks.append(item["text"])
-                if item.get("metrics"):
-                    metrics = item["metrics"]
-                await websocket.send_json(item)
-        return "".join(chunks), metrics
 
     def _summarize_tool_results(tool_results: list[dict]) -> str:
         """Render tool results as plain text the model can consume on the
@@ -2676,9 +3451,23 @@ async def _handle_chat(websocket: WebSocket, data: dict):
     turn_start = time.time()
     turn_text_parts: list[str] = []
     for round_idx in range(MAX_ROUNDS):
-        full_text_str, final_metrics = await _stream_one_round(
-            current_messages, is_first=(round_idx == 0)
+        round_result = await _stream_webui_round(
+            websocket,
+            manager=manager,
+            tier=tier,
+            gpu_lock=_gpu_lock,
+            messages=current_messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            tools=tools,
+            is_first=(round_idx == 0),
         )
+        if round_result.failed or not round_result.completed:
+            # The round already emitted one error frame when appropriate.
+            # Never follow it with a misleading `done` success event.
+            return
+        full_text_str = round_result.text
+        final_metrics = round_result.metrics
         # Strip any model-emitted artifact whose contents should only
         # come from server-side auto_artifact events (i.e. real tool
         # results). These types are:
@@ -2720,7 +3509,22 @@ async def _handle_chat(websocket: WebSocket, data: dict):
             await websocket.send_json({
                 "type": "skill_start", "skill": fn_name, "args": fn_args,
             })
-            result = execute_skill(fn_name, fn_args)
+            from mio.web_security import webui_model_skill_allowed, webui_skill_risk
+
+            if not webui_model_skill_allowed(fn_name, requested_skill_grants):
+                result = {
+                    "error": "WebUI model tool denied by skill policy",
+                    "skill": fn_name,
+                    "risk": webui_skill_risk(fn_name),
+                }
+            else:
+                from mio.web_security import model_request_skill_grants
+
+                def execute_with_request_grants():
+                    with model_request_skill_grants(requested_skill_grants):
+                        return execute_skill(fn_name, fn_args)
+
+                result = await asyncio.to_thread(execute_with_request_grants)
             tool_results.append({"skill": fn_name, "args": fn_args, "result": result})
             await websocket.send_json({
                 "type": "skill_result", "skill": fn_name, "result": result,

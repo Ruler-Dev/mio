@@ -9,11 +9,23 @@ from types import SimpleNamespace
 
 import huggingface_hub
 
-from mio.config import MioConfig, TierConfig, load_config, save_config
+from mio.config import MioConfig, TierConfig, default_config_path, load_config, save_config
 from mio.configure import _estimate_kv_cache_gb, _resolve_tq_selection
 from mio.main import _apply_tq4_flag, _cmd_serve
 from mio.model_check import _check_hf_cache, _model_status
 from mio.models.registry import DEFAULT_TIERS
+
+
+def test_default_server_is_loopback_only():
+    assert MioConfig.default().host == "127.0.0.1"
+
+
+def test_config_path_and_directory_honor_mio_home(monkeypatch, tmp_path):
+    home = tmp_path / "custom-mio-home"
+    monkeypatch.setenv("MIO_HOME", str(home))
+
+    assert default_config_path() == home / "config.json"
+    assert MioConfig.default().config_dir == home
 
 
 def test_default_configs_do_not_share_mutable_tiers():
@@ -145,6 +157,8 @@ def test_serve_uses_persisted_values_when_cli_does_not_override(tmp_path, monkey
     assert loaded.active_tiers == ["small"]
     assert loaded.tiers["small"].context_window == 32768
     assert captured["server"]["port"] == 9193
+    assert captured["server"]["unsafe_remote_bind"] is False
+    assert captured["server"]["replace_existing"] is False
 
 
 def test_tq4_flag_disables_polarquant():

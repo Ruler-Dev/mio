@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from collections import deque
-from dataclasses import asdict, dataclass, field
-from typing import Any
+from dataclasses import dataclass
 
 from fastapi import WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
@@ -85,6 +83,10 @@ collector = MetricsCollector()
 
 async def websocket_metrics(websocket: WebSocket) -> None:
     """WebSocket handler for live metrics streaming."""
+    from mio.web_security import reject_untrusted_websocket
+
+    if await reject_untrusted_websocket(websocket):
+        return
     await websocket.accept()
     collector.subscribe(websocket)
     try:
@@ -149,9 +151,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
 <script>
 let ws;
+function csrfToken() {
+  const prefix = 'mio_csrf=';
+  for (const part of document.cookie.split(';')) {
+    const item = part.trim();
+    if (item.startsWith(prefix)) return decodeURIComponent(item.slice(prefix.length));
+  }
+  return '';
+}
 function connect() {
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(`${protocol}//${location.host}/ws/metrics`);
+  const token = csrfToken();
+  const protocols = token ? ['mio-ui', 'mio-csrf.' + token] : ['mio-ui'];
+  ws = new WebSocket(`${protocol}//${location.host}/ws/metrics`, protocols);
   ws.onopen = () => { document.getElementById('status').textContent = 'Connected'; document.getElementById('status').className = ''; };
   ws.onclose = () => { document.getElementById('status').textContent = 'Disconnected'; document.getElementById('status').className = 'offline'; setTimeout(connect, 3000); };
   ws.onmessage = (e) => {

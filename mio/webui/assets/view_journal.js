@@ -88,7 +88,7 @@
   // Landing-on-launch: if the user has the toggle on and the view
   // router is restoring to Chat, pivot them to the journal on first
   // open of the day (per localStorage).
-  document.addEventListener("DOMContentLoaded", () => {
+  function maybeOpenJournal() {
     const on = localStorage.getItem(LANDING_KEY) === "1";
     if (!on) return;
     const lastOpen = localStorage.getItem("mio.journal.lastOpenDay");
@@ -99,7 +99,12 @@
     setTimeout(() => {
       if (window.Mio?.views?.switch) window.Mio.views.switch("journal");
     }, 200);
-  });
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", maybeOpenJournal, { once: true });
+  } else {
+    maybeOpenJournal();
+  }
 
   function escapeHtml(s) {
     return String(s ?? "").replace(/[&<>"']/g, (c) =>

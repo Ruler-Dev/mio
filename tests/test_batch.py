@@ -13,15 +13,41 @@ from mio.engine import GenerationMetrics, MioEngine
 
 class _FakeEngine:
     def __init__(self):
-        self.tier_config = SimpleNamespace(temperature=0.6, max_output_tokens=32)
+        self.tier_config = SimpleNamespace(
+            temperature=0.6,
+            top_p=0.95,
+            top_k=20,
+            max_output_tokens=32,
+        )
         self.calls = []
 
-    def generate_batch(self, messages, *, max_tokens, temperature):
-        self.calls.append((messages, max_tokens, temperature))
+    def generate_batch(
+        self,
+        messages,
+        *,
+        max_tokens,
+        temperature,
+        top_p,
+        top_k,
+        seed,
+        stop,
+    ):
+        self.calls.append((messages, max_tokens, temperature, top_p, top_k, seed, stop))
         return [
             (
                 request[-1]["content"] + "!",
-                GenerationMetrics(prompt_tokens=3, completion_tokens=1, generation_tps=42.0),
+                GenerationMetrics(
+                    prompt_tokens=3,
+                    completion_tokens=1,
+                    generation_tps=42.0,
+                    metrics_scope="batch" if len(messages) > 1 else "request",
+                    batch_size=len(messages),
+                    fallback_reason=(
+                        "stochastic_sampling_requires_target_only"
+                        if temperature > 0
+                        else None
+                    ),
+                ),
             )
             for request in messages
         ]
@@ -53,10 +79,16 @@ def test_process_batch_groups_by_sampler_and_preserves_input_order():
     assert [result.index for result in results] == [0, 1, 2]
     assert [result.text for result in results] == ["one!", "two!", "three!"]
     assert results[0].backend == "mlx-continuous"
-    assert results[1].backend == "dflash-latency"
+    assert results[0].metrics_scope == "batch"
+    assert results[0].generation_tps is None
+    assert results[0].batch_generation_tps == 42.0
+    assert results[0].batch_size == 2
+    assert results[1].backend == "mlx-target-sampling"
+    assert results[1].metrics_scope == "request"
+    assert results[1].generation_tps == 42.0
     assert len(engine.calls) == 2
     assert [message[-1]["content"] for message in engine.calls[0][0]] == ["one", "three"]
-    assert engine.calls[0][2] == 0.6
+    assert engine.calls[0][2] == 0.0
     assert engine.calls[1][2] == 0.2
 
 
@@ -100,6 +132,10 @@ def test_generate_batch_uses_mlx_batch_stats(monkeypatch):
         [[{"role": "user", "content": "a"}], [{"role": "user", "content": "b"}]],
         max_tokens=[5, 9],
         temperature=0.4,
+        top_p=0.8,
+        top_k=7,
+        seed=None,
+        stop=[["END"], None],
         prefill_batch_size=2,
         completion_batch_size=3,
     )
@@ -111,5 +147,46 @@ def test_generate_batch_uses_mlx_batch_stats(monkeypatch):
     assert [metrics.prompt_tokens for _, metrics in results] == [3, 2]
     assert [metrics.completion_tokens for _, metrics in results] == [2, 1]
     assert results[0][1].generation_tps == 40.0
+    assert results[0][1].metrics_scope == "batch"
+    assert results[0][1].batch_size == 2
     assert results[0][1].peak_memory_gb == 1.25
     assert engine.last_metrics is results[-1][1]
+
+
+def test_seeded_sampling_matches_independent_singleton_calls(monkeypatch):
+    tier = TierConfig(
+        name="test",
+        target_model="unused",
+        draft_model="unused",
+        context_window=4096,
+        max_output_tokens=64,
+        temperature=0.6,
+    )
+    engine = MioEngine(tier)
+    engine._loaded = True
+    calls: list[tuple[str, int | None, int | None]] = []
+
+    def fake_generate(messages, *, max_tokens, seed, **_kwargs):
+        text = messages[-1]["content"]
+        calls.append((text, max_tokens, seed))
+        return f"{text}:{seed}", GenerationMetrics(completion_tokens=1)
+
+    monkeypatch.setattr(engine, "generate", fake_generate)
+    monkeypatch.setattr(
+        mlx_lm,
+        "batch_generate",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("seeded sampling must not share the batch RNG")
+        ),
+    )
+
+    results = engine.generate_batch(
+        [[{"role": "user", "content": "a"}], [{"role": "user", "content": "b"}]],
+        max_tokens=[5, 9],
+        temperature=0.4,
+        seed=42,
+        stop=[None, None],
+    )
+
+    assert [text for text, _metrics in results] == ["a:42", "b:42"]
+    assert calls == [("a", 5, 42), ("b", 9, 42)]

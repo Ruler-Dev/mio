@@ -17,7 +17,6 @@ import time
 from dataclasses import dataclass
 
 import mlx.core as mx
-import mlx.nn as nn
 from mlx_lm.models import cache as cache_mod
 
 from mio.config import MioConfig

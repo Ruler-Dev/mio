@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from mio.config import TierConfig, MioConfig
 from mio.models.registry import (
     DEFAULT_TIERS, KNOWN_MODELS, SUPPORTED_ADAPTERS,
@@ -49,7 +47,7 @@ def test_tier_config_defaults():
     assert tier.tq_use_rotation is True
     assert tier.tq_use_normalization is True
     assert tier.tq_use_qjl is False
-    assert tier.temperature == 0.6  # Qwen3.5/3.6 recommended for coding
+    assert tier.temperature == 0.0  # preserves the exact DFlash fast path
 
 
 def test_config_default():

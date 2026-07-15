@@ -3,20 +3,21 @@
 All state lives under ~/.mio/ so it survives restarts and isn't tied
 to any one chat session.
 """
+
 from __future__ import annotations
 
 import csv as _csv
 import datetime as _dt
 import io
 import json
-import re
 import sqlite3
 import statistics
 import time
-from pathlib import Path
 from typing import Any
 
-PIMIO_DIR = Path.home() / ".mio"
+from mio.paths import mio_home
+
+PIMIO_DIR = mio_home()
 PIMIO_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -50,7 +51,7 @@ def todo_add(text: str, list_name: str = "inbox", priority: int = 2, due: str = 
     cur = c.cursor()
     cur.execute(
         "INSERT INTO todos (text, list_name, priority, due, created) VALUES (?, ?, ?, ?, ?)",
-        (text, list_name or "inbox", int(priority) if priority else 2, due or "", int(time.time()))
+        (text, list_name or "inbox", int(priority) if priority else 2, due or "", int(time.time())),
     )
     new_id = cur.lastrowid
     c.commit()
@@ -75,8 +76,16 @@ def todo_list(include_done: bool = False, list_name: str | None = None, limit: i
     return {
         "skill": "todo_list",
         "todos": [
-            {"id": r[0], "text": r[1], "list": r[2], "priority": r[3],
-             "due": r[4], "created": r[5], "done": bool(r[6]), "done_at": r[7]}
+            {
+                "id": r[0],
+                "text": r[1],
+                "list": r[2],
+                "priority": r[3],
+                "due": r[4],
+                "created": r[5],
+                "done": bool(r[6]),
+                "done_at": r[7],
+            }
             for r in rows
         ],
     }
@@ -85,8 +94,10 @@ def todo_list(include_done: bool = False, list_name: str | None = None, limit: i
 def todo_done(todo_id: int, done: bool = True) -> dict:
     c = _todo_conn()
     cur = c.cursor()
-    cur.execute("UPDATE todos SET done = ?, done_at = ? WHERE id = ?",
-                (1 if done else 0, int(time.time()) if done else None, int(todo_id)))
+    cur.execute(
+        "UPDATE todos SET done = ?, done_at = ? WHERE id = ?",
+        (1 if done else 0, int(time.time()) if done else None, int(todo_id)),
+    )
     c.commit()
     changed = cur.rowcount
     c.close()
@@ -131,8 +142,9 @@ def _habit_conn() -> sqlite3.Connection:
 def habit_add(name: str, cadence: str = "daily") -> dict:
     c = _habit_conn()
     cur = c.cursor()
-    cur.execute("INSERT OR IGNORE INTO habits (name, cadence, created) VALUES (?, ?, ?)",
-                (name, cadence, int(time.time())))
+    cur.execute(
+        "INSERT OR IGNORE INTO habits (name, cadence, created) VALUES (?, ?, ?)", (name, cadence, int(time.time()))
+    )
     c.commit()
     cur.execute("SELECT id FROM habits WHERE name = ?", (name,))
     row = cur.fetchone()
@@ -151,8 +163,9 @@ def habit_checkin(habit_id: int | None = None, name: str | None = None, note: st
         c.close()
         return {"skill": "habit_checkin", "error": "unknown habit"}
     day = _dt.date.today().isoformat()
-    cur.execute("INSERT OR IGNORE INTO habit_checkins (habit_id, day, note) VALUES (?, ?, ?)",
-                (int(habit_id), day, note or ""))
+    cur.execute(
+        "INSERT OR IGNORE INTO habit_checkins (habit_id, day, note) VALUES (?, ?, ?)", (int(habit_id), day, note or "")
+    )
     c.commit()
     c.close()
     return {"skill": "habit_checkin", "ok": True, "habit_id": habit_id, "day": day}
@@ -186,12 +199,16 @@ def habit_list() -> dict:
                 expect = expect - _dt.timedelta(days=1)
             else:
                 break
-        result.append({
-            "id": hid, "name": name, "cadence": cadence,
-            "checkins": checkins or 0,
-            "last_checkin": last,
-            "streak_days": streak,
-        })
+        result.append(
+            {
+                "id": hid,
+                "name": name,
+                "cadence": cadence,
+                "checkins": checkins or 0,
+                "last_checkin": last,
+                "streak_days": streak,
+            }
+        )
     c.close()
     return {"skill": "habit_list", "habits": result}
 
@@ -210,8 +227,10 @@ def journal_append(entry: str, mood: str = "", tags: list[str] | None = None) ->
     path = _JOURNAL_DIR / f"{day}.md"
     stamp = _dt.datetime.now().strftime("%H:%M:%S")
     header = f"\n\n## {stamp}"
-    if mood: header += f"  _{mood}_"
-    if tags: header += f"  `#{' #'.join(tags)}`"
+    if mood:
+        header += f"  _{mood}_"
+    if tags:
+        header += f"  `#{' #'.join(tags)}`"
     block = header + "\n\n" + entry + "\n"
     with path.open("a", encoding="utf-8") as f:
         if path.stat().st_size == 0:
@@ -241,7 +260,7 @@ def journal_search(query: str, limit: int = 20) -> dict:
         if ql in text.lower():
             # Grab a 200-char snippet around the match
             i = text.lower().find(ql)
-            snippet = text[max(0, i - 100): i + 200]
+            snippet = text[max(0, i - 100) : i + 200]
             hits.append({"day": f.stem, "snippet": snippet.strip()})
         if len(hits) >= limit:
             break
@@ -308,7 +327,8 @@ def analyze_csv(csv_text: str, delimiter: str = ",") -> dict:
             try:
                 f = float(v)
                 num_vals.append(f)
-                if f != int(f): is_int = False
+                if f != int(f):
+                    is_int = False
             except Exception:
                 is_int = is_float = False
             if is_date:
@@ -316,7 +336,11 @@ def analyze_csv(csv_text: str, delimiter: str = ",") -> dict:
                     _dt.datetime.fromisoformat(v)
                 except Exception:
                     is_date = False
-        guessed = "integer" if (is_int and num_vals) else ("float" if (is_float and num_vals) else ("datetime" if is_date and non_null else "text"))
+        guessed = (
+            "integer"
+            if (is_int and num_vals)
+            else ("float" if (is_float and num_vals) else ("datetime" if is_date and non_null else "text"))
+        )
         entry = {
             "name": name,
             "type": guessed,

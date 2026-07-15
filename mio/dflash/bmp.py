@@ -150,7 +150,6 @@ def build_bmp_batch(
                 p.append(p[-1] if p else bonus_token)
         padded.append(p[:L_tail])
 
-    K = len(padded)
     rows = [[bonus_token] + p for p in padded]
     batch_ids = mx.array(rows, dtype=mx.uint32)
     return batch_ids, padded

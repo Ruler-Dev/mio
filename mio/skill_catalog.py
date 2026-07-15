@@ -24,11 +24,13 @@ import tempfile
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
 import yaml
+
+from mio.paths import mio_home
 
 
 MANIFEST_NAME = ".mio-skills.json"
@@ -172,15 +174,6 @@ class InstallReport:
             "aliases": dict(self.aliases),
             "sources": dict(self.sources),
         }
-
-
-def mio_home(path: str | os.PathLike[str] | None = None) -> Path:
-    """Return Mio's application home, honoring ``MIO_HOME``."""
-
-    raw = path if path is not None else os.environ.get("MIO_HOME")
-    if raw is None:
-        return Path.home() / ".mio"
-    return Path(raw).expanduser().absolute()
 
 
 def skills_root(home: str | os.PathLike[str] | None = None) -> Path:
@@ -510,7 +503,7 @@ class MioSkillCatalog:
             else:
                 items.append(replacement)
             manifest["skills"] = sorted(items, key=lambda item: str(item.get("installed_name", "")))
-            manifest["updated_at"] = datetime.now(UTC).isoformat()
+            manifest["updated_at"] = datetime.now(timezone.utc).isoformat()
             _atomic_json_write(_manifest_path(self.root), manifest)
         return self.resolve(record.installed_name)
 
@@ -878,7 +871,7 @@ def install_skill_sources_from_checkouts(
 
             manifest = {
                 "schema_version": MANIFEST_SCHEMA,
-                "generated_at": datetime.now(UTC).isoformat(),
+                "generated_at": datetime.now(timezone.utc).isoformat(),
                 "sources": sorted(source_rows, key=lambda item: str(item.get("source_id", ""))),
                 "skills": sorted(records, key=lambda item: str(item.get("installed_name", ""))),
             }

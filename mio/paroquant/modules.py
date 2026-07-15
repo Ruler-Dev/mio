@@ -27,7 +27,6 @@ def _precompute_scatter_orders(
     krot = int(pairs.shape[0])
     dim = int(pairs.shape[1])
     num_groups = dim // group_size
-    half_gs = group_size // 2
     p_np = np.array(pairs, copy=False).astype(np.int32)
     offsets = np.arange(num_groups).reshape(-1, 1) * group_size  # (num_groups, 1)
 
@@ -197,7 +196,6 @@ class _CachedRotation:
         sin = mx.array(np.sin(theta_np))
         packed_pairs = _pack_pairs(pairs, self._rot_group_size)
         scales_flat = mx.array(np.array(getattr(self, f"{pfx}channel_scales")).reshape(-1))
-        scatter_tables = _precompute_scatter_orders(pairs, self._rot_group_size)
         tag = f"_{prefix}" if prefix else ""
         setattr(self, f"_rot{tag}_dim", dim)
         setattr(self, f"_rot{tag}_krot", krot)

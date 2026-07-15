@@ -18,7 +18,6 @@ on which the tree hangs.
 from __future__ import annotations
 
 import heapq
-import math
 from dataclasses import dataclass
 
 

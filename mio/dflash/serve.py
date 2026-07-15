@@ -15,7 +15,6 @@ from typing import Any, Optional
 from mio.dflash.generate import (
     DRAFT_REGISTRY,
     decode_token,
-    generation_tps_from_summary,
     get_stop_token_ids,
     load_runtime_components,
 )

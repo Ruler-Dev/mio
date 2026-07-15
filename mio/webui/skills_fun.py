@@ -1,10 +1,10 @@
 """Fun / utility skills — random, dice, names, wordle helper, wikipedia."""
+
 from __future__ import annotations
 
 import json
 import random
 import re
-from typing import Any
 
 
 # ============================================================
@@ -21,8 +21,10 @@ def roll_dice(notation: str = "1d6") -> dict:
         return {"skill": "roll_dice", "error": "too many / too large"}
     rolls = [random.randint(1, sides) for _ in range(n)]
     total = sum(rolls)
-    if mod_sign == "+": total += mod_val
-    elif mod_sign == "-": total -= mod_val
+    if mod_sign == "+":
+        total += mod_val
+    elif mod_sign == "-":
+        total -= mod_val
     return {
         "skill": "roll_dice",
         "notation": notation,
@@ -55,32 +57,143 @@ def pick_random(items: list, count: int = 1) -> dict:
 # Name generator
 # ============================================================
 _ADJECTIVES = [
-    "swift", "bright", "quiet", "bold", "clever", "merry", "silent", "wild",
-    "sharp", "velvet", "iron", "crystal", "amber", "obsidian", "golden",
-    "sapphire", "emerald", "radiant", "dusky", "hollow", "northern", "solar",
-    "lunar", "arctic", "midnight", "dawn", "morning", "dusty", "wandering",
-    "fable", "fabled", "hidden", "quiet", "pale", "copper", "gilded",
+    "swift",
+    "bright",
+    "quiet",
+    "bold",
+    "clever",
+    "merry",
+    "silent",
+    "wild",
+    "sharp",
+    "velvet",
+    "iron",
+    "crystal",
+    "amber",
+    "obsidian",
+    "golden",
+    "sapphire",
+    "emerald",
+    "radiant",
+    "dusky",
+    "hollow",
+    "northern",
+    "solar",
+    "lunar",
+    "arctic",
+    "midnight",
+    "dawn",
+    "morning",
+    "dusty",
+    "wandering",
+    "fable",
+    "fabled",
+    "hidden",
+    "quiet",
+    "pale",
+    "copper",
+    "gilded",
 ]
 _NATURE = [
-    "river", "mountain", "forest", "meadow", "ocean", "storm", "willow",
-    "oak", "pine", "raven", "owl", "fox", "wolf", "bear", "heron", "lark",
-    "tide", "ember", "cinder", "mist", "dusk", "feather", "petal", "grove",
-    "crag", "harbor", "thicket", "vale", "fjord", "atoll", "cairn",
+    "river",
+    "mountain",
+    "forest",
+    "meadow",
+    "ocean",
+    "storm",
+    "willow",
+    "oak",
+    "pine",
+    "raven",
+    "owl",
+    "fox",
+    "wolf",
+    "bear",
+    "heron",
+    "lark",
+    "tide",
+    "ember",
+    "cinder",
+    "mist",
+    "dusk",
+    "feather",
+    "petal",
+    "grove",
+    "crag",
+    "harbor",
+    "thicket",
+    "vale",
+    "fjord",
+    "atoll",
+    "cairn",
 ]
 _TECH = [
-    "bit", "byte", "fork", "link", "node", "proxy", "cache", "cluster",
-    "shard", "stream", "relay", "beacon", "atlas", "pulse", "signal",
-    "vertex", "orbit", "lambda", "kernel", "matrix",
+    "bit",
+    "byte",
+    "fork",
+    "link",
+    "node",
+    "proxy",
+    "cache",
+    "cluster",
+    "shard",
+    "stream",
+    "relay",
+    "beacon",
+    "atlas",
+    "pulse",
+    "signal",
+    "vertex",
+    "orbit",
+    "lambda",
+    "kernel",
+    "matrix",
 ]
 _HUMAN_FIRST = [
-    "Alex", "Jordan", "Sam", "Riley", "Morgan", "Cameron", "Quinn", "Avery",
-    "Skyler", "Rowan", "Finley", "Emerson", "Hayden", "Dakota", "Sage",
-    "River", "Kai", "Nova", "Phoenix", "Wren", "Ashe",
+    "Alex",
+    "Jordan",
+    "Sam",
+    "Riley",
+    "Morgan",
+    "Cameron",
+    "Quinn",
+    "Avery",
+    "Skyler",
+    "Rowan",
+    "Finley",
+    "Emerson",
+    "Hayden",
+    "Dakota",
+    "Sage",
+    "River",
+    "Kai",
+    "Nova",
+    "Phoenix",
+    "Wren",
+    "Ashe",
 ]
 _HUMAN_LAST = [
-    "Reyes", "Okafor", "Patel", "Chen", "Tanaka", "Silva", "Nakamura",
-    "Hoffman", "Kouri", "Abiola", "Vasquez", "Dunn", "Larsen", "Kirby",
-    "Ngata", "Ibarra", "Sokolov", "Zheng", "Kaur", "Moreau", "Park",
+    "Reyes",
+    "Okafor",
+    "Patel",
+    "Chen",
+    "Tanaka",
+    "Silva",
+    "Nakamura",
+    "Hoffman",
+    "Kouri",
+    "Abiola",
+    "Vasquez",
+    "Dunn",
+    "Larsen",
+    "Kirby",
+    "Ngata",
+    "Ibarra",
+    "Sokolov",
+    "Zheng",
+    "Kaur",
+    "Moreau",
+    "Park",
 ]
 
 
@@ -92,15 +205,30 @@ def generate_names(kind: str = "person", count: int = 5, theme: str = "") -> dic
         out = [f"{random.choice(_HUMAN_FIRST)} {random.choice(_HUMAN_LAST)}" for _ in range(count)]
     elif kind == "company":
         pool1 = _NATURE + _TECH
-        pool2 = ["Labs", "Works", "Studio", "Ventures", "Systems", "Forge",
-                 "Collective", "& Co", "Research", "Group"]
+        pool2 = ["Labs", "Works", "Studio", "Ventures", "Systems", "Forge", "Collective", "& Co", "Research", "Group"]
         out = [f"{random.choice(pool1).capitalize()} {random.choice(pool2)}" for _ in range(count)]
     elif kind == "product":
         out = [f"{random.choice(_ADJECTIVES).capitalize()}{random.choice(_NATURE).capitalize()}" for _ in range(count)]
     elif kind == "pet":
-        pet_pool = ["Mochi", "Nori", "Biscuit", "Coco", "Peach", "Miso", "Ollie",
-                    "Clover", "Pepper", "Luna", "Bandit", "Hazel", "Remy",
-                    "Finn", "Ziggy", "Yuki", "Otto"]
+        pet_pool = [
+            "Mochi",
+            "Nori",
+            "Biscuit",
+            "Coco",
+            "Peach",
+            "Miso",
+            "Ollie",
+            "Clover",
+            "Pepper",
+            "Luna",
+            "Bandit",
+            "Hazel",
+            "Remy",
+            "Finn",
+            "Ziggy",
+            "Yuki",
+            "Otto",
+        ]
         out = [random.choice(pet_pool) for _ in range(count)]
     elif kind == "fantasy":
         syll1 = ["ar", "el", "val", "my", "tha", "jor", "kil", "mar", "sy", "bran", "rhen"]
@@ -179,9 +307,13 @@ def _wordle_words() -> list[str]:
     return _WORDLE_WORDS_CACHE
 
 
-def wordle_helper(green: str = "", yellow: str = "", grey: str = "",
-                  known_positions: dict | None = None,
-                  wrong_positions: dict | None = None) -> dict:
+def wordle_helper(
+    green: str = "",
+    yellow: str = "",
+    grey: str = "",
+    known_positions: dict | None = None,
+    wrong_positions: dict | None = None,
+) -> dict:
     """Suggest Wordle candidates.
     - `green`: letters known to be at specific positions, e.g. 'S---E'
       (use '-' for unknown slots; length must be 5).
@@ -201,8 +333,10 @@ def wordle_helper(green: str = "", yellow: str = "", grey: str = "",
         ok = True
         for i, g in enumerate(green):
             if g != "-" and wl[i] != g:
-                ok = False; break
-        if not ok: continue
+                ok = False
+                break
+        if not ok:
+            continue
         if not all(y in wl for y in yellow_set):
             continue
         if any(gr in wl for gr in grey_set):
@@ -211,9 +345,12 @@ def wordle_helper(green: str = "", yellow: str = "", grey: str = "",
             for letter, positions in wrong_positions.items():
                 for p in positions:
                     if 0 <= p < 5 and wl[p] == letter.lower():
-                        ok = False; break
-                if not ok: break
-        if not ok: continue
+                        ok = False
+                        break
+                if not ok:
+                    break
+        if not ok:
+            continue
         candidates.append(wl)
     return {
         "skill": "wordle_helper",
@@ -229,6 +366,7 @@ def wiki_summary(topic: str, lang: str = "en") -> dict:
     """Fetch a Wikipedia summary for a topic (REST API, no key)."""
     import urllib.request as _urlreq
     import urllib.parse as _urlparse
+
     if not topic:
         return {"skill": "wiki_summary", "error": "topic required"}
     t = _urlparse.quote(topic.replace(" ", "_"))

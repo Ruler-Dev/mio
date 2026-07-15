@@ -6,7 +6,6 @@ to apply correct RoPE for arbitrary (sparse) positions in SpecPrefill.
 
 from __future__ import annotations
 
-import math
 
 import mlx.core as mx
 import pytest

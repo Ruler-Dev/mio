@@ -12,7 +12,6 @@ When rotation is active (bits < 4):
 
 import sys
 
-import mlx.core as mx
 import mlx_lm.models.base as _base
 
 from mio.polarquant.cache import PolarQuantKVCache

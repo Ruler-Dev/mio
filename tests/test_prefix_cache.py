@@ -75,6 +75,41 @@ def test_prefix_cache_lookup_finds_longest_match():
     assert hit is None
 
 
+def test_hybrid_prefix_cache_never_rewinds_recurrent_state():
+    import mlx_lm.models.cache as cache_mod
+
+    from mio.dflash.recurrent_rollback_cache import RecurrentRollbackCache
+    from mio.engine import MioEngine
+
+    cfg = MioConfig.default()
+    eng = MioEngine(tier_config=cfg.tiers["small"])
+    eng._prefix_cache_min_tokens = 1
+
+    recurrent = RecurrentRollbackCache(size=2)
+    attention = cache_mod.KVCache()
+    attention.offset = 100
+    cached = list(range(100))
+    state = {
+        "target_cache": [recurrent, attention],
+        "draft_cache": [],
+        "offset": 100,
+    }
+    eng._prefix_cache[tuple(cached)] = state
+
+    # A divergent tail would require rewinding both cache types.  Recurrent
+    # GDN state is not trimmable, so Mio must turn this into a cold miss.
+    assert eng._prefix_cache_lookup(cached[:50] + [999, 1000]) is None
+    assert attention.offset == 100
+    assert tuple(cached) in eng._prefix_cache
+
+    # Reusing the complete cached state for a strict prompt extension needs no
+    # rewind and is therefore safe even for a hybrid target.
+    hit = eng._prefix_cache_lookup(cached + [100, 101])
+    assert hit is not None
+    assert hit["offset"] == 100
+    assert attention.offset == 100
+
+
 def test_prefix_cache_invalidate():
     from mio.engine import MioEngine
     cfg = MioConfig.default()

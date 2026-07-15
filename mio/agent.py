@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import os
 import subprocess
-import sys
 from pathlib import Path
 
 from rich.console import Console
@@ -15,13 +13,14 @@ from rich.prompt import Prompt
 from mio.config import MioConfig
 from mio.engine import MioEngine
 from mio.model_manager import ModelManager
+from mio.prompt_policy import PromptMode, PromptPolicy, apply_prompt_policy
 
 console = Console()
 
 # --- System Prompts ---
 
 AGENT_SYSTEM_PROMPT = """You are Mio, a fast local coding agent running on Apple Silicon.
-You have access to tools: bash (run shell commands), read (read files), write (write files), edit (edit files), list_mio_skills (search local instruction skills), read_mio_skill (load one skill's instructions).
+You have access to local coding, Mio skill-catalog, and permission-gated Mio MCP tools.
 When the user asks you to write or modify code, do it directly. Be precise and concise.
 Always show the code you write or modify.
 When running bash commands, show the command and its output.
@@ -137,6 +136,24 @@ def tool_read_mio_skill(name: str, max_chars: int = 32_000) -> str:
     return json.dumps(read_mio_skill(name=name, max_chars=max_chars), ensure_ascii=False)
 
 
+def tool_list_mcp_tools(server: str) -> str:
+    """Discover tools on one enabled local Mio MCP server."""
+    import json
+
+    from mio.mcp import list_mcp_tools
+
+    return json.dumps(list_mcp_tools(server), ensure_ascii=False)
+
+
+def tool_call_mcp_tool(server: str, name: str, arguments: dict | None = None) -> str:
+    """Call one advertised tool on an enabled local Mio MCP server."""
+    import json
+
+    from mio.mcp import call_mcp_tool
+
+    return json.dumps(call_mcp_tool(server, name, arguments or {}), ensure_ascii=False)
+
+
 # Tool registry used by the native agent's tool-use loop.
 AGENT_TOOLS = {
     "bash":  {"fn": tool_bash,  "args": ["command"]},
@@ -148,6 +165,11 @@ AGENT_TOOLS = {
         "args": ["query", "tag", "source", "limit"],
     },
     "read_mio_skill": {"fn": tool_read_mio_skill, "args": ["name", "max_chars"]},
+    "list_mcp_tools": {"fn": tool_list_mcp_tools, "args": ["server"]},
+    "call_mcp_tool": {
+        "fn": tool_call_mcp_tool,
+        "args": ["server", "name", "arguments"],
+    },
 }
 
 AGENT_TOOLS_SPEC = [
@@ -207,6 +229,28 @@ AGENT_TOOLS_SPEC = [
                 "type": "integer", "minimum": 1, "maximum": 200000, "default": 32000,
             },
         }, "required": ["name"]},
+    }},
+    {"type": "function", "function": {
+        "name": "list_mcp_tools",
+        "description": (
+            "List tools advertised by one enabled Mio-local MCP server. "
+            "Known built-ins: headroom, llm-wiki, ponytail. Never reaches remote/auth MCPs."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "server": {"type": "string", "description": "Enabled Mio MCP server name"},
+        }, "required": ["server"]},
+    }},
+    {"type": "function", "function": {
+        "name": "call_mcp_tool",
+        "description": (
+            "Call an advertised tool on an enabled Mio-local MCP. Discover with list_mcp_tools first. "
+            "Use mutating tools only when the user's request explicitly requires that change."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "server": {"type": "string", "description": "Enabled Mio MCP server name"},
+            "name": {"type": "string", "description": "Advertised MCP tool name"},
+            "arguments": {"type": "object", "description": "Tool arguments", "additionalProperties": True},
+        }, "required": ["server", "name"]},
     }},
 ]
 
@@ -318,6 +362,7 @@ def handle_slash_command(
             "- `/tier [max|large-moe|large|medium|small]` - Switch tier\n"
             "- `/context [8k|16k|32k|64k|128k|256k] [tq2|tq3|tq4|off]` - Set context + TQ\n"
             "- `/caveman [off|lite|full|ultra]` - Set communication mode\n"
+            "- `/ponytail [off|lite|full|ultra]` - Set engineering policy\n"
             "- `/tq` - Show TurboQuant status\n"
             "- `/status` - Show engine status\n"
             "- `/models` - List available models\n"
@@ -364,9 +409,20 @@ def handle_slash_command(
             level = args[0].lower()
             if level not in CAVEMAN_LEVELS:
                 return f"Unknown level: {level}. Options: off, lite, full, ultra"
-            state["caveman"] = level
-            return f"Caveman mode: **{level}**" + (" (disabled)" if level == "off" else "")
-        return f"Caveman mode: **{state.get('caveman', 'lite')}**. Usage: `/caveman off|lite|full|ultra`"
+            state["prompt_policy"] = PromptPolicy.resolve(caveman=level)
+            return f"Prompt policy: **{state['prompt_policy'].label}**"
+        policy = state.get("prompt_policy", PromptPolicy())
+        return f"Prompt policy: **{policy.label}**. Usage: `/caveman off|lite|full|ultra`"
+
+    elif command == "/ponytail":
+        if args and args[0].lower() == "off":
+            state["prompt_policy"] = PromptPolicy.resolve(prompt_mode=PromptMode.NONE)
+            return "Prompt policy: **none**"
+        if args and args[0].lower() in {"lite", "full", "ultra"}:
+            state["prompt_policy"] = PromptPolicy.resolve(ponytail=args[0].lower())
+            return f"Prompt policy: **{state['prompt_policy'].label}**"
+        policy = state.get("prompt_policy", PromptPolicy())
+        return f"Prompt policy: **{policy.label}**. Usage: `/ponytail off|lite|full|ultra`"
 
     elif command == "/context":
         tier = state.get("tier", "large-moe")
@@ -402,7 +458,7 @@ def handle_slash_command(
         status = manager.status()
         loaded = status.get("loaded_tiers", [])
         vram = status.get("vram_gb", 0)
-        lines = [f"**Engine Status:**", f"- Loaded tiers: {', '.join(loaded)}", f"- VRAM: {vram:.1f} GB"]
+        lines = ["**Engine Status:**", f"- Loaded tiers: {', '.join(loaded)}", f"- VRAM: {vram:.1f} GB"]
         for name, info in status.get("engines", {}).items():
             lines.append(f"- {name}: {info.get('last_gen_tps', 0):.1f} tok/s")
         return "\n".join(lines)
@@ -441,18 +497,19 @@ def run_agent(
     manager: ModelManager,
     tier: str = "large-moe",
     initial_prompt: str | None = None,
+    prompt_policy: PromptPolicy | None = None,
 ) -> None:
     """Run the interactive coding agent."""
     state = {
         "tier": tier,
-        "caveman": "lite",
+        "prompt_policy": prompt_policy or PromptPolicy(),
         "messages": [],
     }
 
     # Banner
     console.print(Panel(
         "[bold cyan]Mio Agent[/bold cyan]\n"
-        f"[dim]Tier: {tier} | Caveman: lite | /help for commands[/dim]",
+        f"[dim]Tier: {tier} | Prompt: {state['prompt_policy'].label} | /help for commands[/dim]",
         border_style="cyan",
     ))
     console.print()
@@ -510,15 +567,15 @@ def _process_user_input(
     if current_tier in manager.loaded_tiers():
         engine = manager.get_engine(current_tier)
 
-    # Build system prompt (caveman mode + hint that tools are real)
-    caveman_level = state.get("caveman", "lite")
+    # Build system prompt (selected policy + hint that tools are real)
+    prompt_policy = state.get("prompt_policy", PromptPolicy())
     system_prompt = AGENT_SYSTEM_PROMPT
-    caveman_text = CAVEMAN_LEVELS.get(caveman_level, "")
-    if caveman_text:
-        system_prompt += "\n\n" + caveman_text
 
     # Initial messages
-    current_messages = [{"role": "system", "content": system_prompt}]
+    current_messages = apply_prompt_policy(
+        [{"role": "system", "content": system_prompt}],
+        prompt_policy,
+    )
     current_messages.extend(state.get("messages", []))
     current_messages.append({"role": "user", "content": user_input})
     # Persist the user turn early so history is consistent even if generation
@@ -550,7 +607,8 @@ def _process_user_input(
             )
 
         # Extract tool calls (OpenAI-format: {function: {name, arguments}})
-        import json as _json, re as _re
+        import json as _json
+        import re as _re
         _leading, tool_calls = _parse_tc(full_text)
         visible_text = _re.sub(r"<tool_call>[\s\S]*?</tool_call>\s*", "", full_text).strip()
         assistant_text_accum.append(visible_text)

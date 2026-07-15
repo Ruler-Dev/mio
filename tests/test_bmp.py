@@ -5,9 +5,9 @@ from __future__ import annotations
 import math
 
 import mlx.core as mx
-import pytest
 from mlx_lm.models import cache as cache_mod
 
+from mio.config import TierConfig
 from mio.dflash.bmp import (
     build_bmp_batch,
     expand_cache_batch,
@@ -16,6 +16,7 @@ from mio.dflash.bmp import (
     per_row_acceptance,
 )
 from mio.dflash.recurrent_rollback_cache import RecurrentRollbackCache
+from mio.engine import MioEngine
 
 
 def test_extract_top_k_shapes():
@@ -30,6 +31,63 @@ def test_extract_top_k_shapes():
     for row in logps:
         for a, b in zip(row, row[1:]):
             assert a >= b - 1e-6
+
+
+def test_nonstream_engine_keeps_bmp_with_text_stop_and_adjusts_usage(monkeypatch):
+    tier = TierConfig(
+        name="test",
+        target_model="unused",
+        draft_model="unused",
+        context_window=4096,
+        max_output_tokens=64,
+        bmp_paths=3,
+        pq_bits=16,
+    )
+    engine = MioEngine(tier)
+    engine._loaded = True
+    engine._target_model = object()
+    engine._draft_model = object()
+    engine._tokenizer = type(
+        "Tokenizer",
+        (),
+        {
+            "decode": staticmethod(
+                lambda _ids, skip_special_tokens=True: "keep STOP discard"
+            ),
+            "encode": staticmethod(
+                lambda text, add_special_tokens=False: text.split()
+            ),
+        },
+    )()
+    monkeypatch.setattr(engine, "_apply_chat_template", lambda _messages, tools=None: [1, 2])
+    monkeypatch.setattr(engine, "_eos_token_ids", lambda: [0])
+    monkeypatch.setattr(engine, "_make_sampler", lambda *_args: object())
+    calls = []
+
+    def fake_bmp(**kwargs):
+        calls.append(kwargs)
+        return {
+            "generated_token_ids": [10, 11, 12],
+            "elapsed_us": 300_000,
+            "prefill_us": 100_000,
+            "generation_tokens": 3,
+            "prompt_token_count": 2,
+        }
+
+    monkeypatch.setattr("mio.dflash.bmp_runtime.generate_bmp_dflash_once", fake_bmp)
+
+    text, metrics = engine.generate(
+        [{"role": "user", "content": "prompt"}],
+        max_tokens=8,
+        stop=["STOP"],
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["num_paths"] == 3
+    assert text == "keep "
+    assert metrics.prompt_tokens == 2
+    assert metrics.completion_tokens == 1
+    assert metrics.total_tokens == 3
 
 
 def test_extract_top_k_logprobs_sum_to_leq_one():

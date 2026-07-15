@@ -105,11 +105,16 @@
     const actions = document.querySelector('.input-actions');
     if (!actions) return;
     const btn = document.createElement('button');
+    btn.type = 'button';
     btn.className = 'emoji-btn';
     btn.title = 'Emoji picker';
+    btn.setAttribute('aria-label', 'Emoji picker');
     btn.textContent = '😀';
     btn.onclick = (e) => { e.stopPropagation(); openPicker(); };
-    actions.insertBefore(btn, actions.querySelector('button') || actions.firstChild);
+    // A descendant button is not a valid `insertBefore` reference for the
+    // actions container.  `prepend` is stable even when another module wraps
+    // the existing voice/send controls before this deferred module loads.
+    actions.prepend(btn);
   }
 
   function injectCSS() {

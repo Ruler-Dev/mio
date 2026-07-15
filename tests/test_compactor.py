@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from unittest.mock import MagicMock
 
 
@@ -160,6 +161,54 @@ def test_stage2_summarization_replaces_middle():
     assert out[0].get("role") == "system"
     # Last user message is preserved
     assert out[-1].get("content") == "final"
+
+
+def test_stage2_cancellation_closes_stream_without_consuming_more_tokens():
+    from mio.compactor import _run_summarization
+
+    cancelled = threading.Event()
+    started = threading.Event()
+    allow_inflight_step = threading.Event()
+    closed = threading.Event()
+
+    class Engine:
+        def generate_stream(self, _messages, **_kwargs):
+            try:
+                started.set()
+                yield "partial", None
+                assert allow_inflight_step.wait(timeout=1.0)
+                yield "discarded", None
+            finally:
+                closed.set()
+
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": "old answer"},
+        {"role": "user", "content": "latest"},
+    ]
+    result: list[tuple[list[dict], int]] = []
+    worker = threading.Thread(
+        target=lambda: result.append(
+            _run_summarization(
+                messages,
+                Engine(),
+                protected_tail=1,
+                gpu_lock=None,
+                cancellation_event=cancelled,
+            )
+        )
+    )
+    worker.start()
+    assert started.wait(timeout=1.0)
+    cancelled.set()
+    allow_inflight_step.set()
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert closed.is_set()
+    assert result
+    assert "partial" not in result[0][0][1]["content"]
 
 
 def test_compact_disabled_threshold_1():

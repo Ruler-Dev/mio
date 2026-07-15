@@ -7,6 +7,9 @@ import json
 from pathlib import Path
 from typing import Any
 
+from mio.paths import mio_home
+from mio.persistence import atomic_write_json
+
 
 @dataclass
 class TierConfig:
@@ -33,9 +36,11 @@ class TierConfig:
     tq_use_normalization: bool = True
     tq_use_qjl: bool = False
     pq_group_size: int = 64
-    # Qwen3.5/3.6 recommended: thinking-mode coding = 0.6, general = 1.0
-    # Never use greedy (0.0) — causes degradation and infinite repetitions.
-    temperature: float = 0.6
+    # 0.0 keeps Mio's exact greedy DFlash/DDTree path and is the operational
+    # default. Positive values request stochastic target-only MLX sampling;
+    # 0.6 remains a useful explicit creative/coding setting when distributional
+    # sampling matters more than speculative decode latency.
+    temperature: float = 0.0
     top_p: float = 0.95
     top_k: int = 20
 
@@ -48,8 +53,8 @@ class MioConfig:
     active_tiers: list[str] = field(default_factory=lambda: ["large-moe"])
     tandem: bool = False
     port: int = 9090
-    host: str = "0.0.0.0"
-    config_dir: Path = field(default_factory=lambda: Path.home() / ".mio")
+    host: str = "127.0.0.1"
+    config_dir: Path = field(default_factory=mio_home)
 
     @classmethod
     def default(cls) -> MioConfig:
@@ -65,7 +70,7 @@ class MioConfig:
 
 def default_config_path() -> Path:
     """Return the canonical per-user configuration path."""
-    return Path.home() / ".mio" / "config.json"
+    return mio_home() / "config.json"
 
 
 _TIER_FIELDS = {item.name for item in fields(TierConfig)}
@@ -162,4 +167,4 @@ def save_config(config: MioConfig, path: Path) -> None:
         tier_data["draft_model"] = str(tier_data["draft_model"])
         data["tiers"][name] = tier_data
 
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    atomic_write_json(path, data)
