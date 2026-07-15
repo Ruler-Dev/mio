@@ -10,7 +10,7 @@ from rich.panel import Panel
 from rich.prompt import IntPrompt, Prompt
 from rich.table import Table
 
-from mio.config import MioConfig, TierConfig, save_config
+from mio.config import MioConfig, TierConfig, load_config, save_config
 from mio.models.registry import (
     KNOWN_MODELS,
     SUPPORTED_ADAPTERS,
@@ -22,6 +22,12 @@ console = Console()
 
 
 # --- VRAM Estimation ---
+
+def _resolve_tq_selection(selected_bits: int) -> tuple[int, int, bool]:
+    """Return canonical (TQ bits, PQ bits, TQ enabled) wizard settings."""
+    if selected_bits in (2, 3, 4):
+        return selected_bits, 16, True
+    return 16, 16, False
 
 def _get_model_arch(model_path: Path) -> dict:
     """Read architecture params from config.json."""
@@ -68,8 +74,9 @@ def _estimate_kv_cache_gb(
     # KV bytes per token for all full attention layers (fp16)
     kv_per_token_fp16 = 2 * n_full_attn * n_kv_heads * head_dim * 2  # bytes
 
-    # Apply TQ compression
-    if tq_bits > 0:
+    # Apply TQ compression only for an actual TurboQuant bit-width.  ``16``
+    # is the canonical persisted sentinel for an uncompressed fp16 cache.
+    if tq_bits in (2, 3, 4):
         kv_per_token = kv_per_token_fp16 * (tq_bits / 16)
     else:
         kv_per_token = kv_per_token_fp16
@@ -150,7 +157,7 @@ def _find_matching_drafts(target_key: str) -> list[tuple[str, Path]]:
 def configure_interactive(config: MioConfig | None = None) -> MioConfig:
     """Run the interactive configuration wizard."""
     if config is None:
-        config = MioConfig.default()
+        config = load_config()
 
     console.print(Panel("[bold cyan]Mio Configuration[/bold cyan]", border_style="cyan"))
     console.print()
@@ -215,7 +222,7 @@ def configure_interactive(config: MioConfig | None = None) -> MioConfig:
         (4, "3.6x compression, best speed", "RECOMMENDED"),
         (3, "4.7x compression, moderate quality loss", ""),
         (2, "5.5x compression, aggressive", ""),
-        (0, "no compression, full fp16 cache", ""),
+        (16, "no compression, full fp16 cache", ""),
     ]
 
     tq_table = Table()
@@ -227,8 +234,9 @@ def configure_interactive(config: MioConfig | None = None) -> MioConfig:
     tq_table.add_column("Note", style="yellow")
 
     for i, (bits, desc, note) in enumerate(tq_options, 1):
-        label = f"{bits}-bit" if bits > 0 else "OFF"
-        compress = f"{16 / bits:.1f}x" if bits > 0 else "1.0x"
+        enabled = bits in (2, 3, 4)
+        label = f"{bits}-bit" if enabled else "OFF"
+        compress = f"{16 / bits:.1f}x" if enabled else "1.0x"
         kv_32k = _estimate_kv_cache_gb(arch, 32768, bits)
         kv_128k = _estimate_kv_cache_gb(arch, 131072, bits)
         tq_table.add_row(
@@ -241,13 +249,12 @@ def configure_interactive(config: MioConfig | None = None) -> MioConfig:
     console.print()
     tq_idx = IntPrompt.ask("Select TQ cache bits", default=1) - 1
     tq_idx = max(0, min(tq_idx, len(tq_options) - 1))
-    tq_bits = tq_options[tq_idx][0]
-    tq_enabled = tq_bits > 0
+    tq_bits, pq_bits, tq_enabled = _resolve_tq_selection(tq_options[tq_idx][0])
 
     if tq_enabled:
         console.print(f"  Selected: [cyan]{tq_bits}-bit[/cyan]\n")
     else:
-        console.print(f"  Selected: [cyan]OFF[/cyan] (no cache compression)\n")
+        console.print("  Selected: [cyan]OFF[/cyan] (no cache compression)\n")
 
     # --- Step 4: Context window ---
     console.print("[bold]Step 4: Context window[/bold]\n")
@@ -333,7 +340,11 @@ def configure_interactive(config: MioConfig | None = None) -> MioConfig:
         draft_model=str(selected_draft_path),
         context_window=context_window,
         max_output_tokens=max_output,
-        tq_bits=tq_bits if tq_enabled else 4,
+        tq_bits=tq_bits,
+        # This wizard selects TurboQuant or an uncompressed cache.  Leaving
+        # PolarQuant at its dataclass default would either shadow TQ or make
+        # the displayed "OFF" choice compressed in practice.
+        pq_bits=pq_bits,
         tq_group_size=64,
         tq_use_rotation=tq_enabled,
         tq_use_normalization=tq_enabled,

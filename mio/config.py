@@ -1,9 +1,11 @@
-"""Configuration types and defaults for Mio."""
+"""Configuration types, persistence, and defaults for Mio."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields, replace
+import json
 from pathlib import Path
+from typing import Any
 
 
 @dataclass
@@ -51,39 +53,113 @@ class MioConfig:
 
     @classmethod
     def default(cls) -> MioConfig:
-        """Create config with default Qwen 3.5 tiers."""
+        """Create an independent config from the current model registry tiers."""
         from mio.models.registry import DEFAULT_TIERS
 
-        return cls(tiers=dict(DEFAULT_TIERS))
+        # ``dict(DEFAULT_TIERS)`` only copies the mapping.  The mutable
+        # TierConfig instances would still be shared with the registry, so a
+        # one-shot CLI override (for example ``--tq4``) could change defaults
+        # for every config created later in the same process.
+        return cls(tiers={name: replace(tier) for name, tier in DEFAULT_TIERS.items()})
+
+
+def default_config_path() -> Path:
+    """Return the canonical per-user configuration path."""
+    return Path.home() / ".mio" / "config.json"
+
+
+_TIER_FIELDS = {item.name for item in fields(TierConfig)}
+
+
+def _normalise_cache_mode(tier: TierConfig) -> TierConfig:
+    """Make legacy configs with both PQ and TQ active deterministic.
+
+    The runtime gives PolarQuant precedence, which made an old wizard-created
+    ``tq_bits=4, pq_bits=4`` configuration silently run PQ instead of TQ.
+    A configured TQ bit-width is explicit, so it wins during migration.
+    """
+    if tier.tq_bits in (2, 3, 4) and tier.pq_bits in (2, 3, 4):
+        tier.pq_bits = 16
+    return tier
+
+
+def _tier_from_data(name: str, data: Any, fallback: TierConfig | None) -> TierConfig | None:
+    """Deserialize one tier while tolerating older/newer config schemas."""
+    if not isinstance(data, dict):
+        return None
+
+    values = asdict(fallback) if fallback is not None else {}
+    values.update({key: value for key, value in data.items() if key in _TIER_FIELDS})
+    values["name"] = name
+
+    try:
+        return _normalise_cache_mode(TierConfig(**values))
+    except (TypeError, ValueError):
+        # A malformed custom tier must not make every Mio command unusable.
+        return None
 
 
 def load_config(path: Path | None = None) -> MioConfig:
-    """Load config from file, falling back to defaults."""
-    config = MioConfig.default()
-    if path and path.exists():
-        import json
+    """Load persisted config, falling back safely to registry defaults.
 
-        data = json.loads(path.read_text())
-        if "active_tiers" in data:
-            config.active_tiers = data["active_tiers"]
-        if "tandem" in data:
-            config.tandem = data["tandem"]
-        if "port" in data:
-            config.port = data["port"]
-        if "host" in data:
-            config.host = data["host"]
+    With no explicit path this reads ``~/.mio/config.json``.  Missing,
+    unreadable, malformed, and legacy top-level-only files are all supported.
+    Persisted tiers overlay current registry defaults so newly introduced
+    fields receive their modern default values.
+    """
+    config = MioConfig.default()
+    config_path = Path(path).expanduser() if path is not None else default_config_path()
+    config.config_dir = config_path.parent
+
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return config
+
+    if not isinstance(data, dict):
+        return config
+
+    tiers_data = data.get("tiers")
+    if isinstance(tiers_data, dict):
+        for name, tier_data in tiers_data.items():
+            if not isinstance(name, str) or not name:
+                continue
+            tier = _tier_from_data(name, tier_data, config.tiers.get(name))
+            if tier is not None:
+                config.tiers[name] = tier
+
+    active_tiers = data.get("active_tiers")
+    if isinstance(active_tiers, list) and active_tiers and all(
+        isinstance(name, str) for name in active_tiers
+    ):
+        valid_active_tiers = [name for name in active_tiers if name in config.tiers]
+        if valid_active_tiers:
+            config.active_tiers = valid_active_tiers
+    if isinstance(data.get("tandem"), bool):
+        config.tandem = data["tandem"]
+    if isinstance(data.get("port"), int) and not isinstance(data["port"], bool):
+        config.port = data["port"]
+    if isinstance(data.get("host"), str) and data["host"]:
+        config.host = data["host"]
     return config
 
 
 def save_config(config: MioConfig, path: Path) -> None:
-    """Save config to file."""
-    import json
-
+    """Persist the complete user configuration in a forward-compatible form."""
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {
         "active_tiers": config.active_tiers,
         "tandem": config.tandem,
         "port": config.port,
         "host": config.host,
+        "tiers": {},
     }
-    path.write_text(json.dumps(data, indent=2) + "\n")
+    for name, tier in config.tiers.items():
+        serializable_tier = replace(tier)
+        _normalise_cache_mode(serializable_tier)
+        tier_data = asdict(serializable_tier)
+        tier_data["target_model"] = str(tier_data["target_model"])
+        tier_data["draft_model"] = str(tier_data["draft_model"])
+        data["tiers"][name] = tier_data
+
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")

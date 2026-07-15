@@ -40,6 +40,9 @@ def tile_to_tokens(tokenizer, target_tokens: int) -> str:
 def bench(tier_name: str, prompt_tokens: int, max_tokens: int, tq4: bool, dflash: bool) -> dict:
     cfg = MioConfig.default()
     tier = cfg.tiers[tier_name]
+    # Compare TQ against a genuinely uncompressed cache.  PolarQuant is the
+    # normal TierConfig default and otherwise wins over TQ in cache creation.
+    tier.pq_bits = 16
     if tq4:
         tier.tq_bits = 4
     else:

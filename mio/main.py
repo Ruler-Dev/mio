@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import argparse
-import sys
 
 
 def _apply_tq4_flag(config, tier_names: list[str], enabled: bool) -> None:
-    """Set tq_bits=4 on the specified tiers when --tq4 is passed."""
+    """Select TQ4 (and disable the mutually exclusive PQ cache)."""
     if not enabled:
         return
     for name in tier_names:
         if name in config.tiers:
-            config.tiers[name].tq_bits = 4
+            tier = config.tiers[name]
+            tier.tq_bits = 4
+            tier.pq_bits = 16
+            tier.tq_use_rotation = True
+            tier.tq_use_normalization = True
 
 
 def _apply_mpath_flag(config, tier_names: list[str], K: int) -> None:
@@ -46,6 +49,18 @@ def _apply_context_flag(config, tier_names: list[str], ctx: int | None) -> None:
             config.tiers[name].max_output_tokens = min(ctx // 4, 8192)
 
 
+def _configured_tier_name(config, requested: str | None = None) -> str:
+    """Resolve a CLI tier, otherwise use the first persisted active tier."""
+    if requested:
+        return requested
+    for name in config.active_tiers:
+        if name in config.tiers:
+            return name
+    if "large-moe" in config.tiers:
+        return "large-moe"
+    return next(iter(config.tiers), "large-moe")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="mio",
@@ -55,11 +70,20 @@ def main() -> None:
 
     # --- serve ---
     serve_parser = subparsers.add_parser("serve", help="Start OpenAI-compatible API server")
-    serve_parser.add_argument("--port", type=int, default=9090, help="Server port (default: 9090)")
-    serve_parser.add_argument("--host", type=str, default="0.0.0.0", help="Server host")
+    serve_parser.add_argument(
+        "--port", type=int, default=None,
+        help="Server port (default: persisted config, otherwise 9090)",
+    )
+    serve_parser.add_argument(
+        "--host", type=str, default=None,
+        help="Server host (default: persisted config, otherwise 0.0.0.0)",
+    )
     serve_parser.add_argument("--tandem", action="store_true", help="Load all tiers for tandem routing")
     serve_parser.add_argument("--tiers", type=str, default=None, help="Comma-separated tiers to load (default: large)")
-    serve_parser.add_argument("--tier", type=str, default="large-moe", help="Single tier to load (default: large-moe)")
+    serve_parser.add_argument(
+        "--tier", type=str, default=None,
+        help="Single tier to load (default: persisted active tier, otherwise large-moe)",
+    )
     serve_parser.add_argument("--validate", action="store_true", help="Enable auto-validation of generated code")
     serve_parser.add_argument(
         "--caveman",
@@ -89,7 +113,10 @@ def main() -> None:
 
     # --- chat ---
     chat_parser = subparsers.add_parser("chat", help="Interactive chat (no tools, no agent)")
-    chat_parser.add_argument("--tier", type=str, default="large-moe", help="Model tier (default: large-moe)")
+    chat_parser.add_argument(
+        "--tier", type=str, default=None,
+        help="Model tier (default: persisted active tier, otherwise large-moe)",
+    )
     chat_parser.add_argument("--paro", action="store_true", help="Use PARO quantized models (higher quality, slower)")
     chat_parser.add_argument("--no-caveman", action="store_true", help="Disable the Caveman Ultra system prompt")
     chat_parser.add_argument("--tq4", action="store_true", help="Enable TurboQuant 4-bit KV cache (default: off)")
@@ -133,9 +160,12 @@ def main() -> None:
 
     # --- Top-level flags for agent mode ---
     parser.add_argument("--tandem", action="store_true", help="Agent mode with tandem routing")
-    parser.add_argument("--tier", type=str, default="large-moe", help="Agent mode tier (default: large-moe)")
+    parser.add_argument(
+        "--tier", type=str, default=None,
+        help="Agent mode tier (default: persisted active tier, otherwise large-moe)",
+    )
     parser.add_argument("--paro", action="store_true", help="Use PARO quantized models (higher quality, slower)")
-    parser.add_argument("--port", type=int, default=9090, help="API port for agent mode")
+    parser.add_argument("--port", type=int, default=None, help="API port for agent mode")
     parser.add_argument("--tq4", action="store_true", help="Enable TurboQuant 4-bit KV cache (default: off)")
     parser.add_argument("--mpath", type=int, default=1, help="Batched Multi-Path DFlash paths K (1 = vanilla DFlash)")
     parser.add_argument(
@@ -171,21 +201,25 @@ def main() -> None:
 
 def _cmd_serve(args) -> None:
     """Start the API server."""
-    from mio.config import MioConfig
+    from mio.config import load_config
     from mio.model_manager import ModelManager
     from mio.server import start_server
 
-    config = MioConfig.default()
-    config.port = args.port
-    config.host = args.host
+    config = load_config()
+    if args.port is not None:
+        config.port = args.port
+    if args.host is not None:
+        config.host = args.host
 
     if args.tandem:
         config.active_tiers = list(config.tiers.keys())
         config.tandem = True
     elif args.tiers:
         config.active_tiers = [t.strip() for t in args.tiers.split(",")]
-    else:
+        config.tandem = False
+    elif args.tier:
         config.active_tiers = [args.tier]
+        config.tandem = False
 
     _apply_tq4_flag(config, config.active_tiers, getattr(args, "tq4", False))
     _apply_mpath_flag(config, config.active_tiers, getattr(args, "mpath", 1))
@@ -214,25 +248,29 @@ def _cmd_chat(args) -> None:
     from rich.console import Console
     from rich.prompt import Prompt
 
-    from mio.config import MioConfig
+    from mio.config import load_config
     from mio.model_manager import ModelManager
 
     console = Console()
+    config = load_config()
     if getattr(args, "paro", False):
+        from dataclasses import replace
+
         from mio.models.registry import PARO_TIERS
-        config = MioConfig(tiers=dict(PARO_TIERS))
-        console.print(f"[bold yellow]PARO mode[/bold yellow]")
-    else:
-        config = MioConfig.default()
-    config.active_tiers = [args.tier]
+
+        config.tiers = {name: replace(tier) for name, tier in PARO_TIERS.items()}
+        console.print("[bold yellow]PARO mode[/bold yellow]")
+    tier_name = _configured_tier_name(config, getattr(args, "tier", None))
+    config.active_tiers = [tier_name]
+    config.tandem = False
     _apply_tq4_flag(config, config.active_tiers, getattr(args, "tq4", False))
     _apply_mpath_flag(config, config.active_tiers, getattr(args, "mpath", 1))
     _apply_context_flag(config, config.active_tiers, _parse_context(getattr(args, "context", None)))
 
     manager = ModelManager(config)
-    console.print(f"[bold]Loading {args.tier} tier...[/bold]")
+    console.print(f"[bold]Loading {tier_name} tier...[/bold]")
     manager.load_active_tiers()
-    engine = manager.get_engine(args.tier)
+    engine = manager.get_engine(tier_name)
 
     use_caveman = not getattr(args, "no_caveman", False)
     messages: list[dict] = []
@@ -279,12 +317,11 @@ def _cmd_download(args) -> None:
     from rich.console import Console
     from rich.progress import Progress
 
-    from mio.config import MioConfig
+    from mio.config import load_config
     from mio.menu import confirm_download
-    from mio.models.registry import DEFAULT_TIERS
 
     console = Console()
-    config = MioConfig.default()
+    config = load_config()
 
     if args.tier:
         tiers_to_download = {args.tier: config.tiers[args.tier]}
@@ -334,10 +371,10 @@ def _cmd_pull(args) -> None:
 
 def _cmd_configure(args) -> None:
     """Interactive model + DFlash + TurboQuant configuration."""
-    from mio.config import MioConfig
+    from mio.config import load_config
     from mio.configure import configure_interactive
 
-    config = MioConfig.default()
+    config = load_config()
     configure_interactive(config)
 
 
@@ -345,11 +382,11 @@ def _cmd_bench(args) -> None:
     """Run benchmarks."""
     from rich.console import Console
 
-    from mio.config import MioConfig
+    from mio.config import load_config
     from mio.model_manager import ModelManager
 
     console = Console()
-    config = MioConfig.default()
+    config = load_config()
 
     prompt = "Write a Python function to sort a list using quicksort. Include type hints and a docstring."
     messages = [{"role": "user", "content": prompt}]
@@ -389,10 +426,10 @@ def _cmd_status(args) -> None:
     from rich.console import Console
 
     from mio.menu import show_models_table, show_tier_config
-    from mio.config import MioConfig
+    from mio.config import load_config
 
     console = Console()
-    config = MioConfig.default()
+    config = load_config()
 
     show_tier_config(config)
     console.print()
@@ -400,7 +437,7 @@ def _cmd_status(args) -> None:
 
     # Try to reach running server
     try:
-        req = urllib.request.Request("http://localhost:9090/health")
+        req = urllib.request.Request(f"http://localhost:{config.port}/health")
         with urllib.request.urlopen(req, timeout=2) as resp:
             data = json_mod.loads(resp.read())
             console.print(f"\n[green]Server running[/green]: {data}")
@@ -411,16 +448,20 @@ def _cmd_status(args) -> None:
 def _cmd_native_agent(args) -> None:
     """Launch the Mio coding agent."""
     from mio.agent import run_agent
-    from mio.config import MioConfig
+    from mio.config import load_config
     from mio.model_manager import ModelManager
 
-    config = MioConfig.default()
+    config = load_config()
 
-    tier = args.tier
+    requested_tier = getattr(args, "tier", None)
+    tier = _configured_tier_name(config, requested_tier)
     if args.tandem:
         config.active_tiers = list(config.tiers.keys())
         config.tandem = True
-    else:
+    elif requested_tier:
+        config.active_tiers = [tier]
+        config.tandem = False
+    elif not config.active_tiers:
         config.active_tiers = [tier]
 
     _apply_tq4_flag(config, config.active_tiers, getattr(args, "tq4", False))
@@ -440,10 +481,10 @@ def _cmd_native_agent(args) -> None:
 
 def _cmd_menu(args) -> None:
     """Interactive menu."""
-    from mio.config import MioConfig
+    from mio.config import load_config
     from mio.menu import interactive_menu
 
-    config = MioConfig.default()
+    config = load_config()
 
     while True:
         choice = interactive_menu(config)
@@ -479,7 +520,7 @@ def _cmd_menu(args) -> None:
         elif choice == "6":
             _cmd_configure(args)
             # Reload config after configure
-            config = MioConfig.default()
+            config = load_config()
         elif choice == "7":
             from mio.menu import show_tier_config
 
