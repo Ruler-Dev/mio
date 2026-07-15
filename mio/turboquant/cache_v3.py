@@ -369,15 +369,64 @@ class TurboQuantKVCacheV3:
 
     @state.setter
     def state(self, v):
-        pass
+        if v is None or len(v) == 0:
+            self.key_outlier_packed = None
+            self.key_regular_packed = None
+            self.key_norms = None
+            self.value_outlier_packed = None
+            self.value_regular_packed = None
+            self.value_norms = None
+            self._key_sign_bits_buf = None
+            self._key_residual_norms_buf = None
+            self._key_centroids_cache = None
+            self._value_centroids_cache = None
+            self.offset = 0
+            return
+
+        expected = 6 + (2 if self.mixed else 0) + (2 if self.use_qjl else 0)
+        if len(v) != expected:
+            raise ValueError(
+                f"TurboQuantKVCacheV3 expected {expected} state arrays, got {len(v)}"
+            )
+        cursor = 0
+        self.key_regular_packed = v[cursor]
+        self.value_regular_packed = v[cursor + 1]
+        self.key_norms = v[cursor + 2]
+        self.value_norms = v[cursor + 3]
+        cursor += 4
+        if self.mixed:
+            self.key_outlier_packed = v[cursor]
+            self.value_outlier_packed = v[cursor + 1]
+            cursor += 2
+        else:
+            self.key_outlier_packed = None
+            self.value_outlier_packed = None
+        if self.use_qjl:
+            self._key_sign_bits_buf = v[cursor]
+            self._key_residual_norms_buf = v[cursor + 1]
+            cursor += 2
+        else:
+            self._key_sign_bits_buf = None
+            self._key_residual_norms_buf = None
+        self._key_centroids_cache = v[cursor]
+        self._value_centroids_cache = v[cursor + 1]
+        self.offset = int(self.key_regular_packed.shape[2])
 
     @property
     def meta_state(self):
-        return ""
+        return (str(self.offset),)
 
     @meta_state.setter
     def meta_state(self, v):
-        pass
+        if v is None or v == "" or len(v) == 0:
+            return
+        offset = int(v[0])
+        if (
+            self.key_regular_packed is not None
+            and offset > int(self.key_regular_packed.shape[2])
+        ):
+            raise ValueError("TurboQuantKVCacheV3 offset exceeds restored state")
+        self.offset = offset
 
     def is_trimmable(self):
         return True

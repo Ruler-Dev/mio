@@ -228,15 +228,52 @@ class TurboQuantKVCacheV2:
 
     @state.setter
     def state(self, v):
-        pass
+        if v is None or len(v) == 0:
+            self.keys = None
+            self.values = None
+            self.key_norms = None
+            self.value_norms = None
+            self.key_sign_bits = None
+            self.key_residual_norms = None
+            self._n_proj_words = None
+            self.offset = 0
+            return
+
+        expected = 6 + (2 if self.use_normalization else 0) + (2 if self.use_qjl else 0)
+        if len(v) != expected:
+            raise ValueError(
+                f"TurboQuantKVCacheV2 expected {expected} state arrays, got {len(v)}"
+            )
+        self.keys = tuple(v[:3])
+        self.values = tuple(v[3:6])
+        cursor = 6
+        if self.use_normalization:
+            self.key_norms, self.value_norms = v[cursor : cursor + 2]
+            cursor += 2
+        else:
+            self.key_norms = None
+            self.value_norms = None
+        if self.use_qjl:
+            self.key_sign_bits, self.key_residual_norms = v[cursor : cursor + 2]
+            self._n_proj_words = int(self.key_sign_bits.shape[-1])
+        else:
+            self.key_sign_bits = None
+            self.key_residual_norms = None
+            self._n_proj_words = None
+        self.offset = int(self.keys[0].shape[-2])
 
     @property
     def meta_state(self):
-        return ""
+        return (str(self.offset),)
 
     @meta_state.setter
     def meta_state(self, v):
-        pass
+        if v is None or v == "" or len(v) == 0:
+            return
+        offset = int(v[0])
+        if self.keys is not None and offset > int(self.keys[0].shape[-2]):
+            raise ValueError("TurboQuantKVCacheV2 offset exceeds restored state")
+        self.offset = offset
 
     def is_trimmable(self):
         return True

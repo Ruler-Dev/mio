@@ -161,3 +161,82 @@ def test_tq4_perf_within_3x_of_tq2():
     t2 = _time_v1_cache(2)
     t4 = _time_v1_cache(4)
     assert t4 < 3 * t2 + 5e-3, f"TQ4 ({t4*1e3:.2f}ms) >> 3x TQ2 ({t2*1e3:.2f}ms)"
+
+
+@pytest.mark.parametrize("cache_version", ["v1", "v2", "v3"])
+@pytest.mark.parametrize("use_qjl", [False, True])
+def test_cache_state_roundtrip_restores_offset_and_arrays(cache_version, use_qjl):
+    """Every advertised cache state must be restorable after trim/snapshot."""
+    if cache_version == "v1":
+        from mio.turboquant.cache import TurboQuantKVCache
+
+        def make_cache():
+            return TurboQuantKVCache(
+                head_dim=HEAD_DIM, mse_bits=4, use_qjl=use_qjl
+            )
+    elif cache_version == "v2":
+        from mio.turboquant.cache_v2 import TurboQuantKVCacheV2
+
+        def make_cache():
+            return TurboQuantKVCacheV2(
+                head_dim=HEAD_DIM,
+                bits=4,
+                group_size=64,
+                use_qjl=use_qjl,
+                use_normalization=True,
+            )
+    else:
+        from mio.turboquant.cache_v3 import TurboQuantKVCacheV3
+
+        def make_cache():
+            return TurboQuantKVCacheV3(
+                head_dim=HEAD_DIM, bits=4, use_qjl=use_qjl
+            )
+
+    keys, values = _random_kv(9, seed=37)
+    original = make_cache()
+    original.update_and_fetch(keys, values)
+    mx.eval(*original.state)
+
+    restored = make_cache()
+    restored.state = list(original.state)
+    restored.meta_state = original.meta_state
+
+    assert restored.offset == 9
+    assert len(restored.state) == len(original.state)
+    for expected, actual in zip(original.state, restored.state):
+        assert mx.array_equal(expected, actual)
+
+    restored.state = []
+    assert restored.empty()
+    assert restored.offset == 0
+
+
+def test_v3_mixed_state_roundtrip():
+    from mio.turboquant.cache_v3 import TurboQuantKVCacheV3
+
+    keys, values = _random_kv(7, seed=41)
+    original = TurboQuantKVCacheV3(
+        head_dim=HEAD_DIM,
+        bits=2,
+        n_outlier=32,
+        outlier_bits=3,
+        use_qjl=True,
+    )
+    original.update_and_fetch(keys, values)
+    mx.eval(*original.state)
+
+    restored = TurboQuantKVCacheV3(
+        head_dim=HEAD_DIM,
+        bits=2,
+        n_outlier=32,
+        outlier_bits=3,
+        use_qjl=True,
+    )
+    restored.state = list(original.state)
+    restored.meta_state = original.meta_state
+
+    assert restored.offset == 7
+    assert len(restored.state) == 10
+    for expected, actual in zip(original.state, restored.state):
+        assert mx.array_equal(expected, actual)
