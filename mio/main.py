@@ -126,18 +126,22 @@ def _configured_tier_name(config, requested: str | None = None) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="mio",
-        description="Fast local MLX inference with DFlash + TurboQuant",
+        description="Local MLX inference and agent stack with DSpark/DFlash",
     )
     subparsers = parser.add_subparsers(dest="command")
 
     # --- serve ---
     serve_parser = subparsers.add_parser("serve", help="Start OpenAI-compatible API server")
     serve_parser.add_argument(
-        "--port", type=int, default=None,
+        "--port",
+        type=int,
+        default=None,
         help="Server port (default: persisted config, otherwise 9090)",
     )
     serve_parser.add_argument(
-        "--host", type=str, default=None,
+        "--host",
+        type=str,
+        default=None,
         help="Server host (default: persisted config, otherwise 127.0.0.1)",
     )
     serve_parser.add_argument(
@@ -159,27 +163,45 @@ def main() -> None:
     serve_parser.add_argument("--tandem", action="store_true", help="Load all tiers for tandem routing")
     serve_parser.add_argument("--tiers", type=str, default=None, help="Comma-separated tiers to load (default: large)")
     serve_parser.add_argument(
-        "--tier", type=str, default=None,
+        "--tier",
+        type=str,
+        default=None,
         help="Single tier to load (default: persisted active tier, otherwise large-moe)",
     )
     serve_parser.add_argument("--validate", action="store_true", help="Enable auto-validation of generated code")
     _add_prompt_policy_arguments(serve_parser)
     serve_parser.add_argument("--tq4", action="store_true", help="Enable TurboQuant 4-bit KV cache (default: off)")
-    serve_parser.add_argument("--mpath", type=int, default=1, help="Batched Multi-Path DFlash paths K (1 = vanilla DFlash, 2-4 typical)")
     serve_parser.add_argument(
-        "--context", type=str, default=None,
-        help="Override context window for the loaded tier(s). "
-             "Accepts '8k', '16k', '32k', '64k', '128k', '256k', or a raw integer. "
-             "Larger contexts cost more memory; smaller contexts free memory for other apps.",
+        "--mpath", type=int, default=1, help="Batched Multi-Path DFlash paths K (1 = vanilla DFlash, 2-4 typical)"
     )
-    serve_parser.add_argument("--compact-threshold", type=float, default=0.75,
-                              help="Compact messages when prompt > this fraction of context window (default 0.75, 1.0 to disable)")
-    serve_parser.add_argument("--compact-target", type=float, default=0.50,
-                              help="Compact down to this fraction of context window (default 0.50)")
-    serve_parser.add_argument("--no-compact-summarize", action="store_true",
-                              help="Disable stage-2 LLM summarization — use only heuristic tool-result truncation")
-    serve_parser.add_argument("--webui", action="store_true",
-                              help="Enable Mio UI web interface at /ui (disabled by default)")
+    serve_parser.add_argument(
+        "--context",
+        type=str,
+        default=None,
+        help="Override context window for the loaded tier(s). "
+        "Accepts '8k', '16k', '32k', '64k', '128k', '256k', or a raw integer. "
+        "Larger contexts cost more memory; smaller contexts free memory for other apps.",
+    )
+    serve_parser.add_argument(
+        "--compact-threshold",
+        type=float,
+        default=0.75,
+        help="Compact messages when prompt > this fraction of context window (default 0.75, 1.0 to disable)",
+    )
+    serve_parser.add_argument(
+        "--compact-target",
+        type=float,
+        default=0.50,
+        help="Compact down to this fraction of context window (default 0.50)",
+    )
+    serve_parser.add_argument(
+        "--no-compact-summarize",
+        action="store_true",
+        help="Disable stage-2 LLM summarization — use only heuristic tool-result truncation",
+    )
+    serve_parser.add_argument(
+        "--webui", action="store_true", help="Enable Mio UI web interface at /ui (disabled by default)"
+    )
     serve_parser.add_argument(
         "--mcp-config",
         type=str,
@@ -190,15 +212,21 @@ def main() -> None:
     # --- chat ---
     chat_parser = subparsers.add_parser("chat", help="Interactive chat (no tools, no agent)")
     chat_parser.add_argument(
-        "--tier", type=str, default=None,
+        "--tier",
+        type=str,
+        default=None,
         help="Model tier (default: persisted active tier, otherwise large-moe)",
     )
     chat_parser.add_argument("--paro", action="store_true", help="Use PARO quantized models (higher quality, slower)")
     _add_prompt_policy_arguments(chat_parser, include_no_caveman=True)
     chat_parser.add_argument("--tq4", action="store_true", help="Enable TurboQuant 4-bit KV cache (default: off)")
-    chat_parser.add_argument("--mpath", type=int, default=1, help="Batched Multi-Path DFlash paths K (1 = vanilla DFlash)")
     chat_parser.add_argument(
-        "--context", type=str, default=None,
+        "--mpath", type=int, default=1, help="Batched Multi-Path DFlash paths K (1 = vanilla DFlash)"
+    )
+    chat_parser.add_argument(
+        "--context",
+        type=str,
+        default=None,
         help="Override context window: '8k', '32k', '128k', etc., or a raw integer.",
     )
 
@@ -207,17 +235,29 @@ def main() -> None:
     dl_parser.add_argument("--tier", type=str, default=None, help="Specific tier to download (default: all)")
 
     # --- pull ---
-    pull_parser = subparsers.add_parser("pull", help="Download target + DFlash draft for a tier")
+    pull_parser = subparsers.add_parser(
+        "pull",
+        help="Download target + preferred DSpark + DFlash fallback for a tier",
+    )
     pull_parser.add_argument(
         "model_key",
         nargs="?",
         default=None,
-        help="Tier name (large-moe|large|medium|small) or raw model key. "
-             "Run without args to list everything.",
+        help="Tier name (large-moe|large|medium|small) or raw model key. Run without args to list everything.",
+    )
+    pull_parser.add_argument(
+        "--no-dspark",
+        action="store_true",
+        help="Skip the preferred DSpark drafter and pull only target/fallback.",
+    )
+    pull_parser.add_argument(
+        "--no-fallback",
+        action="store_true",
+        help="Skip downloading the compatible DFlash fallback for this pull.",
     )
 
     # --- configure ---
-    subparsers.add_parser("configure", help="Interactive model + DFlash + TurboQuant configuration")
+    subparsers.add_parser("configure", help="Interactive model, speculation, and KV-cache configuration")
 
     # --- batch ---
     batch_parser = subparsers.add_parser("batch", help="Batch inference from JSONL file")
@@ -240,8 +280,14 @@ def main() -> None:
         "mcp_action",
         nargs="?",
         choices=[
-            "list", "enable", "disable", "tools", "call",
-            "install-tools", "check", "doctor",
+            "list",
+            "enable",
+            "disable",
+            "tools",
+            "call",
+            "install-tools",
+            "check",
+            "doctor",
         ],
         default="list",
     )
@@ -257,7 +303,9 @@ def main() -> None:
         help="Explicit permission for remote/authenticated MCPs (repeatable).",
     )
     mcp_parser.add_argument("--allow-remote", action="store_true", help="Allow a remote MCP for this command only")
-    mcp_parser.add_argument("--allow-auth", action="store_true", help="Allow credential injection for this command only")
+    mcp_parser.add_argument(
+        "--allow-auth", action="store_true", help="Allow credential injection for this command only"
+    )
     mcp_parser.add_argument(
         "--mio-home",
         type=str,
@@ -278,7 +326,9 @@ def main() -> None:
     # --- Top-level flags for agent mode ---
     parser.add_argument("--tandem", action="store_true", help="Agent mode with tandem routing")
     parser.add_argument(
-        "--tier", type=str, default=None,
+        "--tier",
+        type=str,
+        default=None,
         help="Agent mode tier (default: persisted active tier, otherwise large-moe)",
     )
     parser.add_argument("--paro", action="store_true", help="Use PARO quantized models (higher quality, slower)")
@@ -286,7 +336,9 @@ def main() -> None:
     parser.add_argument("--tq4", action="store_true", help="Enable TurboQuant 4-bit KV cache (default: off)")
     parser.add_argument("--mpath", type=int, default=1, help="Batched Multi-Path DFlash paths K (1 = vanilla DFlash)")
     parser.add_argument(
-        "--context", type=str, default=None,
+        "--context",
+        type=str,
+        default=None,
         help="Override context window for agent mode: '8k', '32k', '128k', etc., or a raw integer.",
     )
     _add_prompt_policy_arguments(parser, dest_prefix="agent_")
@@ -415,9 +467,7 @@ def _cmd_mcp(args) -> None:
         if getattr(args, "json", False):
             print(json.dumps(report, indent=2, sort_keys=True))
         elif report.get("ok"):
-            console.print(
-                f"[green]Mio MCP tools OK[/green] — {report.get('release', 'active release')}"
-            )
+            console.print(f"[green]Mio MCP tools OK[/green] — {report.get('release', 'active release')}")
         else:
             console.print("[red]Mio MCP tool check failed[/red]")
             for error in report.get("errors", []):
@@ -520,10 +570,7 @@ def _cmd_chat(args) -> None:
 
     prompt_policy = getattr(args, "prompt_policy", None) or _resolve_prompt_policy_args(args)
     messages: list[dict] = apply_prompt_policy([], prompt_policy)
-    console.print(
-        f"[green]Ready.[/green] Prompt policy: {prompt_policy.label}. "
-        "Type 'quit' to exit.\n"
-    )
+    console.print(f"[green]Ready.[/green] Prompt policy: {prompt_policy.label}. Type 'quit' to exit.\n")
     while True:
         try:
             user_input = Prompt.ask("[bold cyan]You[/bold cyan]")
@@ -547,9 +594,7 @@ def _cmd_chat(args) -> None:
         # Show metrics
         m = engine.last_metrics
         console.print(
-            f"[dim]  {m.generation_tps:.1f} tok/s | "
-            f"{m.completion_tokens} tokens | "
-            f"{m.total_time_s:.2f}s[/dim]\n"
+            f"[dim]  {m.generation_tps:.1f} tok/s | {m.completion_tokens} tokens | {m.total_time_s:.2f}s[/dim]\n"
         )
 
     manager.unload_all()
@@ -575,6 +620,8 @@ def _cmd_download(args) -> None:
     for name, tier in tiers_to_download.items():
         models_to_download.append(tier.target_model)
         models_to_download.append(tier.draft_model)
+        if tier.draft_fallback_model:
+            models_to_download.append(tier.draft_fallback_model)
 
     if not confirm_download(models_to_download):
         return
@@ -603,17 +650,23 @@ def _cmd_batch(args) -> None:
 
 
 def _cmd_pull(args) -> None:
-    """Pull a model (target + DFlash draft)."""
+    """Pull a target plus its requested DSpark/DFlash stack."""
     from mio.pull import list_available, pull_model
 
     if args.model_key:
-        pull_model(args.model_key)
+        success = pull_model(
+            args.model_key,
+            include_dspark=not getattr(args, "no_dspark", False),
+            include_fallback=not getattr(args, "no_fallback", False),
+        )
+        if not success:
+            raise SystemExit(1)
     else:
         list_available()
 
 
 def _cmd_configure(args) -> None:
-    """Interactive model + DFlash + TurboQuant configuration."""
+    """Configure model, speculative backend, and KV-cache settings."""
     from mio.config import load_config
     from mio.configure import configure_interactive
 

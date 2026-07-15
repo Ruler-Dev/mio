@@ -1,7 +1,8 @@
-"""Unified DFlash + TurboQuant inference engine.
+"""Unified MLX inference engine with DSpark, DFlash, and target-AR paths.
 
-Uses the vendored mio.dflash runtime (the fast DFlash path that benchmarks
-240+ tok/s on Qwen3.5-35B-A3B-4bit) for both PARO and standard quantized models.
+The facade owns model/drafter selection, request semantics, cache policy,
+fallback telemetry, streaming, and batching. Backend-specific kernels and
+state transitions remain in their dedicated runtime modules.
 """
 
 from __future__ import annotations
@@ -27,26 +28,44 @@ class GenerationMetrics:
     end_to_end_tps: float = 0.0
     avg_acceptance_length: float = 0.0
     acceptance_ratio: float = 0.0
+    acceptance_ratio_available: bool = True
     peak_memory_gb: float = 0.0
     total_time_s: float = 0.0
     cycles: int = 0
     fallback_ar: bool = False
     fallback_reason: str | None = None
+    drafter_requested: str = "auto"
+    drafter_detected: str = "unknown"
+    drafter_selected: str = "baseline"
+    drafter_reason: str = "not_loaded"
+    drafter_fallback_used: bool = False
+    drafter_policy: tuple[str, ...] = ()
+    generation_backend: str = "baseline"
     metrics_scope: str = "request"  # request, or batch for MLX aggregate timings
     batch_size: int = 1
-    warm_offset: int = 0        # tokens skipped via prefix cache (0 = cold/miss)
-    cache_entries: int = 0      # prefix-cache size at the time of this call
+    warm_offset: int = 0  # tokens skipped via prefix cache (0 = cold/miss)
+    cache_entries: int = 0  # prefix-cache size at the time of this call
 
 
 @dataclass
 class MioEngine:
-    """DFlash-first engine using the vendored mio.dflash fast runtime."""
+    """Local MLX engine with metadata-driven speculative selection."""
 
     tier_config: TierConfig
     _target_model: Any = field(default=None, repr=False)
     _tokenizer: Any = field(default=None, repr=False)
     _draft_model: Any = field(default=None, repr=False)
+    _dspark_runtime: Any = field(default=None, repr=False)
     _target_meta: dict = field(default_factory=dict, repr=False)
+    _drafter_requested: str = field(default="auto", repr=False)
+    _drafter_detected: str = field(default="unknown", repr=False)
+    _drafter_selected: str = field(default="baseline", repr=False)
+    _drafter_reason: str = field(default="not_loaded", repr=False)
+    _drafter_ref: str | None = field(default=None, repr=False)
+    _drafter_fallback_used: bool = field(default=False, repr=False)
+    _drafter_strict: bool = field(default=False, repr=False)
+    _drafter_policy: list[str] = field(default_factory=list, repr=False)
+    _dspark_prefix_status: dict[str, Any] = field(default_factory=dict, repr=False)
     _loaded: bool = False
     _last_metrics: GenerationMetrics = field(default_factory=GenerationMetrics)
     # Prefix cache: maps token-tuple → (cached_state, offset). Populated automatically
@@ -79,13 +98,13 @@ class MioEngine:
         # entry on large-moe already eats 32 GB of that — two would OOM and
         # Metal starts killing command buffers as "innocent victims".
         ctx = tc.context_window
-        if ctx >= 65536:        # 64K+ (large-moe)
+        if ctx >= 65536:  # 64K+ (large-moe)
             self._prefix_cache_max_entries = 1
             self._prefix_cache_token_budget = ctx  # one full-context entry
-        elif ctx >= 16384:      # 16-32K (medium, large dense)
+        elif ctx >= 16384:  # 16-32K (medium, large dense)
             self._prefix_cache_max_entries = 2
             self._prefix_cache_token_budget = ctx * 2
-        else:                   # <=8K (small)
+        else:  # <=8K (small)
             self._prefix_cache_max_entries = 4
             self._prefix_cache_token_budget = ctx * 4
         print(f"Loading {tc.name} tier: {tc.target_model}")
@@ -144,28 +163,196 @@ class MioEngine:
         }
         print(f"  Target: PARO INT4 ({target_family})")
 
-    def _load_draft(self, tc: TierConfig) -> None:
-        """Load the DFlash draft model. No draft -> baseline AR fallback."""
-        try:
-            from mio.dflash.runtime import (
-                bind_draft_target_model,
-                load_draft_bundle,
-                validate_draft_target_compatibility,
-            )
-            self._draft_model, draft_meta = load_draft_bundle(tc.draft_model)
-        except Exception as e:
-            print(f"  WARNING: Draft load failed ({e}), baseline AR fallback")
-            self._draft_model = None
-            return
+    @staticmethod
+    def _drafter_error(error: BaseException) -> str:
+        detail = " ".join(str(error).split())
+        if len(detail) > 240:
+            detail = detail[:237] + "..."
+        return f"{type(error).__name__}: {detail}" if detail else type(error).__name__
 
-        # A model that loads but targets a different architecture is not a safe
-        # autoregressive fallback condition: surface the configuration error.
+    def _load_dflash(self, draft_ref: str) -> str:
+        """Load, validate, and bind one pure DFlash checkpoint."""
+
+        from mio.drafter_selection import DrafterKind, inspect_drafter
+
+        descriptor = inspect_drafter(draft_ref)
+        if descriptor.kind in {DrafterKind.DSPARK, DrafterKind.HYBRID_DFLASH_MARKOV}:
+            raise ValueError("DSpark/hybrid checkpoints cannot be reused as the DFlash fallback")
+
+        from mio.dflash.runtime import (
+            bind_draft_target_model,
+            load_draft_bundle,
+            validate_draft_target_compatibility,
+        )
+
+        draft_model, draft_meta = load_draft_bundle(draft_ref)
         validate_draft_target_compatibility(
             self._target_meta.get("config") or {},
             draft_meta.get("config") or {},
         )
-        bind_draft_target_model(self._draft_model, self._target_model)
-        print(f"  Draft loaded: {draft_meta.get('resolved_model_ref', tc.draft_model)}")
+        bind_draft_target_model(draft_model, self._target_model)
+        self._draft_model = draft_model
+        return str(draft_meta.get("resolved_model_ref", draft_ref))
+
+    def _log_drafter_selection(self) -> None:
+        policy = ",".join(self._drafter_policy) if self._drafter_policy else "none"
+        print(
+            "  Drafter selection: "
+            f"requested={self._drafter_requested} "
+            f"detected={self._drafter_detected} "
+            f"selected={self._drafter_selected} "
+            f"reason={self._drafter_reason} "
+            f"policy={policy}",
+        )
+
+    def _load_draft(self, tc: TierConfig) -> None:
+        """Select and load DSpark or DFlash with an observable safe fallback."""
+
+        from mio.drafter_selection import plan_drafter
+
+        plan = plan_drafter(tc, self._target_meta.get("config") or {})
+        self._draft_model = None
+        self._dspark_runtime = None
+        self._drafter_requested = plan.requested
+        self._drafter_detected = plan.detected.value
+        self._drafter_selected = "baseline"
+        self._drafter_reason = plan.reason
+        self._drafter_ref = None
+        self._drafter_fallback_used = False
+        self._drafter_strict = plan.strict
+        self._drafter_policy = []
+        self._dspark_prefix_status = {}
+
+        if plan.primary_backend == "dspark":
+            tq_bits = self._resolved_tq_bits()
+            pq_bits = self._resolved_pq_bits()
+            if tq_bits is not None:
+                self._drafter_policy.append(f"tq{tq_bits}_bypassed_dspark_uses_unquantized_target_cache")
+            if pq_bits is not None:
+                self._drafter_policy.append(f"pq{pq_bits}_bypassed_dspark_uses_unquantized_target_cache")
+
+            dflash_requirements: list[str] = []
+            bmp_paths = int(getattr(tc, "bmp_paths", 1) or 1)
+            if bmp_paths >= 2:
+                dflash_requirements.append(f"bmp_paths={bmp_paths}")
+            ddtree_budget = int(getattr(tc, "ddtree_budget", 0) or 0)
+            import os as _os
+
+            env_ddtree = _os.environ.get("MIO_DDTREE_BUDGET")
+            if env_ddtree:
+                try:
+                    ddtree_budget = max(ddtree_budget, int(env_ddtree))
+                except ValueError:
+                    pass
+            if ddtree_budget > 0:
+                dflash_requirements.append(f"ddtree_budget={ddtree_budget}")
+            if dflash_requirements:
+                requirement = ",".join(dflash_requirements)
+                self._drafter_policy.append(f"dspark_bypassed_{requirement}_requires_dflash")
+                self._drafter_reason = f"dspark_capability_requires_dflash: {requirement}"
+                if plan.strict:
+                    self._log_drafter_selection()
+                    raise RuntimeError(self._drafter_reason)
+                if plan.fallback_ref is None:
+                    self._drafter_reason += "; no_compatible_dflash"
+                    self._log_drafter_selection()
+                    print("  WARNING: using target-only baseline; requested feature needs DFlash")
+                    return
+                try:
+                    resolved_ref = self._load_dflash(plan.fallback_ref)
+                except Exception as fallback_error:
+                    self._drafter_reason += f"; dflash_load_failed: {self._drafter_error(fallback_error)}"
+                    self._log_drafter_selection()
+                    print("  WARNING: using target-only baseline; required DFlash failed")
+                    return
+                self._drafter_selected = "dflash"
+                self._drafter_ref = resolved_ref
+                self._drafter_fallback_used = True
+                self._log_drafter_selection()
+                return
+
+            try:
+                from mio.dspark_runtime import DSparkRuntime
+
+                self._dspark_runtime = DSparkRuntime.load(
+                    target_model=self._target_model,
+                    tokenizer=self._tokenizer,
+                    draft_ref=plan.primary_ref,
+                    max_draft_tokens=int(getattr(tc, "dspark_max_draft_tokens", 2) or 2),
+                    lookup_drafts=bool(getattr(tc, "dspark_lookup_drafts", True)),
+                    prefix_cache=bool(getattr(tc, "dspark_prefix_cache", True)),
+                    prefix_cache_slots=self._prefix_cache_max_entries,
+                    prefix_cache_min_reuse=self._prefix_cache_min_tokens,
+                )
+            except Exception as error:
+                primary_error = self._drafter_error(error)
+                if plan.strict:
+                    self._drafter_reason = f"dspark_load_failed_strict: {primary_error}"
+                    self._log_drafter_selection()
+                    raise RuntimeError(self._drafter_reason) from error
+                if plan.fallback_ref is None:
+                    self._drafter_reason = f"dspark_load_failed_no_compatible_dflash: {primary_error}"
+                    self._log_drafter_selection()
+                    print("  WARNING: using target-only baseline; no compatible DFlash fallback")
+                    return
+                try:
+                    resolved_ref = self._load_dflash(plan.fallback_ref)
+                except Exception as fallback_error:
+                    self._drafter_reason = (
+                        f"dspark_load_failed: {primary_error}; "
+                        f"dflash_fallback_failed: {self._drafter_error(fallback_error)}"
+                    )
+                    self._log_drafter_selection()
+                    print("  WARNING: using target-only baseline; both drafters failed")
+                    return
+                self._drafter_selected = "dflash"
+                self._drafter_ref = resolved_ref
+                self._drafter_fallback_used = True
+                self._drafter_reason = f"dspark_load_failed_using_compatible_dflash: {primary_error}"
+                self._log_drafter_selection()
+                return
+
+            self._drafter_selected = "dspark"
+            self._drafter_ref = plan.primary_ref
+            self._drafter_reason = plan.reason
+            try:
+                prefix_status = getattr(
+                    self._dspark_runtime,
+                    "prefix_cache_status",
+                    None,
+                )
+            except Exception as error:
+                # Status is observability, not a correctness dependency.  A
+                # broken upstream info() call must not leak the successfully
+                # loaded worker or force a valid DSpark runtime to be dropped.
+                prefix_status = {
+                    "enabled": False,
+                    "reason": f"status_failed:{type(error).__name__}",
+                }
+            self._dspark_prefix_status = (
+                dict(prefix_status)
+                if isinstance(prefix_status, dict)
+                else {"enabled": False, "reason": "runtime_status_unavailable"}
+            )
+            prefix_reason = self._dspark_prefix_status.get("reason", "unknown")
+            self._drafter_policy.append(f"prefix_cache_{prefix_reason}")
+            self._log_drafter_selection()
+            return
+
+        try:
+            resolved_ref = self._load_dflash(plan.primary_ref)
+        except Exception as error:
+            load_error = self._drafter_error(error)
+            self._drafter_reason = f"dflash_load_failed: {load_error}"
+            self._log_drafter_selection()
+            if plan.strict:
+                raise RuntimeError(self._drafter_reason) from error
+            print("  WARNING: using target-only baseline; DFlash load failed")
+            return
+        self._drafter_selected = "dflash"
+        self._drafter_ref = resolved_ref
+        self._drafter_reason = plan.reason
+        self._log_drafter_selection()
 
     @staticmethod
     def _detect_paro(model_path: str) -> bool:
@@ -179,14 +366,24 @@ class MioEngine:
             return False
 
     def unload(self) -> None:
-        if not self._loaded:
-            return
-        self._target_model = None
-        self._tokenizer = None
-        self._draft_model = None
-        self._target_meta = {}
-        self._loaded = False
+        # Cached MLX arrays belong to this exact target instance and must never
+        # survive a reload.  Also clean partially loaded engines after strict
+        # drafter failures, where ``_loaded`` was never set to True.
+        self._prefix_cache_invalidate()
+        self._pending_assistant_prefill = ""
+        try:
+            if self._dspark_runtime is not None:
+                self._dspark_runtime.close()
+        finally:
+            self._dspark_runtime = None
+            self._target_model = None
+            self._tokenizer = None
+            self._draft_model = None
+            self._target_meta = {}
+            self._dspark_prefix_status = {}
+            self._loaded = False
         import gc
+
         gc.collect()
 
     @property
@@ -196,6 +393,26 @@ class MioEngine:
     @property
     def last_metrics(self) -> GenerationMetrics:
         return self._last_metrics
+
+    @property
+    def drafter_status(self) -> dict[str, Any]:
+        """Return the requested and actually loaded drafter backend."""
+
+        return {
+            "requested": self._drafter_requested,
+            "detected": self._drafter_detected,
+            "selected": self._drafter_selected,
+            "reason": self._drafter_reason,
+            "ref": self._drafter_ref,
+            "fallback_used": self._drafter_fallback_used,
+            "strict": self._drafter_strict,
+            "capability_policy": list(self._drafter_policy),
+            "dspark": {
+                "max_draft_tokens": int(getattr(self.tier_config, "dspark_max_draft_tokens", 2) or 2),
+                "lookup_drafts": bool(getattr(self.tier_config, "dspark_lookup_drafts", True)),
+                "prefix_cache": dict(self._dspark_prefix_status),
+            },
+        }
 
     def _resolved_tq_bits(self) -> int | None:
         """Return {2, 3, 4} if TurboQuant is enabled for this tier; else None."""
@@ -216,6 +433,7 @@ class MioEngine:
         the runtime so the commit path is compatible with QuantizedKVCache.
         """
         import os as _os
+
         if self._draft_model is None:
             return 0
         if self._target_meta.get("target_family") != "hybrid_gdn":
@@ -240,6 +458,7 @@ class MioEngine:
         forward instead, which update_and_fetch handles correctly for both.
         """
         import os as _os
+
         _os.environ.setdefault("DDTREE_EXACT_COMMIT", "1")
 
     # --- Prefix cache ---
@@ -437,8 +656,7 @@ class MioEngine:
         final["offset"] = len(key_tokens)
         self._prefix_cache[key] = final
         print(
-            f"[prefix-cache] STORED key_len={len(key_tokens)} "
-            f"(entries={len(self._prefix_cache)})",
+            f"[prefix-cache] STORED key_len={len(key_tokens)} (entries={len(self._prefix_cache)})",
             flush=True,
         )
 
@@ -496,7 +714,9 @@ class MioEngine:
                 for kw in tmpl_kwargs_tries:
                     try:
                         text = self._tokenizer.apply_chat_template(
-                            msg_set, tokenize=False, **kw,
+                            msg_set,
+                            tokenize=False,
+                            **kw,
                         )
                         break
                     except Exception:
@@ -517,17 +737,26 @@ class MioEngine:
 
         # Optional debug logging — enable with MIO_DEBUG_LOG=1.
         import os
+
         if os.environ.get("MIO_DEBUG_LOG", "") in ("1", "true", "yes"):
             try:
                 path = os.environ.get("MIO_DEBUG_LOG_PATH", "/tmp/mio-serve-debug.log")
                 import time
+
                 with open(path, "a") as f:
-                    f.write(json.dumps({
-                        "ts": time.time(), "event": "chat_template",
-                        "token_count": len(tokens),
-                        "prompt_text_head": (text or "")[:800],
-                        "prompt_text_tail": (text or "")[-800:],
-                    }, ensure_ascii=False) + "\n")
+                    f.write(
+                        json.dumps(
+                            {
+                                "ts": time.time(),
+                                "event": "chat_template",
+                                "token_count": len(tokens),
+                                "prompt_text_head": (text or "")[:800],
+                                "prompt_text_tail": (text or "")[-800:],
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n"
+                    )
             except Exception:
                 pass
         return tokens
@@ -599,6 +828,16 @@ class MioEngine:
         metrics.completion_tokens = count
         metrics.total_tokens = metrics.prompt_tokens + count
 
+    def _drafter_metric_values(self) -> dict[str, Any]:
+        return {
+            "drafter_requested": self._drafter_requested,
+            "drafter_detected": self._drafter_detected,
+            "drafter_selected": self._drafter_selected,
+            "drafter_reason": self._drafter_reason,
+            "drafter_fallback_used": self._drafter_fallback_used,
+            "drafter_policy": tuple(self._drafter_policy),
+        }
+
     def _metrics_from_result(self, result: dict[str, Any]) -> GenerationMetrics:
         gen_ids = result.get("generated_token_ids", [])
         elapsed_us = result.get("elapsed_us", 0)
@@ -609,6 +848,9 @@ class MioEngine:
         gen_tokens = result.get("generation_tokens", len(gen_ids))
         prompt_tok_count = result.get("prompt_token_count", 0)
         decode_us = max(0, elapsed_us - prefill_us)
+        raw_acceptance = result.get("acceptance_ratio", 0)
+        acceptance_available = bool(result.get("acceptance_ratio_available", raw_acceptance is not None))
+        acceptance_ratio = float(raw_acceptance or 0.0)
 
         return GenerationMetrics(
             prompt_tokens=prompt_tok_count,
@@ -617,19 +859,24 @@ class MioEngine:
             prompt_tps=prompt_tok_count / max(prefill_us / 1e6, 1e-9) if prefill_us > 0 else 0,
             generation_tps=gen_tokens / max(decode_us / 1e6, 1e-9) if decode_us > 0 else 0,
             end_to_end_tps=gen_tokens / max(elapsed_us / 1e6, 1e-9) if elapsed_us > 0 else 0,
-            acceptance_ratio=result.get("acceptance_ratio", 0),
+            acceptance_ratio=acceptance_ratio,
+            acceptance_ratio_available=acceptance_available,
             avg_acceptance_length=(
                 result.get("tokens_per_cycle", 0)
                 or result.get("avg_acceptance", 0)  # DDTree's key name
-                or result.get("acceptance_ratio", 0) * 16
+                or acceptance_ratio * 16
             ),
             peak_memory_gb=result.get("peak_memory_gb", 0) or 0,
             total_time_s=elapsed_us / 1e6,
             cycles=result.get("cycles_completed", 0),
             fallback_ar=result.get("fallback_ar", False),
             fallback_reason=result.get("fallback_reason"),
+            **self._drafter_metric_values(),
+            generation_backend=str(
+                result.get("backend") or ("dflash" if self._draft_model is not None else "baseline")
+            ),
             warm_offset=int(result.get("warm_offset", 0) or 0),
-            cache_entries=len(self._prefix_cache),
+            cache_entries=int(result.get("cache_entries", len(self._prefix_cache)) or 0),
         )
 
     def generate(
@@ -649,7 +896,17 @@ class MioEngine:
 
         configured_bmp_paths = int(getattr(self.tier_config, "bmp_paths", 1) or 1)
         bmp_nonstream = self._draft_model is not None and configured_bmp_paths >= 2
-        if any(value for value in (stop or []) if value) and not bmp_nonstream:
+        dspark_tool_fallback = bool(self._dspark_runtime is not None and tools and tool_required)
+        native_stop_nonstream = bmp_nonstream or (self._dspark_runtime is not None and not dspark_tool_fallback)
+        # Required-tool generation needs dynamic EOS suppression: hold EOS
+        # during the opening tool-call window, then re-enable it as a stop token.
+        # The stepwise streaming runtimes implement that contract; delegating
+        # here also prevents the one-shot target fallback from suppressing EOS
+        # all the way to a large max_tokens limit.
+        delegate_to_stream = bool(tools and tool_required) or (
+            any(value for value in (stop or []) if value) and not native_stop_nonstream
+        )
+        if delegate_to_stream:
             chunks: list[str] = []
             final_metrics: GenerationMetrics | None = None
             for chunk, metrics in self.generate_stream(
@@ -669,20 +926,25 @@ class MioEngine:
                     final_metrics = metrics
             if final_metrics is None:
                 raise RuntimeError("streaming stop path ended without generation metrics")
-            return "".join(chunks), final_metrics
+            text = "".join(chunks)
+            if tools:
+                end = text.rfind("</tool_call>")
+                trimmed_end = end + len("</tool_call>") if end >= 0 else -1
+                if 0 <= trimmed_end < len(text):
+                    text = text[:trimmed_end]
+                    self._adjust_completion_metrics(final_metrics, text)
+            self._last_metrics = final_metrics
+            return text, final_metrics
 
         max_tokens = self.tier_config.max_output_tokens if max_tokens is None else max_tokens
-        temperature, top_p, top_k, seed = self._resolve_sampling(
-            temperature, top_p, top_k, seed
-        )
+        temperature, top_p, top_k, seed = self._resolve_sampling(temperature, top_p, top_k, seed)
         sampling = temperature > 0.0
         sampler = self._make_sampler(temperature, top_p, top_k, seed)
         prompt_tokens = self._apply_chat_template(messages, tools=tools)
         stop_ids = self._eos_token_ids()
-        # Non-streaming path keeps simpler behaviour: suppress EOS entirely
-        # when tools are present and trim at the last </tool_call>. Streaming
-        # path (used by Kilo) gets the smarter per-step relaxation.
-        suppress_ids = list(stop_ids) if tools and tool_required else None
+        # Required-tool requests have already delegated to the streaming path,
+        # so no one-shot branch below may permanently suppress EOS.
+        suppress_ids = None
 
         tq_bits = self._resolved_tq_bits()
         pq_bits = self._resolved_pq_bits()
@@ -694,7 +956,19 @@ class MioEngine:
             if tq_bits is not None or pq_bits is not None:
                 bmp_paths = 1
 
-        if sampling:
+        if self._dspark_runtime is not None and not dspark_tool_fallback:
+            # mlx-dspark implements exact speculative sampling as well as
+            # greedy verification, so stochastic requests remain speculative.
+            result = self._dspark_runtime.generate(
+                prompt_ids=prompt_tokens,
+                max_new_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                seed=seed,
+                stop=stop,
+            )
+        elif sampling or dspark_tool_fallback:
             # The vendored DFlash and DDTree verifiers use greedy exact-match
             # acceptance.  Applying a stochastic sampler only to their bonus
             # token would bias the distribution, so stochastic requests take
@@ -715,12 +989,18 @@ class MioEngine:
                 sampler=sampler,
             )
             result["fallback_ar"] = True
-            result["fallback_reason"] = "stochastic_sampling_requires_target_only"
+            result["backend"] = "baseline"
+            result["fallback_reason"] = (
+                "dspark_tool_required_uses_target_only_for_eos_suppression"
+                if dspark_tool_fallback
+                else "stochastic_sampling_requires_target_only"
+            )
         elif ddtree_budget > 0:
             # DDTree owns its own cache policy: PQ/TQ off, 8-bit KV on for some
             # compression, sequential-forward commit for quantized compatibility.
             self._prepare_ddtree_env()
             from mio.ddtree.runtime import generate_ddtree_once
+
             result = generate_ddtree_once(
                 target_model=self._target_model,
                 draft_model=self._draft_model,
@@ -733,8 +1013,10 @@ class MioEngine:
                 quantize_kv_cache=True,
             )
             result.setdefault("prompt_token_count", len(prompt_tokens))
+            result.setdefault("backend", "ddtree")
         elif self._draft_model is not None and bmp_paths >= 2:
             from mio.dflash.bmp_runtime import generate_bmp_dflash_once
+
             result = generate_bmp_dflash_once(
                 target_model=self._target_model,
                 tokenizer=self._tokenizer,
@@ -745,8 +1027,10 @@ class MioEngine:
                 prompt_tokens_override=prompt_tokens,
                 num_paths=bmp_paths,
             )
+            result.setdefault("backend", "bmp_dflash")
         elif self._draft_model is not None:
             from mio.dflash.runtime import generate_dflash_once
+
             warm_state = None
             if self._prefix_cache_enabled():
                 warm_state = self._prefix_cache_lookup(prompt_tokens)
@@ -765,10 +1049,12 @@ class MioEngine:
                 warm_state=warm_state,
                 return_final_state=self._prefix_cache_enabled(),
             )
+            result.setdefault("backend", "dflash")
             if self._prefix_cache_enabled():
                 self._prefix_cache_store(prompt_tokens, result)
         else:
             from mio.dflash.runtime import generate_baseline_once
+
             result = generate_baseline_once(
                 target_model=self._target_model,
                 tokenizer=self._tokenizer,
@@ -781,9 +1067,13 @@ class MioEngine:
                 tq_bits=tq_bits,
                 pq_bits=pq_bits,
             )
+            result.setdefault("backend", "baseline")
 
         gen_ids = result.get("generated_token_ids", [])
-        text = self._tokenizer.decode(gen_ids, skip_special_tokens=True)
+        if result.get("backend") == "dspark":
+            text = str(result.get("text", ""))
+        else:
+            text = self._tokenizer.decode(gen_ids, skip_special_tokens=True)
         if self._pending_assistant_prefill:
             text = self._pending_assistant_prefill + text
             self._pending_assistant_prefill = ""
@@ -797,7 +1087,7 @@ class MioEngine:
                 trimmed = True
         text, stopped = self._truncate_at_stop(text, stop)
         metrics = self._metrics_from_result(result)
-        if trimmed or stopped:
+        if trimmed or stopped or (result.get("backend") == "dspark" and stop):
             self._adjust_completion_metrics(metrics, text)
         self._last_metrics = metrics
         return text, metrics
@@ -865,9 +1155,7 @@ class MioEngine:
         else:
             resolved_max = max(1, min(int(max_tokens), 32768))
 
-        temperature, top_p, top_k, seed = self._resolve_sampling(
-            temperature, top_p, top_k, seed
-        )
+        temperature, top_p, top_k, seed = self._resolve_sampling(temperature, top_p, top_k, seed)
         if seed is not None and temperature > 0.0:
             # MLX continuous batching owns one RNG stream for the whole active
             # batch, so a seeded request would otherwise change output when a
@@ -876,11 +1164,7 @@ class MioEngine:
             return [
                 self.generate(
                     messages,
-                    max_tokens=(
-                        resolved_max[index]
-                        if isinstance(resolved_max, list)
-                        else resolved_max
-                    ),
+                    max_tokens=(resolved_max[index] if isinstance(resolved_max, list) else resolved_max),
                     temperature=temperature,
                     top_p=top_p,
                     top_k=top_k,
@@ -915,13 +1199,14 @@ class MioEngine:
                 prompt_tps=float(stats.prompt_tps),
                 generation_tps=float(stats.generation_tps),
                 end_to_end_tps=(
-                    float(stats.generation_tokens)
-                    / max(float(stats.prompt_time) + float(stats.generation_time), 1e-9)
+                    float(stats.generation_tokens) / max(float(stats.prompt_time) + float(stats.generation_time), 1e-9)
                 ),
                 peak_memory_gb=float(stats.peak_memory),
                 total_time_s=float(stats.prompt_time) + float(stats.generation_time),
                 fallback_ar=True,
                 fallback_reason="continuous_batch_uses_target_only",
+                **self._drafter_metric_values(),
+                generation_backend="batch_target_only",
                 metrics_scope="batch",
                 batch_size=len(messages_batch),
             )
@@ -1024,6 +1309,60 @@ class MioEngine:
         detokenizer.reset()
         return detokenizer
 
+    def _generate_dspark_stream_raw(
+        self,
+        messages: list[dict],
+        *,
+        max_tokens: int | None,
+        temperature: float | None,
+        tools: list[dict] | None,
+        top_p: float | None,
+        top_k: int | None,
+        seed: int | None,
+        stop_signal: threading.Event | None,
+    ) -> Generator[tuple[str, GenerationMetrics | None], None, None]:
+        """Adapt mlx-dspark's callback stream to Mio's public stream shape."""
+
+        runtime = self._dspark_runtime
+        if runtime is None:
+            raise RuntimeError("DSpark streaming requested without a loaded runtime")
+        resolved_max = self.tier_config.max_output_tokens if max_tokens is None else max_tokens
+        temperature, top_p, top_k, seed = self._resolve_sampling(temperature, top_p, top_k, seed)
+        prompt_tokens = self._apply_chat_template(messages, tools=tools)
+        stream = runtime.stream(
+            prompt_ids=prompt_tokens,
+            max_new_tokens=resolved_max,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            seed=seed,
+            # Public textual stops are withheld by generate_stream(), which
+            # also signals cancellation. Passing them here would trim twice.
+            stop=None,
+            cancel=stop_signal,
+        )
+        prefix_emitted = False
+        try:
+            for chunk, result in stream:
+                if result is None:
+                    if self._pending_assistant_prefill and not prefix_emitted:
+                        yield self._pending_assistant_prefill, None
+                        prefix_emitted = True
+                    if chunk:
+                        yield chunk, None
+                    continue
+
+                if self._pending_assistant_prefill and not prefix_emitted:
+                    yield self._pending_assistant_prefill, None
+                self._pending_assistant_prefill = ""
+                metrics = self._metrics_from_result(result)
+                self._last_metrics = metrics
+                yield "", metrics
+        finally:
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
+
     def _generate_stream_raw(
         self,
         messages: list[dict],
@@ -1040,10 +1379,22 @@ class MioEngine:
         if not self._loaded:
             raise RuntimeError("Engine not loaded.")
 
+        dspark_tool_fallback = bool(self._dspark_runtime is not None and tools and tool_required)
+        if self._dspark_runtime is not None and not dspark_tool_fallback:
+            yield from self._generate_dspark_stream_raw(
+                messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                tools=tools,
+                top_p=top_p,
+                top_k=top_k,
+                seed=seed,
+                stop_signal=stop_signal,
+            )
+            return
+
         max_tokens = self.tier_config.max_output_tokens if max_tokens is None else max_tokens
-        temperature, top_p, top_k, seed = self._resolve_sampling(
-            temperature, top_p, top_k, seed
-        )
+        temperature, top_p, top_k, seed = self._resolve_sampling(temperature, top_p, top_k, seed)
         sampling = temperature > 0.0
         sampler = self._make_sampler(temperature, top_p, top_k, seed)
         prompt_tokens = self._apply_chat_template(messages, tools=tools)
@@ -1060,6 +1411,14 @@ class MioEngine:
         tq_bits = self._resolved_tq_bits()
         pq_bits = self._resolved_pq_bits()
         ddtree_budget = self._resolved_ddtree_budget()
+        ddtree_tool_fallback = bool(ddtree_budget > 0 and tools and tool_required)
+        dspark_tool_fallback_reason = (
+            "dspark_tool_required_uses_target_only_for_eos_suppression" if dspark_tool_fallback else None
+        )
+        ddtree_tool_fallback_reason = (
+            "ddtree_tool_required_uses_target_only_for_dynamic_eos_suppression" if ddtree_tool_fallback else None
+        )
+        tool_fallback_reason = dspark_tool_fallback_reason or ddtree_tool_fallback_reason
 
         # Prefix cache lookup — same machinery as generate(). Skip when DDTree
         # is driving: tree_aware verify mutates caches beyond what a dict
@@ -1068,7 +1427,7 @@ class MioEngine:
         if not sampling and ddtree_budget == 0 and self._prefix_cache_enabled():
             warm_state = self._prefix_cache_lookup(prompt_tokens)
 
-        if sampling:
+        if sampling or ddtree_tool_fallback:
             from mio.dflash.runtime import stream_baseline_generate
 
             stream = stream_baseline_generate(
@@ -1078,16 +1437,20 @@ class MioEngine:
                 max_new_tokens=max_tokens,
                 stop_token_ids=stop_ids,
                 suppress_token_ids=suppress_ids,
+                relax_suppress_after=relax_after,
+                relax_suppress_token_ids=relax_ids,
                 prompt_tokens_override=prompt_tokens,
                 quantize_kv_cache=False,
                 tq_bits=tq_bits,
                 pq_bits=pq_bits,
                 sampler=sampler,
-                fallback_reason="stochastic_sampling_requires_target_only",
+                fallback_reason=(tool_fallback_reason or "stochastic_sampling_requires_target_only"),
             )
+            stream_backend = "baseline"
         elif ddtree_budget > 0:
             self._prepare_ddtree_env()
             from mio.ddtree.runtime import stream_ddtree_generate
+
             stream = stream_ddtree_generate(
                 target_model=self._target_model,
                 draft_model=self._draft_model,
@@ -1099,8 +1462,10 @@ class MioEngine:
                 suppress_token_ids=suppress_ids,
                 quantize_kv_cache=True,
             )
+            stream_backend = "ddtree"
         elif self._draft_model is not None:
             from mio.dflash.runtime import stream_dflash_generate
+
             stream = stream_dflash_generate(
                 target_model=self._target_model,
                 tokenizer=self._tokenizer,
@@ -1117,8 +1482,10 @@ class MioEngine:
                 pq_bits=pq_bits,
                 warm_state=warm_state,
             )
+            stream_backend = "dflash"
         else:
             from mio.dflash.runtime import stream_baseline_generate
+
             stream = stream_baseline_generate(
                 target_model=self._target_model,
                 tokenizer=self._tokenizer,
@@ -1126,19 +1493,20 @@ class MioEngine:
                 max_new_tokens=max_tokens,
                 stop_token_ids=stop_ids,
                 suppress_token_ids=suppress_ids,
+                relax_suppress_after=relax_after,
+                relax_suppress_token_ids=relax_ids,
                 prompt_tokens_override=prompt_tokens,
                 quantize_kv_cache=False,
                 tq_bits=tq_bits,
                 pq_bits=pq_bits,
+                fallback_reason=dspark_tool_fallback_reason,
             )
+            stream_backend = "baseline"
 
         decode_pending: list[int] = []
         decode_chunk_tokens = max(1, int(decode_chunk_tokens))
         detokenizer = self._new_streaming_detokenizer()
-        special_ids = {
-            int(token_id)
-            for token_id in (getattr(self._tokenizer, "all_special_ids", None) or [])
-        }
+        special_ids = {int(token_id) for token_id in (getattr(self._tokenizer, "all_special_ids", None) or [])}
 
         def flush_decode(*, final: bool = False) -> str:
             for token_id in decode_pending:
@@ -1172,15 +1540,9 @@ class MioEngine:
                             break
 
                 elif ev_type == "token":
-                    generation_tokens = int(
-                        event.get("generated_tokens", generation_tokens + 1)
-                    )
-                    acceptance_ratio = float(
-                        event.get("acceptance_ratio", acceptance_ratio) or 0.0
-                    )
-                    cycles_completed = int(
-                        event.get("cycles_completed", cycles_completed) or 0
-                    )
+                    generation_tokens = int(event.get("generated_tokens", generation_tokens + 1))
+                    acceptance_ratio = float(event.get("acceptance_ratio", acceptance_ratio) or 0.0)
+                    cycles_completed = int(event.get("cycles_completed", cycles_completed) or 0)
                     decode_pending.append(event["token_id"])
                     if len(decode_pending) >= decode_chunk_tokens:
                         chunk = flush_decode()
@@ -1190,15 +1552,9 @@ class MioEngine:
                                 break
 
                 elif ev_type == "summary":
-                    generation_tokens = int(
-                        event.get("generation_tokens", generation_tokens) or generation_tokens
-                    )
-                    acceptance_ratio = float(
-                        event.get("acceptance_ratio", acceptance_ratio) or 0.0
-                    )
-                    cycles_completed = int(
-                        event.get("cycles_completed", cycles_completed) or 0
-                    )
+                    generation_tokens = int(event.get("generation_tokens", generation_tokens) or generation_tokens)
+                    acceptance_ratio = float(event.get("acceptance_ratio", acceptance_ratio) or 0.0)
+                    cycles_completed = int(event.get("cycles_completed", cycles_completed) or 0)
                     chunk = flush_decode(final=True)
                     if chunk:
                         yield chunk, None
@@ -1208,6 +1564,7 @@ class MioEngine:
                         prefill_emitted = True
                     self._pending_assistant_prefill = ""
                     event.setdefault("prefill_us", prefill_us)
+                    event.setdefault("backend", stream_backend)
                     metrics = self._metrics_from_result(event)
                     self._last_metrics = metrics
                     if not sampling and self._prefix_cache_enabled():
@@ -1230,10 +1587,11 @@ class MioEngine:
                 "acceptance_ratio": acceptance_ratio,
                 "cycles_completed": cycles_completed,
                 "warm_offset": warm_offset,
-                "fallback_ar": sampling,
+                "fallback_ar": bool(sampling or dspark_tool_fallback or ddtree_tool_fallback),
                 "fallback_reason": (
-                    "stochastic_sampling_requires_target_only" if sampling else None
+                    tool_fallback_reason or ("stochastic_sampling_requires_target_only" if sampling else None)
                 ),
+                "backend": stream_backend,
                 "stopped_early": True,
             }
             metrics = self._metrics_from_result(stopped_result)

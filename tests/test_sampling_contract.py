@@ -141,13 +141,14 @@ def test_unspecified_temperature_keeps_fast_greedy_dflash(monkeypatch):
     assert captured["draft_model"] is engine._draft_model
 
 
-def test_auto_tools_do_not_suppress_eos_but_required_tools_do(monkeypatch):
+def test_auto_tools_do_not_suppress_eos_but_required_tools_relax_in_stream(monkeypatch):
     engine = _engine()
-    captured: list[dict] = []
+    captured_once: list[dict] = []
+    captured_stream: dict = {}
     monkeypatch.setattr(engine, "_make_sampler", lambda *args: object())
 
     def dflash(**kwargs):
-        captured.append(kwargs)
+        captured_once.append(kwargs)
         return {
             "generated_token_ids": [8],
             "generation_tokens": 1,
@@ -156,7 +157,30 @@ def test_auto_tools_do_not_suppress_eos_but_required_tools_do(monkeypatch):
             "prefill_us": 500,
         }
 
+    def dflash_stream(**kwargs):
+        captured_stream.update(kwargs)
+        yield {"event": "prefill", "prefill_us": 500, "prompt_token_count": 3}
+        yield {
+            "event": "summary",
+            "generated_token_ids": [],
+            "generation_tokens": 0,
+            "prompt_token_count": 3,
+            "elapsed_us": 1000,
+            "prefill_us": 500,
+        }
+
+    class Detokenizer:
+        last_segment = ""
+
+        def add_token(self, _token):
+            pass
+
+        def finalize(self):
+            pass
+
     monkeypatch.setattr("mio.dflash.runtime.generate_dflash_once", dflash)
+    monkeypatch.setattr("mio.dflash.runtime.stream_dflash_generate", dflash_stream)
+    engine._new_streaming_detokenizer = Detokenizer
     tools = [{"type": "function", "function": {"name": "lookup"}}]
 
     engine.generate([{"role": "user", "content": "x"}], tools=tools)
@@ -166,16 +190,16 @@ def test_auto_tools_do_not_suppress_eos_but_required_tools_do(monkeypatch):
         tool_required=True,
     )
 
-    assert captured[0]["suppress_token_ids"] is None
-    assert captured[1]["suppress_token_ids"] == [0]
+    assert captured_once[0]["suppress_token_ids"] is None
+    assert captured_stream["suppress_token_ids"] == [0]
+    assert captured_stream["relax_suppress_after"] == 40
+    assert captured_stream["relax_suppress_token_ids"] == [0]
 
 
 def test_stream_stop_never_leaks_split_stop_sequence():
     engine = _engine()
     metrics = GenerationMetrics(prompt_tokens=2, completion_tokens=20)
-    engine._generate_stream_raw = lambda *args, **kwargs: iter(
-        [("before ST", None), ("OP after", None), ("", metrics)]
-    )
+    engine._generate_stream_raw = lambda *args, **kwargs: iter([("before ST", None), ("OP after", None), ("", metrics)])
 
     chunks = list(
         engine.generate_stream(
@@ -273,10 +297,12 @@ def test_chat_schema_normalizes_scalar_stop_and_types_tools():
     request = server.ChatCompletionRequest(
         messages=[{"role": "user", "content": "x"}],
         stop="END",
-        tools=[{
-            "type": "function",
-            "function": {"name": "lookup", "parameters": {"type": "object"}},
-        }],
+        tools=[
+            {
+                "type": "function",
+                "function": {"name": "lookup", "parameters": {"type": "object"}},
+            }
+        ],
         tool_choice={"type": "function", "function": {"name": "lookup"}},
     )
 
@@ -380,10 +406,12 @@ def test_chat_endpoint_forwards_every_sampling_field_without_auto_forcing(monkey
         "max_tokens": None,
         "temperature": 0.4,
         "stop": ["END"],
-        "tools": [{
-            "type": "function",
-            "function": {"name": "lookup", "parameters": {}},
-        }],
+        "tools": [
+            {
+                "type": "function",
+                "function": {"name": "lookup", "parameters": {}},
+            }
+        ],
         "tool_required": False,
         "top_p": 0.8,
         "top_k": 12,
@@ -471,9 +499,7 @@ def test_stream_finish_reason_is_length_at_requested_cap(monkeypatch):
     chunks = asyncio.run(collect())
     payloads = [
         item
-        for item in (
-            chunk.removeprefix("data: ").strip() for chunk in chunks if chunk.startswith("data: ")
-        )
+        for item in (chunk.removeprefix("data: ").strip() for chunk in chunks if chunk.startswith("data: "))
         if item != "[DONE]"
     ]
     decoded = [server.json.loads(item) for item in payloads]
@@ -522,9 +548,7 @@ def test_webui_default_preserves_dflash_and_config_rejects_invalid_temperature(m
 
 
 def test_webui_html_uses_zero_not_truthy_fallback_for_temperature():
-    html = (Path(__file__).parents[1] / "mio" / "webui" / "mio_ui.html").read_text(
-        encoding="utf-8"
-    )
+    html = (Path(__file__).parents[1] / "mio" / "webui" / "mio_ui.html").read_text(encoding="utf-8")
     assert "temperature: 0.0" in html
     assert "currentConfig.temperature ?? 0.0" in html
     assert "currentConfig.temperature || 0.6" not in html

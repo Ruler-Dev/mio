@@ -1,7 +1,7 @@
 [project]
 name = "mio"
 version = "0.1.0"
-description = "Fast local MLX inference for Apple Silicon — DFlash speculative decoding + PolarQuant 4-bit KV-cache + Caveman token compression"
+description = "Local MLX inference and agent stack for Apple Silicon with DSpark/DFlash speculative decoding"
 requires-python = ">=3.10"
 license = "MIT"
 # One install = full experience. All UI / skill / multimodal libraries are

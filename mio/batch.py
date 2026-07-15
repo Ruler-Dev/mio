@@ -44,6 +44,28 @@ class BatchResult:
     batch_generation_tps: float | None = None
 
 
+def _latency_backend(metrics: object) -> str:
+    """Return a stable public label for the backend that actually generated.
+
+    ``generation_backend`` is authoritative because a configured DSpark or
+    DFlash drafter can still fall back to baseline for a particular request.
+    Older/custom engines may omit it, so retain drafter telemetry as a
+    compatibility fallback.
+    """
+
+    generation_backend = str(
+        getattr(metrics, "generation_backend", "") or ""
+    ).strip().lower()
+    if generation_backend in {"", "unknown"}:
+        generation_backend = str(
+            getattr(metrics, "drafter_selected", "") or ""
+        ).strip().lower()
+    if generation_backend in {"", "unknown"}:
+        generation_backend = "baseline"
+
+    return f"{generation_backend.replace('_', '-')}-latency"
+
+
 def process_batch(
     requests: list[BatchRequest],
     manager: ModelManager,
@@ -103,17 +125,22 @@ def process_batch(
             )
             elapsed = time.time() - start
             for (index, _request), (text, metrics) in zip(group, generated, strict=True):
-                backend = (
-                    "mlx-target-sampling"
-                    if sampler_key.seed is not None and sampler_key.temperature > 0.0
-                    else "mlx-continuous"
-                    if len(group) > 1
-                    else (
-                        "mlx-target-sampling"
-                        if metrics.fallback_reason == "stochastic_sampling_requires_target_only"
-                        else "dflash-latency"
-                    )
+                generation_backend = str(
+                    getattr(metrics, "generation_backend", "") or ""
+                ).strip().lower()
+                seeded_sampling = (
+                    sampler_key.seed is not None and sampler_key.temperature > 0.0
                 )
+                if (
+                    metrics.metrics_scope == "batch"
+                    or generation_backend == "batch_target_only"
+                    or (len(group) > 1 and not seeded_sampling)
+                ):
+                    backend = "mlx-continuous"
+                elif metrics.fallback_reason == "stochastic_sampling_requires_target_only":
+                    backend = "mlx-target-sampling"
+                else:
+                    backend = _latency_backend(metrics)
                 results[index] = BatchResult(
                     index=index,
                     text=text,

@@ -31,6 +31,54 @@ def test_baseline_runtime_exposes_and_applies_sampler_contract():
     assert max(observed[0]) <= 0.0
 
 
+def test_stream_baseline_relaxes_eos_suppression_after_configured_tokens(monkeypatch):
+    from mio.dflash import runtime
+
+    assert "relax_suppress_after" in inspect.signature(runtime.stream_baseline_generate).parameters
+    masks = []
+    sampled = iter([1, 1, 0])
+    monkeypatch.setattr(runtime, "make_target_cache", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        runtime,
+        "chunked_prefill",
+        lambda *_args, **_kwargs: (mx.zeros((1, 1, 3)), None),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "build_suppress_token_mask",
+        lambda _vocab, ids: ("mask", tuple(ids or [])),
+    )
+
+    def sample(_logits, _sampler, mask):
+        masks.append(mask)
+        return mx.array([next(sampled)], dtype=mx.uint32)
+
+    monkeypatch.setattr(runtime, "sample_tokens_with_mask", sample)
+
+    class Target:
+        def __call__(self, _tokens, cache):
+            assert cache is not None
+            return mx.zeros((1, 1, 3))
+
+    events = list(
+        runtime.stream_baseline_generate(
+            target_model=Target(),
+            tokenizer=object(),
+            prompt="",
+            prompt_tokens_override=[2],
+            max_new_tokens=5,
+            stop_token_ids=[0],
+            suppress_token_ids=[0],
+            relax_suppress_after=2,
+            relax_suppress_token_ids=[0],
+        )
+    )
+
+    summary = events[-1]
+    assert summary["generated_token_ids"] == [1, 1, 0]
+    assert masks == [("mask", (0,)), ("mask", (0,)), ("mask", ())]
+
+
 def _compatible_configs() -> tuple[dict, dict]:
     target = {
         "text_config": {

@@ -79,13 +79,7 @@ def build_suppress_token_mask(
     vocab_size: int,
     suppress_token_ids: Optional[list[int]],
 ) -> Optional[mx.array]:
-    token_ids = sorted(
-        {
-            int(token_id)
-            for token_id in (suppress_token_ids or [])
-            if 0 <= int(token_id) < vocab_size
-        }
-    )
+    token_ids = sorted({int(token_id) for token_id in (suppress_token_ids or []) if 0 <= int(token_id) < vocab_size})
     if not token_ids:
         return None
     vocab_indices = mx.arange(vocab_size, dtype=mx.int32)
@@ -205,10 +199,7 @@ def _target_text_model(target_model: Any) -> Any:
 
 def detect_target_family(target_model: Any) -> str:
     inner = _target_text_model(target_model)
-    has_linear = any(
-        hasattr(layer, "linear_attn") or hasattr(layer, "is_linear")
-        for layer in inner.layers
-    )
+    has_linear = any(hasattr(layer, "linear_attn") or hasattr(layer, "is_linear") for layer in inner.layers)
     return "hybrid_gdn" if has_linear else "pure_attention"
 
 
@@ -278,9 +269,7 @@ def _resolve_draft_window() -> tuple[int, int]:
 def _effective_draft_window(draft_model: Any, requested_window: int) -> int:
     """Honor the minimum sliding-attention window encoded by the checkpoint."""
 
-    configured_window = int(
-        getattr(getattr(draft_model, "args", None), "sliding_window", 0) or 0
-    )
+    configured_window = int(getattr(getattr(draft_model, "args", None), "sliding_window", 0) or 0)
     return max(1, int(requested_window), configured_window)
 
 
@@ -367,8 +356,6 @@ def _should_quantize_draft(quantize_draft: bool = False) -> bool:
         return True
     raw = os.environ.get("DFLASH_QUANTIZE_DRAFT", "").strip().lower()
     return raw not in {"", "0", "false", "no"}
-
-
 
 
 def _linear_forward(x: mx.array, weight: mx.array, bias: Optional[mx.array]) -> mx.array:
@@ -553,12 +540,8 @@ def _install_packed_attention_hook(attn: Any) -> None:
         gate = gate.reshape(B, L, -1)
 
         queries = self.q_norm(queries).transpose(0, 2, 1, 3)
-        keys = self.k_norm(keys.reshape(B, L, num_key_value_heads, -1)).transpose(
-            0, 2, 1, 3
-        )
-        values = values.reshape(B, L, num_key_value_heads, -1).transpose(
-            0, 2, 1, 3
-        )
+        keys = self.k_norm(keys.reshape(B, L, num_key_value_heads, -1)).transpose(0, 2, 1, 3)
+        values = values.reshape(B, L, num_key_value_heads, -1).transpose(0, 2, 1, 3)
 
         if cache is not None:
             queries = self.rope(queries, offset=cache.offset)
@@ -568,9 +551,7 @@ def _install_packed_attention_hook(attn: Any) -> None:
             queries = self.rope(queries)
             keys = self.rope(keys)
 
-        output = scaled_dot_product_attention(
-            queries, keys, values, cache=cache, scale=self.scale, mask=mask
-        )
+        output = scaled_dot_product_attention(queries, keys, values, cache=cache, scale=self.scale, mask=mask)
         output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
         return self.o_proj(output * mx.sigmoid(gate))
 
@@ -734,9 +715,7 @@ def pack_target_model_weights_selective(
     for layer_index, layer in enumerate(text_model.layers):
         mlp = getattr(layer, "mlp", None)
         if pack_mlp and type(mlp).__name__ == "Qwen3NextMLP":
-            pack_info["packed_mlp_layers"].append(
-                _pack_qwen3next_mlp(mlp, layer_index=layer_index, validate=validate)
-            )
+            pack_info["packed_mlp_layers"].append(_pack_qwen3next_mlp(mlp, layer_index=layer_index, validate=validate))
 
         attn = getattr(layer, "self_attn", None)
         if pack_attention and type(attn).__name__ == "Qwen3NextAttention":
@@ -820,17 +799,11 @@ def _install_speculative_linear_cache_hook(linear_attn: Any) -> None:
             state = mx.zeros((B, h_v, d_v, d_k), dtype=mx.float32)
         state_in = state
 
-        if (
-            mx.default_device() == mx.gpu
-            and mx.metal.is_available()
-            and not self.training
-        ):
+        if mx.default_device() == mx.gpu and mx.metal.is_available() and not self.training:
             if getattr(cache, "_armed", False):
                 from mio.dflash.kernels import gated_delta_kernel_with_tape
 
-                out, state, innovation_tape = gated_delta_kernel_with_tape(
-                    q, k, v, g, beta, state, mask
-                )
+                out, state, innovation_tape = gated_delta_kernel_with_tape(q, k, v, g, beta, state, mask)
                 cache.record_tape(
                     tape=innovation_tape,
                     k=k,
@@ -896,9 +869,7 @@ def _split_sdpa_output(
 ) -> mx.array:
     q_len = int(queries.shape[2])
     if q_len <= chunk_size:
-        return scaled_dot_product_attention(
-            queries, keys, values, cache=cache, scale=scale, mask=mask
-        )
+        return scaled_dot_product_attention(queries, keys, values, cache=cache, scale=scale, mask=mask)
 
     outputs: list[mx.array] = []
     for start in range(0, q_len, chunk_size):
@@ -958,12 +929,8 @@ def _install_split_full_attention_hook(attn: Any) -> None:
     ) -> mx.array:
         verify_active = target_verify_active()
         exact_attention = target_verify_component_enabled("attention")
-        exact_projections = exact_attention or target_verify_component_enabled(
-            "attention_proj"
-        )
-        exact_sdpa = exact_attention or target_verify_component_enabled(
-            "attention_sdpa"
-        )
+        exact_projections = exact_attention or target_verify_component_enabled("attention_proj")
+        exact_sdpa = exact_attention or target_verify_component_enabled("attention_sdpa")
         if verify_active and not (exact_projections or exact_sdpa):
             return original_call(self, x, mask=mask, cache=cache)
         if not getattr(self, "_dflash_split_sdpa_enabled", False) and not verify_active:
@@ -987,18 +954,12 @@ def _install_split_full_attention_hook(attn: Any) -> None:
             values = self.v_proj(x)
         num_attention_heads = _attention_num_heads(self)
         num_key_value_heads = _attention_num_kv_heads(self)
-        queries, gate = mx.split(
-            q_proj_output.reshape(B, L, num_attention_heads, -1), 2, axis=-1
-        )
+        queries, gate = mx.split(q_proj_output.reshape(B, L, num_attention_heads, -1), 2, axis=-1)
         gate = gate.reshape(B, L, -1)
 
         queries = self.q_norm(queries).transpose(0, 2, 1, 3)
-        keys = self.k_norm(keys.reshape(B, L, num_key_value_heads, -1)).transpose(
-            0, 2, 1, 3
-        )
-        values = values.reshape(B, L, num_key_value_heads, -1).transpose(
-            0, 2, 1, 3
-        )
+        keys = self.k_norm(keys.reshape(B, L, num_key_value_heads, -1)).transpose(0, 2, 1, 3)
+        values = values.reshape(B, L, num_key_value_heads, -1).transpose(0, 2, 1, 3)
 
         if cache is not None:
             queries = self.rope(queries, offset=cached_prefix_len)
@@ -1017,10 +978,7 @@ def _install_split_full_attention_hook(attn: Any) -> None:
         )
         should_split = (
             cache is not None
-            and (
-                (verify_active and exact_sdpa)
-                or cached_prefix_len >= exact_prefix_threshold
-            )
+            and ((verify_active and exact_sdpa) or cached_prefix_len >= exact_prefix_threshold)
             and (mask is None or mask == "causal" or isinstance(mask, mx.array))
         )
         should_use_batched_2pass = (
@@ -1064,9 +1022,7 @@ def _install_split_full_attention_hook(attn: Any) -> None:
                 cached_prefix_len=cached_prefix_len,
             )
         else:
-            output = scaled_dot_product_attention(
-                queries, keys, values, cache=cache, scale=self.scale, mask=mask
-            )
+            output = scaled_dot_product_attention(queries, keys, values, cache=cache, scale=self.scale, mask=mask)
         output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
         gated_output = output * mx.sigmoid(gate)
         return (
@@ -1090,23 +1046,14 @@ def _install_target_verify_mlp_hook(mlp: Any) -> None:
         exact_all = target_verify_component_enabled("mlp")
         exact_gate_up = exact_all or target_verify_component_enabled("mlp_gate_up")
         exact_down = exact_all or target_verify_component_enabled("mlp_down")
-        if (
-            not target_verify_active()
-            or not (exact_gate_up or exact_down)
-            or x.ndim != 3
-            or int(x.shape[1]) <= 1
-        ):
+        if not target_verify_active() or not (exact_gate_up or exact_down) or x.ndim != 3 or int(x.shape[1]) <= 1:
             return original_call(self, x)
         if exact_gate_up:
             gate, up = target_verify_linears((self.gate_proj, self.up_proj), x)
         else:
             gate, up = self.gate_proj(x), self.up_proj(x)
         activated = swiglu(gate, up)
-        return (
-            target_verify_linear(self.down_proj, activated)
-            if exact_down
-            else self.down_proj(activated)
-        )
+        return target_verify_linear(self.down_proj, activated) if exact_down else self.down_proj(activated)
 
     cls.__call__ = verify_call
     cls._dflash_target_verify_call_installed = True
@@ -1121,9 +1068,7 @@ def _install_target_speculative_hooks(target_model: Any) -> None:
         return
     for layer in text_model.layers:
         mlp = getattr(layer, "mlp", None)
-        if mlp is not None and all(
-            hasattr(mlp, name) for name in ("gate_proj", "up_proj", "down_proj")
-        ):
+        if mlp is not None and all(hasattr(mlp, name) for name in ("gate_proj", "up_proj", "down_proj")):
             _install_target_verify_mlp_hook(mlp)
         if getattr(layer, "is_linear", False) and hasattr(layer, "linear_attn"):
             _install_speculative_linear_cache_hook(layer.linear_attn)
@@ -1146,9 +1091,7 @@ def configure_full_attention_split(
         if not getattr(layer, "is_linear", False) and hasattr(layer, "self_attn"):
             layer.self_attn._dflash_split_sdpa_enabled = enabled
             layer.self_attn._dflash_split_sdpa_chunk_size = int(chunk_size)
-            layer.self_attn._dflash_split_sdpa_exact_kv_threshold = (
-                _HYBRID_SDPA_EXACT_KV_THRESHOLD
-            )
+            layer.self_attn._dflash_split_sdpa_exact_kv_threshold = _HYBRID_SDPA_EXACT_KV_THRESHOLD
 
 
 def _detect_head_dim_for_tq(target_model: Any) -> int:
@@ -1189,10 +1132,12 @@ def make_target_cache(
     PolarQuantKVCacheClass = None
     if pq_bits in (2, 3, 4):
         from mio.polarquant.cache import PolarQuantKVCache
+
         PolarQuantKVCacheClass = PolarQuantKVCache
         # Only patch SDPA when rotation is active (sub-4-bit)
         if pq_bits < 4:
             from mio.polarquant import patch as pq_patch
+
             pq_patch.apply()
         try:
             configure_full_attention_split(target_model, enabled=False)
@@ -1201,6 +1146,7 @@ def make_target_cache(
     elif tq_bits in (2, 3, 4):
         from mio.turboquant import patch as tq_patch
         from mio.turboquant.cache_v2 import TurboQuantKVCacheV2
+
         tq_patch.apply()
         try:
             configure_full_attention_split(target_model, enabled=False)
@@ -1215,9 +1161,7 @@ def make_target_cache(
             if enable_speculative_linear_cache:
                 _install_target_speculative_hooks(target_model)
                 conv_kernel_size = int(getattr(layer.linear_attn, "conv_kernel_size", 4))
-                caches.append(
-                    RecurrentRollbackCache(size=2, conv_kernel_size=conv_kernel_size)
-                )
+                caches.append(RecurrentRollbackCache(size=2, conv_kernel_size=conv_kernel_size))
             else:
                 caches.append(cache_mod.ArraysCache(size=2))
         else:
@@ -1332,27 +1276,17 @@ def validate_draft_target_compatibility(
     if not target_hidden or target_hidden != draft_hidden:
         errors.append(f"hidden_size target={target_hidden} draft={draft_hidden}")
     if not target_layers or target_layers != declared_target_layers:
-        errors.append(
-            f"num_target_layers target={target_layers} draft={declared_target_layers}"
-        )
+        errors.append(f"num_target_layers target={target_layers} draft={declared_target_layers}")
     if not target_vocab or target_vocab != draft_vocab:
         errors.append(f"vocab_size target={target_vocab} draft={draft_vocab}")
     if target_layer_ids and (
-        len(target_layer_ids) != draft_layers
-        or min(target_layer_ids) < 0
-        or max(target_layer_ids) >= target_layers
+        len(target_layer_ids) != draft_layers or min(target_layer_ids) < 0 or max(target_layer_ids) >= target_layers
     ):
-        errors.append(
-            f"target_layer_ids={list(target_layer_ids)} invalid for {target_layers} target layers"
-        )
+        errors.append(f"target_layer_ids={list(target_layer_ids)} invalid for {target_layers} target layers")
     if layer_types and len(layer_types) != draft_layers:
-        errors.append(
-            f"layer_types has {len(layer_types)} entries for {draft_layers} draft layers"
-        )
+        errors.append(f"layer_types has {len(layer_types)} entries for {draft_layers} draft layers")
     if sliding_window and target_context and sliding_window > target_context:
-        errors.append(
-            f"sliding_window={sliding_window} exceeds target context={target_context}"
-        )
+        errors.append(f"sliding_window={sliding_window} exceeds target context={target_context}")
     if not 0 <= mask_token_id < target_vocab:
         errors.append(f"mask_token_id={mask_token_id} outside target vocab={target_vocab}")
     if block_size <= 1:
@@ -1448,6 +1382,7 @@ def _prefill_chunk_size_env() -> int:
     intermediate (heads × chunk × total_ctx × 2 bytes) comfortably below
     the 30 GB Metal single-buffer limit for our largest tiers at 128K."""
     import os
+
     try:
         return max(256, int(os.environ.get("MIO_PREFILL_CHUNK", "2048")))
     except ValueError:
@@ -1482,7 +1417,9 @@ def chunked_prefill(
         chunk_size = _prefill_chunk_size_env()
     if total <= chunk_size:
         return target_forward_with_hidden_states(
-            target_model, input_ids=input_ids, cache=cache,
+            target_model,
+            input_ids=input_ids,
+            cache=cache,
             capture_layer_ids=capture_layer_ids,
             only_last_logit=only_last_logit,
         )
@@ -1493,9 +1430,11 @@ def chunked_prefill(
     for i, start in enumerate(starts):
         end = min(start + chunk_size, total)
         piece = input_ids[:, start:end]
-        is_last = (i == len(starts) - 1)
+        is_last = i == len(starts) - 1
         chunk_logits, chunk_hidden = target_forward_with_hidden_states(
-            target_model, input_ids=piece, cache=cache,
+            target_model,
+            input_ids=piece,
+            cache=cache,
             capture_layer_ids=capture_layer_ids,
             # Intermediate chunk logits are discarded. Projecting only their
             # last position avoids a vocab-sized matmul for every prompt token.
@@ -1540,9 +1479,7 @@ def chunked_dflash_prefill(
     if chunk_size is None:
         chunk_size = _prefill_chunk_size_env()
 
-    capture_layer_ids = {
-        int(layer_id) + 1 for layer_id in draft_model.target_layer_ids
-    }
+    capture_layer_ids = {int(layer_id) + 1 for layer_id in draft_model.target_layer_ids}
     projected_chunks: list[mx.array] = []
     logits: mx.array | None = None
     starts = list(range(0, total, chunk_size))
@@ -1568,11 +1505,7 @@ def chunked_dflash_prefill(
         logits = chunk_logits
 
     assert logits is not None
-    draft_context = (
-        projected_chunks[0]
-        if len(projected_chunks) == 1
-        else mx.concatenate(projected_chunks, axis=1)
-    )
+    draft_context = projected_chunks[0] if len(projected_chunks) == 1 else mx.concatenate(projected_chunks, axis=1)
     mx.eval(draft_context)
     return logits, draft_context
 
@@ -1582,11 +1515,7 @@ def trim_cache_to(cache_entries: list[Any], size: int) -> int:
         return 0
     if not cache_mod.can_trim_prompt_cache(cache_entries):
         return 0
-    offsets = [
-        int(offset)
-        for entry in cache_entries
-        if (offset := getattr(entry, "offset", None)) is not None
-    ]
+    offsets = [int(offset) for entry in cache_entries if (offset := getattr(entry, "offset", None)) is not None]
     if not offsets:
         return 0
     current_size = max(offsets)
@@ -1709,8 +1638,7 @@ def _restore_target_cache_exact(
         restored_offset = getattr(cache_entry, "offset", None)
         if restored_offset is not None and int(restored_offset) != int(expected_offset):
             raise RuntimeError(
-                "target cache restore offset mismatch: "
-                f"expected {expected_offset}, got {restored_offset}"
+                f"target cache restore offset mismatch: expected {expected_offset}, got {restored_offset}"
             )
 
 
@@ -1752,9 +1680,7 @@ def _rebuild_verified_prefix_exact(
         )
         if not isinstance(step_hidden, dict):
             raise TypeError("exact DFlash rebuild requires selective hidden capture")
-        next_token = greedy_tokens_with_mask(
-            step_logits[:, -1, :], suppress_token_mask
-        ).reshape(-1)
+        next_token = greedy_tokens_with_mask(step_logits[:, -1, :], suppress_token_mask).reshape(-1)
         last_logits = step_logits[:, -1, :]
         mx.eval(step_logits, next_token, *step_hidden.values())
         hidden_chunks.append(step_hidden)
@@ -1894,9 +1820,7 @@ def generate_baseline_once(
     mx.eval(logits)
     prefill_ns = time.perf_counter_ns() - prefill_start_ns
     suppress_token_mask = build_suppress_token_mask(int(logits.shape[-1]), suppress_token_ids)
-    next_token = int(
-        sample_tokens_with_mask(logits[:, -1, :], sampler, suppress_token_mask).item()
-    )
+    next_token = int(sample_tokens_with_mask(logits[:, -1, :], sampler, suppress_token_mask).item())
     generated_tokens = [next_token]
 
     while len(generated_tokens) < max_new_tokens:
@@ -1904,9 +1828,7 @@ def generate_baseline_once(
             break
         token_array = mx.array([[next_token]], dtype=mx.uint32)
         logits = target_model(token_array, cache=cache)
-        next_token = int(
-            sample_tokens_with_mask(logits[:, -1, :], sampler, suppress_token_mask).item()
-        )
+        next_token = int(sample_tokens_with_mask(logits[:, -1, :], sampler, suppress_token_mask).item())
         generated_tokens.append(next_token)
 
     elapsed_us = (time.perf_counter_ns() - start_ns) / 1_000.0
@@ -1929,6 +1851,8 @@ def stream_baseline_generate(
     use_chat_template: bool = False,
     stop_token_ids: Optional[list[int]] = None,
     suppress_token_ids: Optional[list[int]] = None,
+    relax_suppress_after: int = 0,
+    relax_suppress_token_ids: Optional[list[int]] = None,
     prompt_tokens_override: Optional[list[int]] = None,
     quantize_kv_cache: bool = False,
     fallback_reason: Optional[str] = None,
@@ -1963,10 +1887,16 @@ def stream_baseline_generate(
     )
     mx.eval(logits)
     prefill_ns = time.perf_counter_ns() - prefill_start_ns
-    suppress_token_mask = build_suppress_token_mask(int(logits.shape[-1]), suppress_token_ids)
-    next_token = int(
-        sample_tokens_with_mask(logits[:, -1, :], sampler, suppress_token_mask).item()
-    )
+    vocab_dim = int(logits.shape[-1])
+    relax_ids = set(int(token_id) for token_id in (relax_suppress_token_ids or []))
+    initial_mask = build_suppress_token_mask(vocab_dim, suppress_token_ids)
+    if relax_suppress_after > 0 and relax_ids:
+        relaxed_ids = [token_id for token_id in (suppress_token_ids or []) if int(token_id) not in relax_ids]
+        relaxed_mask = build_suppress_token_mask(vocab_dim, relaxed_ids)
+    else:
+        relaxed_mask = initial_mask
+    suppress_token_mask = initial_mask
+    next_token = int(sample_tokens_with_mask(logits[:, -1, :], sampler, suppress_token_mask).item())
     generated_tokens = [next_token]
 
     yield {
@@ -1987,14 +1917,23 @@ def stream_baseline_generate(
         "fallback_reason": fallback_reason,
     }
 
+    if (
+        relax_suppress_after > 0
+        and relax_ids
+        and len(generated_tokens) >= relax_suppress_after
+        and suppress_token_mask is initial_mask
+    ):
+        suppress_token_mask = relaxed_mask
+        for token_id in relax_ids:
+            if token_id not in stop_token_ids:
+                stop_token_ids.append(token_id)
+
     while len(generated_tokens) < max_new_tokens:
         if next_token in stop_token_ids:
             break
         token_array = mx.array([[next_token]], dtype=mx.uint32)
         logits = target_model(token_array, cache=cache)
-        next_token = int(
-            sample_tokens_with_mask(logits[:, -1, :], sampler, suppress_token_mask).item()
-        )
+        next_token = int(sample_tokens_with_mask(logits[:, -1, :], sampler, suppress_token_mask).item())
         generated_tokens.append(next_token)
         yield {
             "event": "token",
@@ -2005,6 +1944,16 @@ def stream_baseline_generate(
             "fallback_ar": True,
             "fallback_reason": fallback_reason,
         }
+        if (
+            relax_suppress_after > 0
+            and relax_ids
+            and len(generated_tokens) >= relax_suppress_after
+            and suppress_token_mask is initial_mask
+        ):
+            suppress_token_mask = relaxed_mask
+            for token_id in relax_ids:
+                if token_id not in stop_token_ids:
+                    stop_token_ids.append(token_id)
 
     elapsed_us = (time.perf_counter_ns() - start_ns) / 1_000.0
     yield {
@@ -2107,9 +2056,7 @@ def generate_dflash_once(
         )
         return baseline
     stop_token_ids = list(stop_token_ids or [])
-    stop_token_array = (
-        mx.array(stop_token_ids, dtype=mx.uint32) if stop_token_ids else None
-    )
+    stop_token_array = mx.array(stop_token_ids, dtype=mx.uint32) if stop_token_ids else None
 
     use_speculative_linear_cache = verify_chunk_tokens is None
 
@@ -2191,17 +2138,19 @@ def generate_dflash_once(
             "cycles_completed": 0,
             "phase_timings_us": {
                 "prefill": prefill_ns / 1_000.0,
-                "draft": 0.0, "draft_prefill": 0.0, "draft_incremental": 0.0,
-                "verify": 0.0, "replay": 0.0, "commit": 0.0,
+                "draft": 0.0,
+                "draft_prefill": 0.0,
+                "draft_incremental": 0.0,
+                "verify": 0.0,
+                "replay": 0.0,
+                "commit": 0.0,
             },
             "speculative_linear_cache": use_speculative_linear_cache,
             "verify_chunk_tokens": None,
             "verify_len_cap": None,
             "quantize_kv_cache": bool(quantize_kv_cache),
             "tokens_per_cycle": 0.0,
-            "peak_memory_gb": (
-                float(mx.get_peak_memory()) / 1e9 if hasattr(mx, "get_peak_memory") else None
-            ),
+            "peak_memory_gb": (float(mx.get_peak_memory()) / 1e9 if hasattr(mx, "get_peak_memory") else None),
             "warm_offset": warm_offset,
             "prefill_only": True,
         }
@@ -2297,11 +2246,7 @@ def generate_dflash_once(
                 verify_logits[0],
                 suppress_token_mask,
             )
-            hidden_values = (
-                tuple(verify_hidden_states.values())
-                if isinstance(verify_hidden_states, dict)
-                else ()
-            )
+            hidden_values = tuple(verify_hidden_states.values()) if isinstance(verify_hidden_states, dict) else ()
             mx.eval(posterior, *hidden_values)
         except BaseException:
             _restore_target_cache_exact(
@@ -2313,9 +2258,7 @@ def generate_dflash_once(
         verify_cycle_ns = time.perf_counter_ns() - verify_start_ns
         verify_ns_total += verify_cycle_ns
 
-        raw_acceptance_len = int(
-            _match_acceptance_length(verify_token_ids[1:], posterior[:-1]).item()
-        )
+        raw_acceptance_len = int(_match_acceptance_length(verify_token_ids[1:], posterior[:-1]).item())
         candidate_segment = verify_token_ids[: 1 + raw_acceptance_len]
         candidate_count, candidate_stop_hit = _commit_prefix_length(
             candidate_segment,
@@ -2376,9 +2319,7 @@ def generate_dflash_once(
             list(draft_model.target_layer_ids),
         )[:, :commit_count, :]
 
-        generated_token_buffer[
-            generated_token_count : generated_token_count + commit_count
-        ] = committed_segment
+        generated_token_buffer[generated_token_count : generated_token_count + commit_count] = committed_segment
         generated_token_count += commit_count
         accepted_from_draft += acceptance_len
         start += commit_count
@@ -2397,11 +2338,7 @@ def generate_dflash_once(
         staged_first = next_token
 
     elapsed_us = (time.perf_counter_ns() - start_ns) / 1_000.0
-    generated_token_ids = (
-        generated_token_buffer[:generated_token_count].tolist()
-        if generated_token_count > 0
-        else []
-    )
+    generated_token_ids = generated_token_buffer[:generated_token_count].tolist() if generated_token_count > 0 else []
     first_20 = acceptance_history[:20]
     last_20 = acceptance_history[-20:]
     result = {
@@ -2410,9 +2347,7 @@ def generate_dflash_once(
         "generated_token_ids": generated_token_ids,
         "generation_tokens": len(generated_token_ids),
         "accepted_from_draft": accepted_from_draft,
-        "acceptance_ratio": (
-            accepted_from_draft / len(generated_token_ids) if generated_token_ids else 0.0
-        ),
+        "acceptance_ratio": (accepted_from_draft / len(generated_token_ids) if generated_token_ids else 0.0),
         "cycles_completed": cycles_completed,
         "phase_timings_us": {
             "prefill": prefill_ns / 1_000.0,
@@ -2427,11 +2362,7 @@ def generate_dflash_once(
         "speculative_linear_cache": use_speculative_linear_cache,
         "verify_chunk_tokens": int(verify_chunk_tokens) if verify_chunk_tokens else None,
         "verify_len_cap": int(verify_len_cap),
-        "cache_commit_mode": (
-            "restore_rebuild_singleton_exact"
-            if exact_commit_oracle
-            else "timewise_exact_tape"
-        ),
+        "cache_commit_mode": ("restore_rebuild_singleton_exact" if exact_commit_oracle else "timewise_exact_tape"),
         "rebuilt_target_tokens": rebuilt_target_tokens,
         "exact_acceptance_corrections": exact_acceptance_corrections,
         "quantize_kv_cache": bool(quantize_kv_cache),
@@ -2502,6 +2433,8 @@ def stream_dflash_generate(
             use_chat_template=use_chat_template,
             stop_token_ids=stop_token_ids,
             suppress_token_ids=suppress_token_ids,
+            relax_suppress_after=relax_suppress_after,
+            relax_suppress_token_ids=relax_suppress_token_ids,
             prompt_tokens_override=prompt_tokens,
             quantize_kv_cache=quantize_kv_cache,
             fallback_reason=fallback_reason,
@@ -2510,9 +2443,7 @@ def stream_dflash_generate(
         )
         return
     stop_token_ids = list(stop_token_ids or [])
-    stop_token_array = (
-        mx.array(stop_token_ids, dtype=mx.uint32) if stop_token_ids else None
-    )
+    stop_token_array = mx.array(stop_token_ids, dtype=mx.uint32) if stop_token_ids else None
 
     # Warm-prefix optimization (mirrors generate_dflash_once).
     warm_offset = 0
@@ -2658,11 +2589,7 @@ def stream_dflash_generate(
                 verify_logits[0],
                 suppress_token_mask,
             )
-            hidden_values = (
-                tuple(verify_hidden_states.values())
-                if isinstance(verify_hidden_states, dict)
-                else ()
-            )
+            hidden_values = tuple(verify_hidden_states.values()) if isinstance(verify_hidden_states, dict) else ()
             mx.eval(posterior, *hidden_values)
         except BaseException:
             _restore_target_cache_exact(
@@ -2673,9 +2600,7 @@ def stream_dflash_generate(
             raise
         verify_ns_total += time.perf_counter_ns() - verify_start_ns
 
-        raw_acceptance_len = int(
-            _match_acceptance_length(verify_token_ids[1:], posterior[:-1]).item()
-        )
+        raw_acceptance_len = int(_match_acceptance_length(verify_token_ids[1:], posterior[:-1]).item())
         candidate_segment = verify_token_ids[: 1 + raw_acceptance_len]
         candidate_count, candidate_stop_hit = _commit_prefix_length(
             candidate_segment,
@@ -2753,9 +2678,7 @@ def stream_dflash_generate(
                 "event": "token",
                 "token_id": token_id,
                 "generated_tokens": len(generated_token_ids),
-                "acceptance_ratio": (
-                    accepted_from_draft / len(generated_token_ids) if generated_token_ids else 0.0
-                ),
+                "acceptance_ratio": (accepted_from_draft / len(generated_token_ids) if generated_token_ids else 0.0),
                 "cycles_completed": cycles_completed,
             }
 
@@ -2773,9 +2696,7 @@ def stream_dflash_generate(
             if promoted:
                 stop_token_ids = list(stop_token_ids or []) + list(promoted)
                 stop_token_array = mx.array(stop_token_ids, dtype=mx.uint32)
-            next_token = greedy_tokens_with_mask(
-                last_commit_logits, suppress_token_mask
-            ).reshape(-1)
+            next_token = greedy_tokens_with_mask(last_commit_logits, suppress_token_mask).reshape(-1)
 
         if stop_hit:
             break
@@ -2797,9 +2718,7 @@ def stream_dflash_generate(
         "generated_token_ids": generated_token_ids,
         "generation_tokens": len(generated_token_ids),
         "accepted_from_draft": accepted_from_draft,
-        "acceptance_ratio": (
-            accepted_from_draft / len(generated_token_ids) if generated_token_ids else 0.0
-        ),
+        "acceptance_ratio": (accepted_from_draft / len(generated_token_ids) if generated_token_ids else 0.0),
         "cycles_completed": cycles_completed,
         "phase_timings_us": {
             "prefill": prefill_ns / 1_000.0,
@@ -2812,11 +2731,7 @@ def stream_dflash_generate(
             "commit": commit_ns_total / 1_000.0,
         },
         "verify_len_cap": int(verify_len_cap),
-        "cache_commit_mode": (
-            "restore_rebuild_singleton_exact"
-            if exact_commit_oracle
-            else "timewise_exact_tape"
-        ),
+        "cache_commit_mode": ("restore_rebuild_singleton_exact" if exact_commit_oracle else "timewise_exact_tape"),
         "rebuilt_target_tokens": rebuilt_target_tokens,
         "exact_acceptance_corrections": exact_acceptance_corrections,
         "warm_offset": warm_offset,

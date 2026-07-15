@@ -120,6 +120,7 @@ class ModelManager:
                     name: {
                         "model": self._engines[name].tier_config.target_model,
                         "draft": self._engines[name].tier_config.draft_model,
+                        "drafter": self._engines[name].drafter_status,
                         "context_window": self._engines[name].tier_config.context_window,
                         "last_gen_tps": self._engines[name].last_metrics.generation_tps,
                     }

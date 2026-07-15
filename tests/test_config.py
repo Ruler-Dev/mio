@@ -46,6 +46,12 @@ def test_config_round_trip_persists_tiers_and_top_level(tmp_path):
     config.host = "127.0.0.1"
     config.tiers["small"].context_window = 65536
     config.tiers["small"].temperature = 0.7
+    config.tiers["small"].drafter_backend = "dspark"
+    config.tiers["small"].draft_fallback_model = "example/fallback"
+    config.tiers["small"].drafter_strict = True
+    config.tiers["small"].dspark_max_draft_tokens = 3
+    config.tiers["small"].dspark_lookup_drafts = False
+    config.tiers["small"].dspark_prefix_cache = False
     config.tiers["custom"] = TierConfig(
         name="custom",
         target_model="example/target",
@@ -64,6 +70,12 @@ def test_config_round_trip_persists_tiers_and_top_level(tmp_path):
     assert loaded.config_dir == path.parent
     assert loaded.tiers["small"].context_window == 65536
     assert loaded.tiers["small"].temperature == 0.7
+    assert loaded.tiers["small"].drafter_backend == "dspark"
+    assert loaded.tiers["small"].draft_fallback_model == "example/fallback"
+    assert loaded.tiers["small"].drafter_strict is True
+    assert loaded.tiers["small"].dspark_max_draft_tokens == 3
+    assert loaded.tiers["small"].dspark_lookup_drafts is False
+    assert loaded.tiers["small"].dspark_prefix_cache is False
     assert loaded.tiers["custom"].target_model == "example/target"
 
 
@@ -180,9 +192,7 @@ def test_wizard_off_uses_canonical_uncompressed_cache():
     assert _resolve_tq_selection(4) == (4, 16, True)
 
     arch = {"num_hidden_layers": 4, "num_key_value_heads": 2, "head_dim": 64}
-    assert _estimate_kv_cache_gb(arch, 8192, 16) == _estimate_kv_cache_gb(
-        arch, 8192, 0
-    )
+    assert _estimate_kv_cache_gb(arch, 8192, 16) == _estimate_kv_cache_gb(arch, 8192, 0)
 
 
 def test_model_status_marks_config_only_directory_incomplete(tmp_path):
@@ -193,6 +203,15 @@ def test_model_status_marks_config_only_directory_incomplete(tmp_path):
     assert ready is False
 
     (tmp_path / "model.safetensors").write_bytes(b"weights")
+    status, _, ready = _model_status(str(tmp_path), "target")
+    assert status == "[red]INCOMPLETE[/red]"
+    assert ready is False
+
+    (tmp_path / "tokenizer.model").write_bytes(b"tokenizer")
+    (tmp_path / "chat_template.jinja").write_text(
+        "{{ messages }}",
+        encoding="utf-8",
+    )
     status, _, ready = _model_status(str(tmp_path), "target")
     assert status == "[green]LOCAL[/green]"
     assert ready is True
@@ -213,4 +232,11 @@ def test_hf_cache_rejects_incomplete_snapshot(tmp_path, monkeypatch):
     assert _check_hf_cache("example/model") == (False, "")
 
     (tmp_path / "model.safetensors").write_bytes(b"weights")
+    assert _check_hf_cache("example/model") == (False, "")
+
+    (tmp_path / "tokenizer.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "tokenizer_config.json").write_text(
+        json.dumps({"chat_template": "{{ messages }}"}),
+        encoding="utf-8",
+    )
     assert _check_hf_cache("example/model") == (True, str(tmp_path))

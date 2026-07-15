@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import mlx_lm
+import pytest
 
 from mio.batch import BatchRequest, process_batch
 from mio.config import TierConfig
@@ -12,7 +13,11 @@ from mio.engine import GenerationMetrics, MioEngine
 
 
 class _FakeEngine:
-    def __init__(self):
+    def __init__(
+        self,
+        generation_backend: str = "baseline",
+        drafter_selected: str = "baseline",
+    ):
         self.tier_config = SimpleNamespace(
             temperature=0.6,
             top_p=0.95,
@@ -20,6 +25,8 @@ class _FakeEngine:
             max_output_tokens=32,
         )
         self.calls = []
+        self.generation_backend = generation_backend
+        self.drafter_selected = drafter_selected
 
     def generate_batch(
         self,
@@ -44,9 +51,11 @@ class _FakeEngine:
                     batch_size=len(messages),
                     fallback_reason=(
                         "stochastic_sampling_requires_target_only"
-                        if temperature > 0
+                        if temperature > 0 and self.generation_backend != "dspark"
                         else None
                     ),
+                    generation_backend=self.generation_backend,
+                    drafter_selected=self.drafter_selected,
                 ),
             )
             for request in messages
@@ -90,6 +99,42 @@ def test_process_batch_groups_by_sampler_and_preserves_input_order():
     assert [message[-1]["content"] for message in engine.calls[0][0]] == ["one", "three"]
     assert engine.calls[0][2] == 0.0
     assert engine.calls[1][2] == 0.2
+
+
+@pytest.mark.parametrize(
+    ("generation_backend", "drafter_selected", "expected"),
+    [
+        ("dspark", "dspark", "dspark-latency"),
+        ("dflash", "dflash", "dflash-latency"),
+        ("baseline", "dspark", "baseline-latency"),
+        ("", "dspark", "dspark-latency"),
+    ],
+)
+def test_singleton_backend_tracks_actual_latency_path(
+    generation_backend,
+    drafter_selected,
+    expected,
+):
+    engine = _FakeEngine(
+        generation_backend=generation_backend,
+        drafter_selected=drafter_selected,
+    )
+
+    result = process_batch([_request("one")], _FakeManager(engine), tier="small")[0]
+
+    assert result.backend == expected
+
+
+def test_dspark_sampling_singleton_is_not_mislabeled_target_only():
+    engine = _FakeEngine(generation_backend="dspark", drafter_selected="dspark")
+
+    result = process_batch(
+        [_request("sample", temperature=0.2)],
+        _FakeManager(engine),
+        tier="small",
+    )[0]
+
+    assert result.backend == "dspark-latency"
 
 
 def test_generate_batch_uses_mlx_batch_stats(monkeypatch):

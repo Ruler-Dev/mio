@@ -20,8 +20,23 @@ class TierConfig:
     draft_model: str
     context_window: int
     max_output_tokens: int
+    # Drafter selection is metadata-driven by default. ``dspark`` and
+    # ``dflash`` force the requested backend; ``MIO_DRAFTER_STRICT=1`` or the
+    # persisted strict flag turns every load fallback into a hard error for
+    # benchmark/research runs.
+    drafter_backend: str = "auto"
+    draft_fallback_model: str | None = None
+    drafter_strict: bool = False
+    # DSpark caps >=4 failed strict Qwen3.6-27B parity in Mio's 2026-07-15
+    # matched harness. Generic checkpoints keep mlx-dspark's cap-2 default;
+    # registry entries may opt into a separately validated cap-3 profile.
+    dspark_max_draft_tokens: int = 2
+    dspark_lookup_drafts: bool = True
+    dspark_prefix_cache: bool = True
     tq_bits: int = 16  # 16 = TQ off (baseline KVCache). {2, 3, 4} enable TurboQuant.
-    pq_bits: int = 4   # 4 = PolarQuant 4-bit (default, ~3.8x KV compression, zero speed loss). 16 = off.
+    # 4 enables PolarQuant KV compression; 16 disables it. Throughput and
+    # parity are workload/model dependent and must be benchmarked separately.
+    pq_bits: int = 4
     bmp_paths: int = 1  # 1 = vanilla DFlash. K>=2 enables BMP-DFlash K-path verify.
     # DDTree (Diffusion Draft Tree) node budget. 0 = off (vanilla DFlash).
     # >0 = verify N candidate tree nodes per cycle via tree attention + parent-
@@ -165,6 +180,8 @@ def save_config(config: MioConfig, path: Path) -> None:
         tier_data = asdict(serializable_tier)
         tier_data["target_model"] = str(tier_data["target_model"])
         tier_data["draft_model"] = str(tier_data["draft_model"])
+        if tier_data["draft_fallback_model"] is not None:
+            tier_data["draft_fallback_model"] = str(tier_data["draft_fallback_model"])
         data["tiers"][name] = tier_data
 
     atomic_write_json(path, data)

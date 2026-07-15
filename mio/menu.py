@@ -18,7 +18,7 @@ def show_banner() -> None:
     console.print(
         Panel(
             "[bold cyan]Mio v0.1.0[/bold cyan]\n"
-            "[dim]DFlash + TurboQuant MLX Engine[/dim]\n"
+            "[dim]DSpark + DFlash MLX Engine[/dim]\n"
             "[dim]Fast local inference for Apple Silicon[/dim]",
             border_style="cyan",
             padding=(1, 4),
@@ -32,17 +32,22 @@ def show_models_table() -> None:
     table.add_column("Model", style="cyan")
     table.add_column("Tier", style="green")
     table.add_column("Adapter", style="yellow")
-    table.add_column("DFlash", style="bold")
+    table.add_column("Speculation", style="bold")
     table.add_column("Description")
 
     for key, entry in KNOWN_MODELS.items():
         supported = entry.adapter in SUPPORTED_ADAPTERS
-        dflash_status = "[green]YES[/green]" if supported else "[red]NO[/red]"
+        if not supported:
+            speculative_status = "[red]unsupported[/red]"
+        elif entry.dspark_repo:
+            speculative_status = "[green]DSpark + DFlash[/green]"
+        else:
+            speculative_status = "[green]DFlash[/green]"
         table.add_row(
             key,
             entry.default_tier,
             entry.adapter,
-            dflash_status,
+            speculative_status,
             entry.description,
         )
 
@@ -105,7 +110,7 @@ def interactive_menu(config: MioConfig) -> str:
         "3": "Start API server (large model)",
         "4": "Start API server (tandem mode)",
         "5": "Interactive chat",
-        "6": "Configure model + DFlash + TurboQuant",
+        "6": "Configure model + speculation + KV cache",
         "7": "Show tier config",
         "8": "Show model registry",
         "9": "Download models",

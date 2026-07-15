@@ -1,4 +1,4 @@
-"""Interactive configuration: select model + DFlash + TurboQuant + context window."""
+"""Interactive model, speculative decoding, KV-cache, and context configuration."""
 
 from __future__ import annotations
 
