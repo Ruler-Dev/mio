@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Mio UI</title>
 <script src="/ui/assets/security.js"></script>
+<script src="/ui/assets/artifact_lab.js"></script>
 <!-- Markdown and syntax-highlighting are vendored so the shell boots offline. -->
 <script src="/ui/assets/vendor_marked_12.0.2.min.js"></script>
 <script src="/ui/assets/vendor_prism_1.29.0.js"></script>
@@ -140,11 +141,11 @@
       <div class="messages-inner" id="messages">
         <div class="welcome" id="welcome">
           <div class="welcome-title"><span>mio</span> ui</div>
-          <div class="welcome-sub">Local AI assistant powered by Mio. Ask anything — search the web, generate documents, write code.</div>
+          <div class="welcome-sub">Local AI assistant powered by Mio. Ask anything — compare MLX runs, inspect inference traces, generate documents, or write code.</div>
           <div class="welcome-chips" id="welcomeChips"></div>
           <div style="font-size:11px;color:var(--text-muted);margin-top:16px;line-height:1.8">
             <strong style="color:var(--text-secondary)">Try:</strong> /slash commands · ⌘K palette · drag-drop a PDF · click 🎤 for voice · /focus zen mode · /gallery artifact browser<br>
-            <strong style="color:var(--text-secondary)">Artifacts:</strong> HTML · SVG · three.js · p5 · Chart.js · Leaflet maps · KaTeX math · Graphviz · Mermaid · Mindmap · reveal.js · Timeline · Python REPL · Tone.js · WebGL shaders · JSON tree · sortable tables · diff · regex · piano · flashcards · Kanban · React
+            <strong style="color:var(--text-secondary)">Artifacts:</strong> native MLX benchmark · model compatibility card · inference trace · HTML · SVG · three.js · Chart.js · Mermaid · React · code · documents and more
           </div>
         </div>
       </div>
@@ -159,7 +160,7 @@
             <button class="btn-mic hidden" id="micBtn" onclick="toggleVoiceInput()" title="Voice input">
               <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 1a2.5 2.5 0 00-2.5 2.5v4a2.5 2.5 0 005 0v-4A2.5 2.5 0 008 1z"/><path d="M3 7a5 5 0 0010 0M8 12v3M6 15h4"/></svg>
             </button>
-            <button class="btn-send" id="sendBtn" onclick="sendMessage()">
+            <button class="btn-send" id="sendBtn" onclick="sendMessage()" aria-label="Send message">
               <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 13l10-5L3 3v4l6 1-6 1v4z" fill="currentColor"/></svg>
             </button>
           </div>
@@ -212,11 +213,11 @@
   </div>
 
   <!-- Help / cheatsheet modal -->
-  <div class="gallery-overlay" id="helpOverlay" onclick="if(event.target===this)closeHelp()">
+  <div class="gallery-overlay" id="helpOverlay" role="dialog" aria-modal="true" aria-labelledby="helpTitle" onclick="if(event.target===this)closeHelp()">
     <div class="gallery-panel" style="max-width:820px">
       <div class="gallery-header">
-        <div class="gallery-title">Keyboard &amp; Feature Cheatsheet</div>
-        <button class="artifact-close" onclick="closeHelp()">&times;</button>
+        <div class="gallery-title" id="helpTitle">Keyboard &amp; Feature Cheatsheet</div>
+        <button class="artifact-close" onclick="closeHelp()" aria-label="Close help">&times;</button>
       </div>
       <div style="padding:20px 24px;overflow-y:auto;font-size:13px;line-height:1.7">
         <h3 style="margin:0 0 8px;font-size:13px;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-secondary)">Keyboard</h3>
@@ -252,26 +253,26 @@
   </div>
 
   <!-- Artifact gallery modal -->
-  <div class="gallery-overlay" id="galleryOverlay" onclick="if(event.target===this)closeGallery()">
+  <div class="gallery-overlay" id="galleryOverlay" role="dialog" aria-modal="true" aria-labelledby="galleryTitle" onclick="if(event.target===this)closeGallery()">
     <div class="gallery-panel">
       <div class="gallery-header">
-        <div class="gallery-title">Artifact Gallery</div>
+        <div class="gallery-title" id="galleryTitle">Artifact Gallery</div>
         <input id="galleryFilter" class="cmd-input" style="flex:0 0 240px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-input)" placeholder="Filter…" oninput="renderGallery()">
-        <button class="artifact-close" onclick="closeGallery()">&times;</button>
+        <button class="artifact-close" onclick="closeGallery()" aria-label="Close artifact gallery">&times;</button>
       </div>
       <div class="gallery-grid" id="galleryGrid"></div>
     </div>
   </div>
 
   <!-- Artifact side panel -->
-  <div class="artifact-panel" id="artifactPanel">
+  <div class="artifact-panel" id="artifactPanel" role="region" aria-label="Artifact inspector">
     <div class="artifact-resizer" id="artifactResizer" title="Drag to resize"></div>
     <div class="artifact-panel-header">
       <span class="artifact-title" id="artifactTitle">Artifact</span>
-      <div class="artifact-tabs" id="artifactTabs">
-        <div class="artifact-tab active" id="artifactTabPreview" onclick="setArtifactView('preview')">Preview</div>
-        <div class="artifact-tab" id="artifactTabCode" onclick="setArtifactView('code')">Source</div>
-        <div class="artifact-tab" id="artifactTabDiff" onclick="setArtifactView('diff')" style="display:none">Diff</div>
+      <div class="artifact-tabs" id="artifactTabs" role="tablist" aria-label="Artifact view">
+        <button type="button" class="artifact-tab active" id="artifactTabPreview" role="tab" aria-selected="true" onclick="setArtifactView('preview')">Preview</button>
+        <button type="button" class="artifact-tab" id="artifactTabCode" role="tab" aria-selected="false" onclick="setArtifactView('code')">Source</button>
+        <button type="button" class="artifact-tab" id="artifactTabDiff" role="tab" aria-selected="false" onclick="setArtifactView('diff')" style="display:none">Diff</button>
       </div>
       <div class="artifact-ver hidden" id="artifactVer">
         <button class="artifact-ver-btn" id="artifactVerPrev" onclick="stepArtifactVersion(-1)" title="Previous version">
@@ -297,7 +298,7 @@
       <button class="artifact-dl" id="artifactShare" onclick="shareActiveArtifact()" title="Share link">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="4" cy="8" r="2"/><circle cx="12" cy="4" r="2"/><circle cx="12" cy="12" r="2"/><path d="M5.5 7l5-2.5M5.5 9l5 2.5"/></svg>
       </button>
-      <button class="artifact-close" onclick="closeArtifactPanel()" title="Close">&times;</button>
+      <button class="artifact-close" onclick="closeArtifactPanel()" title="Close" aria-label="Close artifact inspector">&times;</button>
     </div>
     <div class="artifact-edit-actions" id="artifactEditActions">
       <button class="artifact-edit-btn primary" onclick="saveArtifactEdit()">Save &amp; re-render</button>
@@ -309,7 +310,7 @@
 </div>
 
 <!-- Command palette (⌘K) -->
-<div class="cmd-overlay" id="cmdOverlay" onclick="if(event.target===this)closeCmd()">
+<div class="cmd-overlay" id="cmdOverlay" role="dialog" aria-modal="true" aria-label="Command palette" onclick="if(event.target===this)closeCmd()">
   <div class="cmd-panel">
     <input class="cmd-input" id="cmdInput" placeholder="Type a command or search artifacts…" onkeydown="cmdKey(event)" oninput="cmdFilter()">
     <div class="cmd-list" id="cmdList"></div>
@@ -317,11 +318,11 @@
 </div>
 
 <!-- Settings overlay -->
-<div class="settings-overlay" id="settingsOverlay" onclick="if(event.target===this)closeSettings()">
+<div class="settings-overlay" id="settingsOverlay" role="dialog" aria-modal="true" aria-labelledby="settingsTitle" onclick="if(event.target===this)closeSettings()">
   <div class="settings-panel">
     <div class="settings-header">
-      <span class="settings-title">Settings</span>
-      <button class="settings-close" onclick="closeSettings()">&times;</button>
+      <span class="settings-title" id="settingsTitle">Settings</span>
+      <button class="settings-close" onclick="closeSettings()" aria-label="Close settings">&times;</button>
     </div>
     <div class="settings-body">
       <div class="settings-section">System prompt</div>
@@ -332,7 +333,7 @@
 
       <div class="settings-section">Generation</div>
       <div class="settings-field">
-        <label class="settings-label">Caveman mode</label>
+        <label class="settings-label" for="settCaveman">Caveman mode</label>
         <select class="settings-select" id="settCaveman">
           <option value="off">Off</option>
           <option value="lite" selected>Lite</option>
@@ -342,14 +343,14 @@
         <div class="settings-hint">Token-saving communication style</div>
       </div>
       <div class="settings-field">
-        <label class="settings-label">Temperature</label>
+        <label class="settings-label" for="settTemp">Temperature</label>
         <div class="settings-range-wrap">
           <input type="range" class="settings-range" id="settTemp" min="0" max="2" step="0.1" value="0.0">
           <span class="settings-range-val" id="settTempVal">0.0</span>
         </div>
       </div>
       <div class="settings-field">
-        <label class="settings-label">Max tokens</label>
+        <label class="settings-label" for="settMaxTok">Max tokens</label>
         <div class="settings-range-wrap">
           <input type="range" class="settings-range" id="settMaxTok" min="256" max="32768" step="256" value="16384">
           <span class="settings-range-val" id="settMaxTokVal">16384</span>
@@ -379,7 +380,7 @@
 
       <div class="settings-section">Response style</div>
       <div class="settings-field">
-        <label class="settings-label">Preset</label>
+        <label class="settings-label" for="settStyle">Preset</label>
         <select class="settings-select" id="settStyle">
           <option value="">Default</option>
           <option value="concise">Concise</option>
@@ -469,6 +470,7 @@
 // ===== State =====
 let ws = null;
 let currentSessionId = null;
+let currentSessionTitle = 'Untitled';
 let chatMessages = []; // {role, content}
 let isStreaming = false;
 let streamingEl = null;
@@ -923,10 +925,28 @@ function _attr(attrs, name) {
   return m ? m[1] : '';
 }
 
+const ARTIFACT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+function _artifactContentId(type, content) {
+  let hash = 2166136261;
+  const source = String(type || '') + '\0' + String(content || '');
+  for (let index = 0; index < source.length; index++) {
+    hash ^= source.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return 'fnv1a32:' + (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+function _safeArtifactId(raw, content) {
+  const value = String(raw || '');
+  if (ARTIFACT_ID_RE.test(value) && !['__proto__', 'prototype', 'constructor'].includes(value)) return value;
+  return 'art-' + _artifactContentId('', content).split(':')[1];
+}
+
 function parseArtifacts(text) {
   const artifacts = [];
   let clean = (text || '').replace(ARTIFACT_RE, (match, attrs, content) => {
-    const id = _attr(attrs, 'identifier') || ('art-' + Math.random().toString(36).slice(2, 8));
+    const id = _safeArtifactId(_attr(attrs, 'identifier'), content);
     const type = _attr(attrs, 'type') || 'text/html';
     const title = _attr(attrs, 'title') || 'Artifact';
     const language = _attr(attrs, 'language') || '';
@@ -989,9 +1009,28 @@ let _pendingAutoArtifactIds = [];
 // ←/→ through prior versions.
 let _pendingBranchMerge = null;
 
-function ingestArtifacts(arts) {
-  for (const a of arts) {
-    a.type = _normalizeArtifactType(a.type);
+function _normalizeArtifactRecord(raw, producer = 'chat') {
+  const content = typeof raw?.content === 'string' ? raw.content : JSON.stringify(raw?.content ?? null);
+  const type = _normalizeArtifactType(String(raw?.type || 'text/html').toLowerCase());
+  const id = _safeArtifactId(raw?.id, content);
+  return {
+    ...raw,
+    id,
+    type,
+    title: String(raw?.title || 'Artifact').slice(0, 200),
+    content,
+    language: raw?.language ? String(raw.language).slice(0, 64) : '',
+    created_at: raw?.created_at || new Date().toISOString(),
+    content_id: raw?.content_id || _artifactContentId(type, content),
+    provenance: raw?.provenance && typeof raw.provenance === 'object'
+      ? raw.provenance
+      : { producer: String(raw?.source || producer).slice(0, 64) },
+  };
+}
+
+function ingestArtifacts(arts, producer = 'chat') {
+  for (const raw of arts) {
+    const a = _normalizeArtifactRecord(raw, producer);
     if (!artifactVersions[a.id]) {
       artifactVersions[a.id] = [a];
     } else {
@@ -1007,6 +1046,48 @@ function ingestArtifacts(arts) {
     artifactActiveIdx[a.id] = artifactVersions[a.id].length - 1;
     allArtifacts[a.id] = artifactVersions[a.id][artifactActiveIdx[a.id]];
   }
+}
+
+function serializeArtifactState() {
+  return {
+    schema_version: 2,
+    active_artifact_id: activeArtifactId,
+    chains: Object.keys(artifactVersions).sort().map((id) => ({
+      id,
+      active_index: artifactActiveIdx[id] || 0,
+      revisions: (artifactVersions[id] || []).map((artifact) => ({
+        id: artifact.id,
+        type: artifact.type,
+        title: artifact.title,
+        language: artifact.language || '',
+        content: artifact.content,
+        created_at: artifact.created_at,
+        content_id: artifact.content_id,
+        provenance: artifact.provenance || {},
+      })),
+    })),
+  };
+}
+
+function restoreArtifactState(state, legacyArtifacts = []) {
+  const restored = new Set();
+  if (state?.schema_version === 2 && Array.isArray(state.chains)) {
+    for (const chain of state.chains.slice(0, 256)) {
+      if (!chain || !ARTIFACT_ID_RE.test(String(chain.id || '')) || !Array.isArray(chain.revisions)) continue;
+      const revisions = chain.revisions.slice(0, 64).map((artifact) => _normalizeArtifactRecord(artifact, 'session'));
+      if (!revisions.length || revisions.some((artifact) => artifact.id !== chain.id)) continue;
+      artifactVersions[chain.id] = revisions;
+      const requested = Number.isInteger(chain.active_index) ? chain.active_index : revisions.length - 1;
+      const active = Math.max(0, Math.min(revisions.length - 1, requested));
+      artifactActiveIdx[chain.id] = active;
+      allArtifacts[chain.id] = revisions[active];
+      restored.add(chain.id);
+    }
+    return restored;
+  }
+  ingestArtifacts(Array.isArray(legacyArtifacts) ? legacyArtifacts : [], 'legacy-session');
+  Object.keys(allArtifacts).forEach((id) => restored.add(id));
+  return restored;
 }
 
 function stepArtifactVersion(delta) {
@@ -1041,17 +1122,19 @@ function renderArtifactCard(art) {
   const icon = artifactIcon(art.type);
   const typeLabel = escapeHtml(artifactTypeLabel(art.type));
   const artifactId = escapeHtml(String(art.id || ''));
-  return `<div class="artifact-card" data-artifact-id="${artifactId}" onclick="openArtifact(this.dataset.artifactId)">
+  return `<button type="button" class="artifact-card" data-artifact-id="${artifactId}" onclick="openArtifact(this.dataset.artifactId)" aria-label="Open artifact ${escapeHtml(art.title)}">
     <div class="artifact-card-icon">${icon}</div>
     <div class="artifact-card-body">
       <div class="artifact-card-title">${escapeHtml(art.title)}</div>
       <div class="artifact-card-meta">${typeLabel}</div>
     </div>
     <svg class="artifact-card-chev" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 4l4 4-4 4"/></svg>
-  </div>`;
+  </button>`;
 }
 
 function artifactTypeLabel(t) {
+  const nativeLabel = window.Mio?.artifactLab?.label(t);
+  if (nativeLabel) return nativeLabel;
   const map = {
     'text/html': 'HTML',
     'image/svg+xml': 'SVG',
@@ -1092,12 +1175,6 @@ function artifactTypeLabel(t) {
     'application/vnd.pimio.physics': '2D physics (Matter.js)',
     'application/vnd.pimio.graph': 'Force-directed graph',
     'application/vnd.pimio.plantuml': 'UML diagram (PlantUML)',
-    'application/vnd.pimio.circuit': 'Circuit simulator',
-    'application/vnd.pimio.erd': 'ER diagram',
-    'application/vnd.pimio.gantt': 'Gantt chart',
-    'application/vnd.pimio.statechart': 'State machine',
-    'application/vnd.pimio.calc': 'Calculator / converter',
-    'application/vnd.pimio.unit': 'Unit converter',
     'application/vnd.pimio.jscad': 'Parametric CAD (JSCAD)',
     'application/vnd.pimio.modelviewer': '3D model viewer (GLB/GLTF)',
     'application/vnd.pimio.excalidraw': 'Excalidraw whiteboard',
@@ -1131,8 +1208,6 @@ function artifactTypeLabel(t) {
     'application/vnd.pimio.budget': 'Budget planner',
     'application/vnd.pimio.habit': 'Habit tracker',
     'application/vnd.pimio.gpx': 'GPX / route map',
-    'application/vnd.pimio.dxf': 'DXF viewer',
-    'application/vnd.pimio.sprite': 'Sprite sheet viewer',
     'application/vnd.pimio.seq': 'Step sequencer',
     'application/vnd.pimio.sudoku': 'Sudoku',
     'application/vnd.pimio.go': 'Go board',
@@ -1143,15 +1218,12 @@ function artifactTypeLabel(t) {
     'application/vnd.pimio.sortviz': 'Sorting visualizer',
     'application/vnd.pimio.todo': 'Todo list',
     'application/vnd.pimio.conway': "Conway's Game of Life",
-    'application/vnd.pimio.ipmap': 'IP / port map',
     'application/vnd.pimio.wheel': 'Decision wheel',
-    'application/vnd.pimio.presenter': 'Live presenter view',
     'application/vnd.pimio.cheatsheet': 'Reference cheatsheet',
     'application/vnd.pimio.midi': 'MIDI keyboard input',
     'application/vnd.pimio.bluetooth': 'Bluetooth sensor',
     'application/vnd.pimio.sketch': 'Pressure-sensitive sketch',
     'application/vnd.pimio.dxfviewer': 'DXF viewer',
-    'application/vnd.pimio.packet': 'Packet dissector',
     'application/vnd.pimio.btree': 'B-tree animator',
     'application/vnd.pimio.worldclock': 'World clock',
     'application/vnd.pimio.stopwatch': 'Stopwatch / lap timer',
@@ -1159,7 +1231,6 @@ function artifactTypeLabel(t) {
     'application/vnd.pimio.urlparse': 'URL parser',
     'application/vnd.pimio.imgb64': 'Base64 image viewer',
     'application/vnd.pimio.recipe': 'Recipe card',
-    'application/vnd.pimio.speedtest': 'Network speed test',
     'application/vnd.pimio.json2ts': 'JSON → TypeScript',
     'application/vnd.pimio.mediacard': 'Media cards (anime/TV/games)',
     'application/vnd.pimio.imagegrid': 'Image grid',
@@ -1169,6 +1240,8 @@ function artifactTypeLabel(t) {
 }
 
 function artifactIcon(t) {
+  if (window.Mio?.artifactLab?.supports(t))
+    return '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19V9M10 19V5M16 19v-7M22 19H2"/><circle cx="4" cy="7" r="1.5"/><circle cx="10" cy="3" r="1.5"/><circle cx="16" cy="10" r="1.5"/></svg>';
   if (t === 'application/pdf')
     return '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M9 13h6M9 17h6M9 9h2"/></svg>';
   if (t === 'application/vnd.pimio.image')
@@ -1612,11 +1685,14 @@ function downloadArtifactAsFile() {
   if (!activeArtifactId) return;
   const art = allArtifacts[activeArtifactId];
   if (!art) return;
-  const isHTML = art.type === 'text/html' || art.type.startsWith('application/vnd.pimio.') || art.type.startsWith('application/vnd.ant.');
-  const ext = isHTML ? '.html' : (art.type === 'image/svg+xml' ? '.svg' : art.type === 'text/markdown' ? '.md' : '.txt');
+  const nativeDownload = window.Mio?.artifactLab?.download(art);
+  const isHTML = !nativeDownload && (art.type === 'text/html' || art.type.startsWith('application/vnd.pimio.') || art.type.startsWith('application/vnd.ant.'));
+  const ext = nativeDownload?.extension || (isHTML ? '.html' : (art.type === 'image/svg+xml' ? '.svg' : art.type === 'text/markdown' ? '.md' : '.txt'));
   const name = (art.title || art.id).replace(/[^a-z0-9-]+/gi, '-').slice(0, 40) + ext;
-  let content = art.content;
-  if (art.type === 'text/markdown' || art.type === 'image/svg+xml' || art.type === 'text/html' || art.type === 'application/vnd.ant.code') {
+  let content = nativeDownload?.content || art.content;
+  if (nativeDownload) {
+    // Native structured artifacts export as deterministic, editable JSON.
+  } else if (art.type === 'text/markdown' || art.type === 'image/svg+xml' || art.type === 'text/html' || art.type === 'application/vnd.ant.code') {
     // raw
   } else if (art.type.startsWith('application/vnd.pimio.') || art.type.startsWith('application/vnd.ant.')) {
     // Wrap template output so the downloaded file actually works offline
@@ -1634,7 +1710,7 @@ function downloadArtifactAsFile() {
       else if (t === 'application/vnd.ant.react') content = reactTemplate(art.content);
     } catch (e) {}
   }
-  const blob = new Blob([content], { type: isHTML ? 'text/html' : 'text/plain' });
+  const blob = new Blob([content], { type: nativeDownload?.mime || (isHTML ? 'text/html' : 'text/plain') });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = name;
@@ -1649,6 +1725,7 @@ function forkFrom(idx) {
   if (isStreaming) return;
   const copy = chatMessages.slice(0, idx + 1).map(m => ({...m}));
   currentSessionId = null;
+  currentSessionTitle = 'Untitled';
   _titleGenerated = false;
   chatMessages = copy;
   renderAllMessages();
@@ -2192,6 +2269,7 @@ function openHelp() {
   const types = document.getElementById('helpTypes');
   slash.innerHTML = slashCommands().map(c => `<div><span style="color:var(--accent)">${c.cmd}</span> <span style="color:var(--text-muted)">— ${escapeHtml(c.desc)}</span></div>`).join('');
   const TYPES = [
+    ...(window.Mio?.artifactLab?.catalog() || []).map((entry) => [entry.type, entry.description]),
     ['text/html', 'Full HTML page'],
     ['image/svg+xml', 'Inline SVG'],
     ['text/markdown', 'Rendered markdown'],
@@ -2247,13 +2325,13 @@ function renderGallery() {
     !q || String(a.title || '').toLowerCase().includes(q) || String(a.type || '').toLowerCase().includes(q));
   if (!arts.length) { grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:var(--text-muted);padding:40px">No artifacts in this chat yet. Generate some!</div>'; return; }
   grid.innerHTML = arts.map(a => `
-    <div class="gallery-card" data-artifact-id="${escapeHtml(String(a.id || ''))}" onclick="openArtifact(this.dataset.artifactId);closeGallery()">
+    <button type="button" class="gallery-card" data-artifact-id="${escapeHtml(String(a.id || ''))}" onclick="openArtifact(this.dataset.artifactId);closeGallery()" aria-label="Open artifact ${escapeHtml(a.title)}">
       <div class="gallery-thumb">${galleryThumb(a)}</div>
       <div class="gallery-meta">
         <div class="gallery-meta-title">${escapeHtml(a.title)}</div>
         <div class="gallery-meta-type">${escapeHtml(artifactTypeLabel(a.type))}</div>
       </div>
-    </div>
+    </button>
   `).join('');
 }
 function galleryThumb(a) {
@@ -2407,6 +2485,9 @@ function setArtifactView(view) {
   document.getElementById('artifactTabPreview').classList.toggle('active', view === 'preview');
   document.getElementById('artifactTabCode').classList.toggle('active', view === 'code');
   document.getElementById('artifactTabDiff').classList.toggle('active', view === 'diff');
+  document.getElementById('artifactTabPreview').setAttribute('aria-selected', String(view === 'preview'));
+  document.getElementById('artifactTabCode').setAttribute('aria-selected', String(view === 'code'));
+  document.getElementById('artifactTabDiff').setAttribute('aria-selected', String(view === 'diff'));
   document.getElementById('artifactEditActions').classList.remove('shown');
   const art = allArtifacts[activeArtifactId];
   if (!art) return;
@@ -2453,7 +2534,13 @@ function saveArtifactEdit() {
   if (!ta || !activeArtifactId) return;
   const chain = artifactVersions[activeArtifactId];
   const cur = chain[artifactActiveIdx[activeArtifactId]];
-  const newVer = { ...cur, content: ta.value };
+  const newVer = _normalizeArtifactRecord({
+    ...cur,
+    content: ta.value,
+    created_at: new Date().toISOString(),
+    content_id: _artifactContentId(cur.type, ta.value),
+    provenance: { ...(cur.provenance || {}), producer: 'editor', parent: cur.content_id },
+  }, 'editor');
   // Push as a new version so user can undo via prev button
   chain.push(newVer);
   artifactActiveIdx[activeArtifactId] = chain.length - 1;
@@ -2461,6 +2548,7 @@ function saveArtifactEdit() {
   document.getElementById('artifactEditActions').classList.remove('shown');
   _updateVersionUI(activeArtifactId);
   setArtifactView('preview');
+  autoSave();
 }
 
 function cancelArtifactEdit() {
@@ -2856,6 +2944,14 @@ function artifactFileUrl(art) {
 function _normalizeArtifactType(t) {
   if (!t) return t;
   const aliases = {
+    // Claude-native types remain canonical because their renderers are keyed
+    // under vnd.ant.*. These identity entries make normalization idempotent.
+    'application/vnd.ant.react':   'application/vnd.ant.react',
+    'application/vnd.pimio.react': 'application/vnd.ant.react',
+    'application/vnd.ant.code':    'application/vnd.ant.code',
+    'application/vnd.pimio.code':  'application/vnd.ant.code',
+    'application/vnd.ant.mermaid': 'application/vnd.ant.mermaid',
+    'application/vnd.pimio.mermaid': 'application/vnd.ant.mermaid',
     'application/vnd.ant.threejs':  'application/vnd.pimio.threejs',
     'application/vnd.ant.three':    'application/vnd.pimio.threejs',
     'application/vnd.ant.three-js': 'application/vnd.pimio.threejs',
@@ -2874,9 +2970,13 @@ function _normalizeArtifactType(t) {
     'application/vnd.ant.revealjs': 'application/vnd.pimio.revealjs',
     'application/vnd.ant.slides':   'application/vnd.pimio.revealjs',
     'application/vnd.ant.timeline': 'application/vnd.pimio.timeline',
-    // Mermaid: canonical in this codebase is vnd.ant.mermaid (the
-    // mermaid renderer lives under that key); remap pimio variant.
-    'application/vnd.pimio.mermaid': 'application/vnd.ant.mermaid',
+    // Legacy advertised shorthands now converge on a real renderer instead
+    // of falling through to a blank HTML iframe.
+    'application/vnd.pimio.erd': 'application/vnd.ant.mermaid',
+    'application/vnd.pimio.gantt': 'application/vnd.ant.mermaid',
+    'application/vnd.pimio.statechart': 'application/vnd.ant.mermaid',
+    'application/vnd.pimio.presenter': 'application/vnd.pimio.revealjs',
+    'application/vnd.pimio.dxf': 'application/vnd.pimio.dxfviewer',
     // Backward compat variations
     'text/x-threejs':               'application/vnd.pimio.threejs',
     'application/javascript+threejs': 'application/vnd.pimio.threejs',
@@ -2912,13 +3012,18 @@ function _normalizeArtifactType(t) {
       image: "image",
       file: "file",
     }[tail];
-    if (canonical) return "application/vnd.pimio." + canonical;
+    if (canonical) {
+      return ['mermaid', 'react', 'code'].includes(canonical)
+        ? "application/vnd.ant." + canonical
+        : "application/vnd.pimio." + canonical;
+    }
   }
   return t;
 }
 
 function renderArtifactPreview(body, art) {
   art = { ...art, type: _normalizeArtifactType(art.type) };
+  if (window.Mio?.artifactLab?.render(body, art)) return;
   if (art.type === 'image/png' || art.type === 'image/jpeg' || art.type === 'image/jpg' || art.type === 'image/webp' || art.type === 'image/gif' || art.type.startsWith('image/') && art.type !== 'image/svg+xml') {
     const url = (art.content || '').trim();
     const wrap = document.createElement('div');
@@ -6856,7 +6961,7 @@ try {
 
 // Replace [[ARTIFACT:id]] tokens inside rendered-markdown HTML with cards.
 function expandArtifactPlaceholders(html) {
-  return html.replace(/\[\[ARTIFACT:([\w-]+)\]\]/g, (_, id) => {
+  return html.replace(/\[\[ARTIFACT:([A-Za-z0-9][A-Za-z0-9._-]{0,127})\]\]/g, (_, id) => {
     const art = allArtifacts[id];
     return art ? renderArtifactCard(art) : '';
   });
@@ -7118,6 +7223,7 @@ function autoResize(el) {
 // ===== Chat management =====
 function newChat() {
   currentSessionId = null;
+  currentSessionTitle = 'Untitled';
   chatMessages = [];
   allArtifacts = {};
   artifactVersions = {};
@@ -7127,13 +7233,15 @@ function newChat() {
   _pendingAutoArtifactIds = [];
   _turnHadAutoArtifact = false;
   _pendingBranchMerge = null;
+  _restoredArtifactState = null;
+  _restoredArtifacts = [];
   _titleGenerated = false;
   closeArtifactPanel();
   const msgs = document.getElementById('messages');
   msgs.innerHTML = `
     <div class="welcome" id="welcome">
       <div class="welcome-title"><span>mio</span> ui</div>
-      <div class="welcome-sub">Local AI assistant powered by Mio. 94 artifact types · 46 skills · voice I/O · drag-drop files · ⌘K palette · type / for commands.</div>
+      <div class="welcome-sub">Local AI assistant powered by Mio. Native MLX benchmark, model-card, and inference-trace artifacts · local skills · voice I/O · drag-drop files · ⌘K palette.</div>
       <div class="welcome-chips" id="welcomeChips"></div>
       <div style="font-size:11px;color:var(--text-muted);margin-top:16px">⌘K palette · / slash · ? cheatsheet · ⌘N new · drag-drop file to attach</div>
     </div>`;
@@ -7191,18 +7299,22 @@ async function loadChat(id) {
     const data = await res.json();
     if (data.error) return;
     currentSessionId = id;
+    currentSessionTitle = typeof data.title === 'string' ? data.title : 'Untitled';
     chatMessages = data.messages || [];
     window.currentChatSystemPrompt = data.chat_system_prompt || '';
     // Pre-seed artifacts so server-emitted auto_artifacts render when
     // renderAllMessages() expands [[ARTIFACT:id]] placeholders below.
+    _restoredArtifactState = data.artifact_state || null;
     _restoredArtifacts = data.artifacts || [];
     renderAllMessages();
+    _restoredArtifactState = null;
     _restoredArtifacts = [];
     loadSessionList();
   } catch (e) {}
 }
 
 let _restoredArtifacts = [];
+let _restoredArtifactState = null;
 
 async function deleteSession(id) {
   await fetch(`/ui/api/sessions/${id}`, { method: 'DELETE' });
@@ -7218,16 +7330,14 @@ function renderAllMessages() {
   artifactVersions = {};
   artifactActiveIdx = {};
   closeArtifactPanel();
-  // Restore server-side auto_artifacts (posters, weather, etc.) that
-  // don't round-trip via message text.
-  if (_restoredArtifacts && _restoredArtifacts.length) {
-    ingestArtifacts(_restoredArtifacts);
-  }
+  // Schema-v2 state retains complete revision chains. Legacy sessions fall
+  // back to the former active-artifact list.
+  const restoredIds = restoreArtifactState(_restoredArtifactState, _restoredArtifacts);
   if (window.Mio && Mio.pinned) Mio.pinned.render();
   chatMessages.forEach((m, idx) => {
     const noTools = (m.content || '').replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '').trim();
     const parsed = parseArtifacts(noTools);
-    ingestArtifacts(parsed.artifacts);
+    ingestArtifacts(parsed.artifacts.filter((artifact) => !restoredIds.has(artifact.id)));
     // Skip intermediate tool-use rounds that have no human-readable text
     // and no artifact — they saved a metrics badge but nothing to render.
     if (m.role === 'assistant' && !parsed.cleanText.trim() && !parsed.artifacts.length) return;
@@ -7302,6 +7412,7 @@ async function autoSave() {
       id: currentSessionId,
       messages: chatMessages,
       artifacts: artifactsBlob,
+      artifact_state: serializeArtifactState(),
       project_id: activeProjectId || undefined,
       chat_system_prompt: (window.currentChatSystemPrompt || '').trim() || undefined,
     };
@@ -7318,6 +7429,7 @@ async function autoSave() {
     });
     const data = await res.json();
     currentSessionId = data.id;
+    currentSessionTitle = data.title || currentSessionTitle;
     loadSessionList();
   } catch (e) {}
 }
@@ -7787,8 +7899,13 @@ function exportChatJson() {
   const payload = {
     id: currentSessionId,
     exported_at: new Date().toISOString(),
-    title: document.querySelector('.chat-item[data-active]')?.textContent || 'Untitled',
+    schema_version: 2,
+    title: currentSessionTitle,
     messages: chatMessages,
+    artifacts: Object.values(allArtifacts),
+    artifact_state: serializeArtifactState(),
+    project_id: activeProjectId || null,
+    chat_system_prompt: (window.currentChatSystemPrompt || '').trim(),
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
@@ -7805,9 +7922,16 @@ function importChatJson() {
       const data = JSON.parse(await f.text());
       if (!Array.isArray(data.messages)) throw new Error('No messages[] in JSON');
       currentSessionId = null;
+      currentSessionTitle = typeof data.title === 'string' ? data.title : 'Imported chat';
       chatMessages = data.messages;
+      _restoredArtifactState = data.artifact_state || null;
+      _restoredArtifacts = Array.isArray(data.artifacts) ? data.artifacts : [];
+      activeProjectId = typeof data.project_id === 'string' ? data.project_id : null;
+      window.currentChatSystemPrompt = typeof data.chat_system_prompt === 'string' ? data.chat_system_prompt : '';
       _titleGenerated = true;
       renderAllMessages();
+      _restoredArtifactState = null;
+      _restoredArtifacts = [];
       autoSave();
       toast('Imported ' + chatMessages.length + ' messages');
     } catch (e) { toast('Import failed: ' + e.message); }

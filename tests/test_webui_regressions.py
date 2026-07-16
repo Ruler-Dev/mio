@@ -96,6 +96,161 @@ def test_flow_has_a_canvas_first_mobile_layout():
     assert "flex-direction: row" in flow_mobile
 
 
+def test_native_mlx_artifact_lab_renders_without_remote_dependencies():
+    root = Path(__file__).parents[1]
+    asset = root / "mio" / "webui" / "assets" / "artifact_lab.js"
+    source = asset.read_text(encoding="utf-8")
+    shell = (root / "mio" / "webui" / "mio_ui.html").read_text(encoding="utf-8")
+
+    assert '<script src="/ui/assets/artifact_lab.js"></script>' in shell
+    assert "https://" not in source
+    assert ".innerHTML" not in source
+    assert "application/vnd.pimio.benchmark+json" in source
+    assert "application/vnd.pimio.model-card+json" in source
+    assert "application/vnd.pimio.inference-trace+json" in source
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is unavailable")
+    smoke = r"""
+const assert = require('node:assert/strict');
+class Element {
+  constructor(tag) {
+    this.tag = tag; this.children = []; this.attributes = {};
+    this.dataset = {}; this.style = {}; this.className = ''; this.textContent = '';
+    this.classList = { add: (value) => { this.className += ' ' + value; } };
+  }
+  append(...values) { this.children.push(...values); }
+  setAttribute(name, value) { this.attributes[name] = String(value); }
+}
+global.window = {};
+global.document = { createElement: (tag) => new Element(tag) };
+require(process.argv[1]);
+const lab = window.Mio.artifactLab;
+assert.equal(lab.catalog().length, 3);
+for (const artifact of [
+  {type:'application/vnd.pimio.benchmark+json', content:JSON.stringify({runs:[{label:'base',prefill_tps:20,decode_tps:10,ttft_ms:5}]})},
+  {type:'application/vnd.pimio.model-card+json', content:JSON.stringify({name:'Qwen',quantization:'Q4'})},
+  {type:'application/vnd.pimio.inference-trace+json', content:JSON.stringify({spans:[{name:'prefill',start_ms:0,duration_ms:4}]})},
+]) {
+  const body = new Element('div');
+  assert.equal(lab.render(body, artifact), true);
+  assert.equal(body.children.length, 1);
+  assert.equal(body.children[0].className.includes('has-error'), false);
+  assert.equal(lab.download(artifact).extension, '.json');
+}
+"""
+    subprocess.run(
+        [node, "-e", smoke, str(asset)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_artifact_mime_normalization_is_idempotent_and_reaches_real_renderers():
+    root = Path(__file__).parents[1]
+    shell_path = root / "mio" / "webui" / "mio_ui.html"
+    shell = shell_path.read_text(encoding="utf-8")
+    start = shell.index("function _normalizeArtifactType(t)")
+    end = shell.index("function renderArtifactPreview(body, art)", start)
+    function_source = shell[start:end]
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is unavailable")
+    check = function_source + r"""
+const assert = require('node:assert/strict');
+const cases = new Map([
+  ['application/vnd.ant.react', 'application/vnd.ant.react'],
+  ['application/vnd.pimio.react', 'application/vnd.ant.react'],
+  ['application/vnd.ant.code', 'application/vnd.ant.code'],
+  ['application/vnd.pimio.code', 'application/vnd.ant.code'],
+  ['application/vnd.pimio.mermaid', 'application/vnd.ant.mermaid'],
+  ['application/vnd.pimio.dxf', 'application/vnd.pimio.dxfviewer'],
+]);
+for (const [input, expected] of cases) {
+  const once = _normalizeArtifactType(input);
+  assert.equal(once, expected);
+  assert.equal(_normalizeArtifactType(once), expected);
+}
+"""
+    subprocess.run([node, "-e", check], check=True, capture_output=True, text=True)
+
+
+def test_artifact_state_v2_round_trips_revisions_and_dotted_identifiers():
+    root = Path(__file__).parents[1]
+    shell = (root / "mio" / "webui" / "mio_ui.html").read_text(encoding="utf-8")
+
+    assert "function serializeArtifactState()" in shell
+    assert "function restoreArtifactState(state, legacyArtifacts = [])" in shell
+    assert "artifact_state: serializeArtifactState()" in shell
+    assert "schema_version: 2" in shell
+    assert "active_index:" in shell and "revisions:" in shell
+    assert "parent: cur.content_id" in shell
+    assert r"([A-Za-z0-9][A-Za-z0-9._-]{0,127})" in shell
+
+
+@pytest.mark.asyncio
+async def test_session_endpoint_preserves_artifact_revision_state(tmp_path, monkeypatch):
+    monkeypatch.setattr(router, "_sessions_dir", tmp_path)
+    state = {
+        "schema_version": 2,
+        "active_artifact_id": "mlx.trace.v1",
+        "chains": [
+            {
+                "id": "mlx.trace.v1",
+                "active_index": 1,
+                "revisions": [
+                    {
+                        "id": "mlx.trace.v1",
+                        "type": "application/vnd.pimio.inference-trace+json",
+                        "title": "Trace",
+                        "content": '{"spans":[{"name":"prefill","start_ms":0,"duration_ms":4}]}',
+                        "content_id": "fnv1a32:00000001",
+                        "provenance": {"producer": "benchmark", "run_id": "run-1"},
+                    },
+                    {
+                        "id": "mlx.trace.v1",
+                        "type": "application/vnd.pimio.inference-trace+json",
+                        "title": "Trace (annotated)",
+                        "content": '{"spans":[{"name":"prefill","start_ms":0,"duration_ms":3.8}]}',
+                        "content_id": "fnv1a32:00000002",
+                        "provenance": {"producer": "editor", "parent": "fnv1a32:00000001"},
+                    },
+                ],
+            }
+        ],
+    }
+
+    result = await router.save_session(
+        {
+            "id": "artifact-roundtrip",
+            "messages": [{"role": "user", "content": "Compare these runs"}],
+            "artifact_state": state,
+        }
+    )
+    loaded = await router.load_session(result["id"])
+
+    assert loaded["artifact_state"] == state
+    assert loaded["artifact_state"]["chains"][0]["active_index"] == 1
+    assert loaded["artifact_state"]["chains"][0]["revisions"][1]["provenance"]["parent"] == "fnv1a32:00000001"
+
+
+def test_artifact_panel_is_mobile_sheet_and_core_controls_are_accessible():
+    root = Path(__file__).parents[1]
+    shell = (root / "mio" / "webui" / "mio_ui.html").read_text(encoding="utf-8")
+    css = (root / "mio" / "webui" / "assets" / "main.css").read_text(encoding="utf-8")
+
+    assert '.app.artifact-open .artifact-panel' in css
+    assert "inset: 0 0 0 48px" in css
+    assert ".artifact-resizer { display: none; }" in css
+    assert ":focus-visible" in css
+    assert 'role="tablist"' in shell
+    assert 'role="dialog" aria-modal="true"' in shell
+    assert 'aria-label="Send message"' in shell
+    assert 'type="button" class="artifact-card"' in shell
+
+
 @pytest.mark.asyncio
 async def test_tier_switch_loads_new_tier_before_retiring_old(monkeypatch):
     lock = threading.Lock()

@@ -29,8 +29,10 @@ executable skills, flows, schedules, webhooks, and generated-code artifacts.
 - Full GFM markdown rendering with vendored Marked 12.0.2 and Prism 1.29.0 assets; Python, TS, JSX, Rust, Go, SQL, YAML, JSON, CSS, and Bash highlighting works without a CDN at application boot. Optional sandboxed artifact renderers may still load their own libraries on demand
 - Multi-round tool-use loop (up to 5 rounds per turn) — model can chain `web_search` → `fetch_url` → `generate_chart` → emit artifact
 - Live streaming with per-message metrics (tok/s, acceptance, prefill)
-- Session persistence (`~/.mio/sessions/*.json`) with auto-titles
-- Import/export chat as JSON (round-trip saves)
+- Session persistence (`~/.mio/sessions/*.json`) with auto-titles and
+  schema-v2 artifact revision state
+- Import/export chat as JSON, including artifact chains, project association,
+  and the per-chat system prompt; legacy `artifacts` lists remain importable
 - Hover any message for **Copy · Regenerate · Speak · Pin** actions
 - Global search across every saved chat (sidebar debounced, snippet-highlighted)
 
@@ -58,9 +60,15 @@ Slash commands: `/weather /chart /pdf /docx /xlsx /pptx /qr /ical /resume /invoi
 
 ### Power features
 
-- **Artifact panel**: side panel with Preview/Source tabs, drag-left-edge to resize, double-click to toggle expanded, fullscreen button (**no** more blank/stuck states during drag)
-- **Artifact versioning**: same-identifier artifacts stack into a chain with prev/next arrows
-- **Edit-in-place**: Source tab is editable → Save creates a new version (undo via prev arrow)
+- **Artifact panel**: desktop side panel with Preview/Source tabs,
+  drag-left-edge resize, double-click expansion, and fullscreen control; below
+  768 px it becomes a fixed sheet beside the 48 px navigation rail instead
+  of adding an overflowing fourth grid column
+- **Artifact versioning**: same-identifier artifacts stack into a chain with
+  prev/next arrows; session schema v2 retains the complete bounded chain and
+  selected revision
+- **Edit-in-place**: Source is editable; Save appends a revision whose
+  provenance refers to the prior content identifier
 - **Share**: mints a short-URL at `/ui/share/<id>` for read-only view of an artifact; copies to clipboard
 - **Copy source / Download file**: each artifact's source or template-wrapped standalone HTML
 - **Artifact gallery** (`/gallery`): thumbnail grid of every artifact in the current chat, filterable
@@ -78,6 +86,20 @@ Slash commands: `/weather /chart /pdf /docx /xlsx /pptx /qr /ical /resume /invoi
   for bounded probes of local unauthenticated providers, with a manual Retry
   action; every stdio probe is sandboxed, while remote, authenticated and
   unisolatable HTTP/SSE providers are never contacted by this view
+
+### Keyboard and accessibility structure
+
+Preview, Source, and Diff are native buttons in a `tablist`, and their
+`aria-selected` value follows the visible artifact view. Help, Gallery,
+Command Palette, and Settings expose dialog roles and accessible names; the
+artifact inspector is a named region. Artifact and gallery cards are buttons,
+the send control has an explicit label, the Caveman, temperature, maximum-
+token, and response-style settings have associated labels, and keyboard-
+focusable controls receive a global `:focus-visible` outline.
+
+These are structural improvements, not a WCAG conformance claim. Complete
+focus trapping/restoration, screen-reader passes, zoom testing, and live
+desktop/mobile browser QA remain release work.
 
 ### Flow Mode
 
@@ -102,9 +124,41 @@ per graph. Current bounds are 200 graph nodes and 200 execution hops, a 2 MiB
 flow document, 64 KiB of run arguments, a 256 KiB tool result, and a 120-second
 published-flow timeout. Recursive `run_flow_skill` dispatch is rejected.
 
-## Artifact types (41 total)
+## Supported artifact renderer matrix
 
-Model wraps rendered content in `<antArtifact identifier="…" type="…" title="…">…</antArtifact>`. Both `vnd.ant.*` and `vnd.pimio.*` namespaces are accepted (aliased).
+The model wraps rendered content in
+`<antArtifact identifier="…" type="…" title="…">…</antArtifact>`. The
+matrix below lists MIME keys that are routed to maintained renderers in the
+current UI; it is not derived from a hard-coded marketing count. Some known
+`vnd.ant.*`, `vnd.pimio.*`, and legacy spellings are aliases, but support is
+defined by the canonical renderer key rather than by accepting every possible
+name in either namespace. For compactness, older matrix rows written as
+`vnd.*` omit the leading `application/` from their on-wire MIME value; the
+three Artifact Lab rows show their complete values.
+
+Alias normalization is idempotent. In particular,
+`application/vnd.pimio.react`, `application/vnd.pimio.code`, and
+`application/vnd.pimio.mermaid` normalize to the corresponding
+`application/vnd.ant.*` renderer keys, while an already canonical Ant key
+remains unchanged. Known aliases for Three.js, p5, Chart.js, Leaflet, math,
+Graphviz, mind maps, slides, and timelines converge on their
+`application/vnd.pimio.*` renderer keys. Legacy ERD, Gantt, and state chart
+types converge on Mermaid; `presenter` converges on Reveal.js. Running
+normalization again leaves those results unchanged.
+
+Identifiers must begin with an ASCII letter or digit and may then contain up
+to 127 letters, digits, dots, underscores, or hyphens. Invalid or prototype-
+sensitive identifiers are replaced with a deterministic `art-…` identifier.
+Consequently a dotted identifier such as `mlx.run-01` is valid in the message
+placeholder, version store, gallery, and session reload path.
+
+### Native MLX research
+
+| Type | Body | Renderer |
+|---|---|---|
+| `application/vnd.pimio.benchmark+json` | Matched-run JSON | native DOM comparison |
+| `application/vnd.pimio.model-card+json` | Checkpoint metadata JSON | native DOM compatibility card |
+| `application/vnd.pimio.inference-trace+json` | Timed span JSON | native DOM timeline |
 
 ### Visual / interactive
 | Type | Body | Library |
@@ -166,6 +220,154 @@ Model wraps rendered content in `<antArtifact identifier="…" type="…" title=
 | `application/pdf` | filename | iframe embed |
 | `vnd.pimio.image` | filename | inline preview |
 | `vnd.pimio.file` | filename | download card |
+
+## Native Artifact Lab payloads
+
+The three MLX research renderers are implemented by the packaged
+`/ui/assets/artifact_lab.js` asset. They do not fetch a CDN library, navigate
+to a remote URL, or execute payload code. The module parses a JSON object and
+builds ordinary DOM nodes; payload values enter those nodes through
+`textContent`, not `innerHTML`. This is a narrower rendering surface than the
+executable iframe-based artifact types, but it is not a signature or a claim
+that the supplied measurements are true.
+
+All three types reject a UTF-8 payload larger than 512 KiB and show an error
+card for malformed JSON or a top-level value other than an object. The Source
+tab remains available for inspection and editing. A successful download is
+pretty-printed JSON with a trailing newline; malformed source is downloaded
+unchanged rather than silently rewritten.
+
+### MLX benchmark comparison
+
+`application/vnd.pimio.benchmark+json` accepts:
+
+- optional top-level `title`, `subtitle` or `workload`, and `device` fields;
+- a required non-empty `runs` array, bounded to 48 objects;
+- `label` (or `name`) for each run;
+- `prefill_tps` (or `prompt_tps`), `decode_tps` (or `generation_tps`),
+  `ttft_ms`, `memory_gb` (or `peak_memory_gb`), and `acceptance` (or
+  `acceptance_ratio`) as finite numeric values;
+- at least one prefill, decode, or TTFT value across the compared runs.
+
+The renderer highlights the highest decode and prefill throughput and the
+lowest TTFT among values present in the payload. It does not decide whether
+runs were matched, validate parity, or produce a benchmark itself. This
+minimal example reuses the verified snapshot reported in the root README:
+
+```json
+{
+  "title": "Qwen 3.6 short-workload snapshot",
+  "runs": [
+    {
+      "label": "target baseline",
+      "prefill_tps": 234.77,
+      "decode_tps": 19.31
+    },
+    {
+      "label": "DFlash",
+      "prefill_tps": 232.92,
+      "decode_tps": 33.64
+    }
+  ]
+}
+```
+
+### Model compatibility card
+
+`application/vnd.pimio.model-card+json` requires `name` or `model`. It can
+also present `description`, `family`, `parameters`, `quantization`, `format`,
+`context_window`, `size_gb`, `memory_gb`, `revision`, `source`, and `sha256`.
+The optional `features` and `drafters` arrays are combined into at most 24
+display tags. This is presentation metadata: Mio does not infer compatibility
+or verify the source/hash from the card.
+
+```json
+{
+  "name": "organization/checkpoint",
+  "format": "MLX",
+  "quantization": "example-format",
+  "drafters": ["compatible-drafter-id"],
+  "source": "local model registry"
+}
+```
+
+Names in this example are placeholders that demonstrate the payload shape;
+they are not a compatibility result.
+
+### Inference trace
+
+`application/vnd.pimio.inference-trace+json` requires a non-empty `spans`
+array bounded to 256 entries. Each span needs a finite, non-negative
+`duration_ms`; `start_ms` is non-negative and defaults to zero when omitted.
+Optional `name`, `category`, and `detail` fields label a span. The renderer
+sorts spans by start time and uses the greatest of `total_ms` and the observed
+span end times as its timeline extent.
+
+```json
+{
+  "title": "Schema example — not a measurement",
+  "spans": [
+    {
+      "name": "prefill",
+      "start_ms": 0,
+      "duration_ms": 12.5,
+      "category": "prefill"
+    }
+  ]
+}
+```
+
+The model-facing system prompt instructs the model to use benchmark and trace
+artifacts only for supplied measurements and never to fabricate values or
+spans.
+
+## Artifact persistence and JSON export
+
+Mio UI stores artifacts as chains keyed by identifier. `allArtifacts` points
+at the selected revision of each chain, while the schema-v2
+`artifact_state` retains the revisions themselves:
+
+```json
+{
+  "schema_version": 2,
+  "active_artifact_id": "mlx.run-01",
+  "chains": [
+    {
+      "id": "mlx.run-01",
+      "active_index": 0,
+      "revisions": [
+        {
+          "id": "mlx.run-01",
+          "type": "application/vnd.pimio.benchmark+json",
+          "title": "Matched MLX runs",
+          "language": "",
+          "content": "{\"runs\":[{\"label\":\"baseline\",\"decode_tps\":19.31}]}",
+          "created_at": "2026-07-16T00:00:00.000Z",
+          "content_id": "fnv1a32:31dc2a55",
+          "provenance": {"producer": "chat"}
+        }
+      ]
+    }
+  ]
+}
+```
+
+The `content_id` is a 32-bit FNV-1a value over the JavaScript code units of the
+canonical type, a NUL separator, and the content. It is deterministic metadata
+for relating revisions, not a cryptographic digest or integrity check. A
+Source-tab save appends a revision with `producer: "editor"` and the preceding
+`content_id` in `parent`; it does not overwrite the earlier revision.
+
+Auto-save sends both the schema-v2 state and a legacy projection of the
+currently selected artifacts. JSON export adds a top-level
+`schema_version: 2`, export timestamp, session ID, title, messages, project
+association, and per-chat system prompt. On import, `messages` is required.
+If `artifact_state.schema_version` is 2, Mio rebuilds at most 256 chains and
+64 revisions per chain and clamps each `active_index` to the available range.
+If that state is absent, it ingests the legacy top-level `artifacts` array.
+The serialized `active_artifact_id` records which panel was active at save
+time; current restoration rebuilds revision selection from each
+`active_index` and does not automatically reopen that panel.
 
 ## Built-in tools and external instruction skills
 

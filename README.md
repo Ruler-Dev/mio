@@ -193,6 +193,92 @@ latency, so stops are not presented as a fixed performance multiplier.
 
 See [docs/02-commands.md](docs/02-commands.md) for the CLI and API surface.
 
+## Mio UI and the native Artifact Lab
+
+`mio serve --webui` exposes the browser application at
+`http://127.0.0.1:9090/ui`. In addition to the general artifact renderers, the
+UI ships three MLX-oriented Artifact Lab renderers as local JavaScript and
+CSS assets:
+
+| MIME type | Required payload shape | Purpose |
+|---|---|---|
+| `application/vnd.pimio.benchmark+json` | `{runs: [...]}` with at least one prefill, decode, or TTFT value | Compare matched MLX runs |
+| `application/vnd.pimio.model-card+json` | `{name: "..."}` or `{model: "..."}` | Record checkpoint and compatibility metadata |
+| `application/vnd.pimio.inference-trace+json` | `{spans: [...]}` with non-negative start and duration values | Inspect a measured request timeline |
+
+These three renderers have no CDN dependency, do not execute artifact content,
+and insert payload values into the page as text. Each JSON document is limited
+to 512 KiB; benchmark payloads accept at most 48 runs and trace payloads at
+most 256 spans. Invalid input produces an error card and remains editable in
+the Source tab. Downloads are deterministic, pretty-printed JSON when the
+payload parses successfully.
+
+The model emits an artifact in the same envelope used by the rest of Mio UI:
+
+```xml
+<antArtifact identifier="mlx.run-01"
+  type="application/vnd.pimio.benchmark+json"
+  title="Matched MLX runs">
+{"runs":[{"label":"baseline","prefill_tps":234.77,"decode_tps":19.31}]}
+</antArtifact>
+```
+
+The values in that example are taken from the verified snapshot above; an
+Artifact Lab renderer only presents supplied data and does not measure or
+validate a performance claim. The model prompt explicitly tells the model not
+to invent benchmark values or trace spans.
+
+Artifact MIME aliases are normalized to the key used by the actual renderer.
+Normalization is idempotent: applying it to an already-canonical React, code,
+or Mermaid type does not change the type a second time. Artifact identifiers
+may contain letters, digits, dots, underscores, and hyphens after an initial
+alphanumeric character, so identifiers such as `mlx.run-01` survive parsing
+and session reloads.
+
+Session auto-save and JSON export retain complete artifact history in the
+versioned `artifact_state` document:
+
+```json
+{
+  "schema_version": 2,
+  "active_artifact_id": "mlx.run-01",
+  "chains": [
+    {
+      "id": "mlx.run-01",
+      "active_index": 0,
+      "revisions": [
+        {
+          "id": "mlx.run-01",
+          "type": "application/vnd.pimio.benchmark+json",
+          "title": "Matched MLX runs",
+          "language": "",
+          "content": "{\"runs\":[{\"label\":\"baseline\",\"decode_tps\":19.31}]}",
+          "created_at": "2026-07-16T00:00:00.000Z",
+          "content_id": "fnv1a32:31dc2a55",
+          "provenance": {"producer": "chat"}
+        }
+      ]
+    }
+  ]
+}
+```
+
+The `content_id` is a deterministic, non-cryptographic revision identifier,
+not an integrity signature. Source edits append a revision and record the
+prior `content_id` as provenance. Version 2 restores every bounded revision
+chain and its selected `active_index`; imports without `artifact_state` still
+accept the legacy `artifacts` list. JSON exports also include messages, title,
+project association, and the per-chat system prompt.
+
+On narrow viewports the artifact panel becomes a fixed sheet beside the
+navigation rail rather than a fourth grid column. Preview and Source are real
+tab buttons with selected-state metadata; dialogs, artifact regions, artifact
+cards, gallery cards, and the send control expose labels or roles, and keyboard
+focus receives a visible outline. These changes improve the current keyboard
+and mobile structure, but live cross-browser and assistive-technology QA is
+still part of the release gate. The complete renderer matrix and payload
+examples are in [docs/11-mio-ui.md](docs/11-mio-ui.md).
+
 ## Prompt policies
 
 `mio chat` and `mio serve` expose one prompt policy at a time:
@@ -356,6 +442,7 @@ separate HTTP calls, so it is not yet a multi-request service scheduler.
 
 - [Documentation index](docs/00-index.md)
 - [Getting started](docs/01-getting-started.md)
+- [Mio UI and artifact formats](docs/11-mio-ui.md)
 - [Architecture](docs/12-architecture.md)
 - [Development plan](docs/13-development-plan.md)
 - [External skills](docs/14-external-skills.md)
