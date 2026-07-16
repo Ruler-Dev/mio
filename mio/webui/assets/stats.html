@@ -1,71 +1,209 @@
 <!doctype html>
-<html lang="en"><head>
+<html lang="en">
+<head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Mio Stats</title>
 <script src="/ui/assets/security.js"></script>
 <style>
 :root {
   --bg: #0a0a14; --panel: #161621; --border: #2a2a38; --accent: #3b82f6;
-  --text: #e5e5e5; --muted: #9ca3af;
+  --text: #e5e5e5; --muted: #9ca3af; --danger: #f87171;
 }
 * { box-sizing: border-box; }
-body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: var(--bg); color: var(--text); font-size: 14px; }
-.header { padding: 18px 28px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 16px; }
+body {
+  margin: 0; min-height: 100vh; font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  background: var(--bg); color: var(--text); font-size: 14px;
+}
+.header {
+  padding: 18px 28px; border-bottom: 1px solid var(--border); display: flex;
+  align-items: center; gap: 16px;
+}
 .title { font-size: 18px; font-weight: 600; }
 .back { margin-left: auto; color: var(--accent); text-decoration: none; font-size: 13px; }
-.grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; padding: 20px 28px; max-width: 1200px; margin: 0 auto; }
-.kpi { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; }
-.kpi .v { font-size: 28px; font-weight: 600; }
+.back:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.state {
+  max-width: 1144px; margin: 20px auto 0; padding: 14px 16px; border: 1px solid var(--border);
+  border-radius: 10px; background: var(--panel); color: var(--muted); display: flex;
+  align-items: center; justify-content: space-between; gap: 16px;
+}
+.state[data-kind="error"] { border-color: color-mix(in srgb, var(--danger) 48%, var(--border)); color: var(--danger); }
+.state[hidden] { display: none; }
+.state button {
+  border: 1px solid var(--border); border-radius: 7px; background: transparent; color: var(--text);
+  padding: 6px 10px; cursor: pointer;
+}
+.state button[hidden] { display: none; }
+.grid {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px;
+  padding: 20px 28px 10px; max-width: 1200px; margin: 0 auto;
+}
+.kpi { min-width: 0; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; }
+.kpi .v { font-size: clamp(22px, 4vw, 28px); font-weight: 600; overflow-wrap: anywhere; }
 .kpi .l { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
 .sect { padding: 10px 28px 30px; max-width: 1200px; margin: 0 auto; }
 .sect h2 { font-size: 15px; margin: 20px 0 10px; color: var(--text); }
-table { width: 100%; border-collapse: collapse; background: var(--panel); border-radius: 10px; overflow: hidden; }
-td, th { text-align: left; padding: 8px 14px; font-size: 13px; border-bottom: 1px solid var(--border); }
-th { color: var(--muted); font-weight: 500; text-transform: uppercase; letter-spacing: 0.4px; font-size: 11px; }
-.bar { display: inline-block; height: 8px; background: var(--accent); border-radius: 2px; vertical-align: middle; }
-</style></head>
+.data-card { width: 100%; overflow: hidden; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; }
+.data-row {
+  display: grid; grid-template-columns: minmax(90px, 240px) minmax(0, 1fr); gap: 14px;
+  align-items: center; min-height: 40px; padding: 8px 14px; border-bottom: 1px solid var(--border);
+}
+.data-row:last-child { border-bottom: 0; }
+.data-key { min-width: 0; font-family: ui-monospace, monospace; font-size: 12px; overflow-wrap: anywhere; }
+.data-value { color: var(--muted); font-variant-numeric: tabular-nums; }
+.activity { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.track { flex: 1; min-width: 32px; height: 8px; overflow: hidden; background: #222233; border-radius: 999px; }
+.bar { height: 100%; width: 0; background: var(--accent); border-radius: inherit; }
+.empty { margin: 0; padding: 18px; color: var(--muted); }
+
+@media (max-width: 900px) {
+  .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 560px) {
+  .header { padding: 14px 16px; align-items: flex-start; }
+  .back { max-width: 45%; text-align: right; }
+  .state { margin: 14px 16px 0; align-items: flex-start; }
+  .grid { grid-template-columns: minmax(0, 1fr); padding: 14px 16px 4px; }
+  .sect { padding: 8px 16px 24px; }
+  .data-row { grid-template-columns: minmax(78px, 36%) minmax(0, 1fr); gap: 10px; padding: 9px 10px; }
+}
+</style>
+</head>
 <body>
-<div class="header">
+<header class="header">
   <div class="title">Mio stats</div>
   <a class="back" href="/ui">← back to chat</a>
+</header>
+<div id="state" class="state" data-kind="loading" role="status" aria-live="polite">
+  <span id="state-message">Loading saved-session statistics…</span>
+  <button id="retry" type="button" hidden>Retry</button>
 </div>
-<div id="kpis" class="grid"></div>
-<div id="sections" class="sect"></div>
+<main>
+  <div id="kpis" class="grid" aria-label="Conversation totals" hidden></div>
+  <div id="sections" class="sect" hidden></div>
+</main>
 <script>
-fetch('/ui/api/stats').then(r => r.json()).then(render);
+const state = document.getElementById('state');
+const stateMessage = document.getElementById('state-message');
+const retryButton = document.getElementById('retry');
+const kpis = document.getElementById('kpis');
+const sections = document.getElementById('sections');
 
-function render(d) {
-  document.getElementById('kpis').innerHTML = [
-    kpi('Sessions', d.sessions),
-    kpi('Messages', d.messages),
-    kpi('You', d.user_messages),
-    kpi('Mio', d.assistant_messages),
-  ].join('');
-  const byDay = (d.messages_by_day || []).slice(-30);
-  const maxDay = Math.max(1, ...byDay.map(([,v]) => v));
-  document.getElementById('sections').innerHTML = `
-    <h2>Messages per day (last 30)</h2>
-    <table><tbody>${byDay.map(([day, count]) =>
-      `<tr><td style="width:110px;font-family:ui-monospace,monospace;color:var(--muted)">${day}</td>
-      <td><div class="bar" style="width:${Math.round(count / maxDay * 500)}px"></div>&nbsp; ${count}</td></tr>`
-    ).join('')}</tbody></table>
-    <h2>Skills used</h2>
-    <table><tbody>${(d.skills_used || []).map(([k, v]) =>
-      `<tr><td style="width:200px;font-family:ui-monospace,monospace">${k}</td><td>${v}</td></tr>`
-    ).join('')}</tbody></table>
-    <h2>Artifact types</h2>
-    <table><tbody>${(d.artifact_types || []).map(([k, v]) =>
-      `<tr><td style="width:320px;font-family:ui-monospace,monospace;font-size:11px">${k}</td><td>${v}</td></tr>`
-    ).join('')}</tbody></table>
-    <h2>Personas invoked</h2>
-    <table><tbody>${(d.personas_used || []).map(([k, v]) =>
-      `<tr><td style="width:150px;font-family:ui-monospace,monospace">/as ${k}</td><td>${v}</td></tr>`
-    ).join('')}</tbody></table>
-  `;
+retryButton.addEventListener('click', loadStats);
+loadStats();
+
+async function loadStats() {
+  setState('loading', 'Loading saved-session statistics…');
+  kpis.hidden = true;
+  sections.hidden = true;
+  try {
+    const response = await fetch('/ui/api/stats');
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    const data = await response.json();
+    if (data && data.error === 'no sessions dir') {
+      render({ sessions: 0, messages: 0, user_messages: 0, assistant_messages: 0 });
+      return;
+    }
+    if (!data || typeof data !== 'object' || data.error) {
+      throw new Error(data && data.error ? data.error : 'Invalid response');
+    }
+    render(data);
+  } catch (error) {
+    kpis.replaceChildren();
+    sections.replaceChildren();
+    setState('error', 'Stats are unavailable. Check the Mio server, then try again.', true);
+  }
 }
 
-function kpi(l, v) {
-  return `<div class="kpi"><div class="v">${v.toLocaleString ? v.toLocaleString() : v}</div><div class="l">${l}</div></div>`;
+function render(data) {
+  const totals = [
+    ['Sessions', count(data.sessions)],
+    ['Messages', count(data.messages)],
+    ['You', count(data.user_messages)],
+    ['Mio', count(data.assistant_messages)],
+  ];
+  kpis.replaceChildren(...totals.map(([label, value]) => makeKpi(label, value)));
+  sections.replaceChildren();
+
+  const byDay = pairs(data.messages_by_day).slice(-30);
+  const maxDay = Math.max(1, ...byDay.map(([, value]) => value));
+  appendSection('Messages per day (last 30)', byDay, {
+    empty: 'No message activity has been recorded yet.',
+    value(row, value) {
+      const activity = element('div', 'activity');
+      const track = element('div', 'track');
+      const bar = element('div', 'bar');
+      bar.style.width = Math.min(100, value / maxDay * 100).toFixed(1) + '%';
+      track.appendChild(bar);
+      const total = element('span', 'data-value', value.toLocaleString());
+      activity.append(track, total);
+      row.appendChild(activity);
+    },
+  });
+  appendSection('Skills used', pairs(data.skills_used), { empty: 'No skill calls have been recorded yet.' });
+  appendSection('Artifact types', pairs(data.artifact_types), { empty: 'No artifacts have been saved yet.' });
+  appendSection('Personas invoked', pairs(data.personas_used), {
+    empty: 'No personas have been invoked yet.',
+    key: value => '/as ' + value,
+  });
+
+  kpis.hidden = false;
+  sections.hidden = false;
+  if (totals[0][1] === 0) {
+    setState('empty', 'No saved sessions yet. Start a chat and this dashboard will populate automatically.');
+  } else {
+    state.hidden = true;
+  }
+}
+
+function appendSection(title, values, options = {}) {
+  sections.appendChild(element('h2', '', title));
+  const card = element('div', 'data-card');
+  if (!values.length) {
+    card.appendChild(element('p', 'empty', options.empty || 'No data yet.'));
+  } else {
+    values.forEach(([key, value]) => {
+      const row = element('div', 'data-row');
+      row.appendChild(element('div', 'data-key', options.key ? options.key(key) : key));
+      if (options.value) options.value(row, value);
+      else row.appendChild(element('div', 'data-value', value.toLocaleString()));
+      card.appendChild(row);
+    });
+  }
+  sections.appendChild(card);
+}
+
+function makeKpi(label, value) {
+  const card = element('div', 'kpi');
+  card.append(element('div', 'v', value.toLocaleString()), element('div', 'l', label));
+  return card;
+}
+
+function pairs(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 100).flatMap(item => {
+    if (!Array.isArray(item) || item.length < 2) return [];
+    return [[String(item[0] ?? ''), count(item[1])]];
+  });
+}
+
+function count(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.floor(number) : 0;
+}
+
+function setState(kind, message, retry = false) {
+  state.hidden = false;
+  state.dataset.kind = kind;
+  stateMessage.textContent = message;
+  retryButton.hidden = !retry;
+}
+
+function element(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = String(text);
+  return node;
 }
 </script>
 </body>

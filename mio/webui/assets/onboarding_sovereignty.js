@@ -59,6 +59,7 @@
       localStorage.setItem(KEY, "1");
       ov.remove();
       window.removeEventListener("keydown", onEsc);
+      window.dispatchEvent(new CustomEvent("mio:sovereignty-onboarded"));
     };
     const onEsc = (e) => { if (e.key === "Escape") dismiss(); };
     window.addEventListener("keydown", onEsc);

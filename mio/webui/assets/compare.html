@@ -11,60 +11,111 @@
   --text: #e5e5e5; --muted: #9ca3af; --input: #1f1f2e;
 }
 * { box-sizing: border-box; }
-body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: var(--bg); color: var(--text); font-size: 14px; height: 100vh; display: flex; flex-direction: column; }
+body {
+  margin: 0; min-height: 100vh; height: 100vh; font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  background: var(--bg); color: var(--text); font-size: 14px; display: flex; flex-direction: column;
+}
 .header { padding: 14px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 14px; }
 .title { font-size: 16px; font-weight: 600; }
 .back { margin-left: auto; color: var(--accent); text-decoration: none; font-size: 13px; }
 .input-row { padding: 12px 24px; border-bottom: 1px solid var(--border); display: flex; gap: 10px; align-items: center; }
-.input-row input[type=text] { flex: 1; background: var(--input); border: 1px solid var(--border); color: var(--text); padding: 10px 14px; border-radius: 8px; font-size: 14px; font-family: inherit; }
+.input-row input[type=text] {
+  flex: 1; min-width: 0; background: var(--input); border: 1px solid var(--border); color: var(--text);
+  padding: 10px 14px; border-radius: 8px; font-size: 14px; font-family: inherit;
+}
 .input-row button { background: var(--accent); color: #fff; border: 0; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 13px; }
 .input-row button:disabled { opacity: .45; cursor: not-allowed; }
+.back:focus-visible, input:focus-visible, select:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .compare-status { padding: 8px 24px; border-bottom: 1px solid var(--border); color: var(--muted); background: var(--panel); font-size: 12px; }
+.compare-status[data-kind=success] { color: #86efac; }
 .compare-status[data-kind=warning] { color: #fbbf24; }
 .compare-status[data-kind=error] { color: #f87171; }
 .compare-status[hidden] { display: none; }
-.columns { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; flex: 1; overflow: hidden; background: var(--border); }
-.col { background: var(--bg); display: flex; flex-direction: column; overflow: hidden; }
+.model-controls { padding: 10px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.model-inventory { min-width: 0; flex: 1; display: grid; gap: 3px; color: var(--muted); font-size: 11.5px; }
+.model-inventory strong { color: var(--text); font-weight: 600; }
+.model-actions { display: flex; gap: 8px; }
+.model-actions button { border: 1px solid var(--border); background: var(--panel); color: var(--text); padding: 7px 12px; border-radius: 7px; cursor: pointer; font-size: 12px; }
+.model-actions button.primary { border-color: var(--accent); background: var(--accent); color: #fff; font-weight: 600; }
+.model-actions button:disabled { opacity: .45; cursor: not-allowed; }
+.memory-warning { width: 100%; color: #fbbf24; font-size: 11.5px; line-height: 1.45; }
+.columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; flex: 1; min-height: 0; overflow: hidden; background: var(--border); }
+.col { min-width: 0; background: var(--bg); display: flex; flex-direction: column; overflow: hidden; }
 .col-head { padding: 8px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; background: var(--panel); }
-.col-head select { background: var(--input); border: 1px solid var(--border); color: var(--text); padding: 5px 10px; border-radius: 6px; font-size: 12px; font-family: ui-monospace,monospace; }
-.col-head .metric { color: var(--muted); font-family: ui-monospace,monospace; font-size: 11px; margin-left: auto; }
-.col-body { flex: 1; overflow-y: auto; padding: 18px 20px; line-height: 1.6; white-space: pre-wrap; font-size: 13.5px; }
+.col-head label { color: var(--muted); font-size: 12px; }
+.col-head select { min-width: 0; max-width: 60%; background: var(--input); border: 1px solid var(--border); color: var(--text); padding: 5px 10px; border-radius: 6px; font-size: 12px; font-family: ui-monospace,monospace; }
+.col-head .metric { color: var(--muted); font-family: ui-monospace,monospace; font-size: 11px; margin-left: auto; white-space: nowrap; }
+.col-body { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 20px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13.5px; }
+.col-body[data-state=empty] { color: var(--muted); }
+.col-body[data-state=error] { color: #f87171; }
 .cursor { display: inline-block; width: 7px; height: 14px; background: var(--accent); vertical-align: middle; animation: blink 1s infinite; }
 @keyframes blink { 0%,50% { opacity: 1; } 51%,100% { opacity: 0; } }
+
+@media (max-width: 720px) {
+  body { height: auto; }
+  .header { padding: 12px 16px; align-items: flex-start; }
+  .back { max-width: 42%; text-align: right; }
+  .input-row { padding: 10px 16px; flex-wrap: wrap; }
+  .input-row input[type=text] { flex-basis: 100%; }
+  .input-row button { width: 100%; }
+  .compare-status { padding: 8px 16px; }
+  .model-controls { padding: 10px 16px; align-items: stretch; }
+  .model-inventory { flex-basis: 100%; }
+  .model-actions { width: 100%; }
+  .model-actions button { flex: 1; }
+  .columns { grid-template-columns: minmax(0, 1fr); overflow: visible; }
+  .col { min-height: 42vh; overflow: visible; }
+  .col-head { position: sticky; top: 0; z-index: 1; padding: 8px 12px; }
+  .col-body { min-height: 220px; overflow: visible; padding: 14px 16px 22px; }
+}
 </style>
 </head>
 <body>
-<div class="header">
-  <div>
-    <div class="title">Side-by-side model compare</div>
-  </div>
+<header class="header">
+  <div class="title">Side-by-side model compare</div>
   <a href="/ui" class="back">← back to chat</a>
-</div>
+</header>
 <div class="input-row">
-  <input id="prompt" type="text" placeholder="Ask both models the same thing…">
-  <button id="run-btn" onclick="go()" disabled>▶ Run</button>
+  <input id="prompt" type="text" placeholder="Ask both models the same thing…" aria-label="Comparison prompt">
+  <button id="run-btn" type="button" disabled>▶ Run</button>
 </div>
-<div class="compare-status" id="compare-status" role="status" aria-live="polite" hidden></div>
-<div class="columns">
-  <div class="col">
+<div class="compare-status" id="compare-status" data-kind="loading" role="status" aria-live="polite">Loading available models…</div>
+<section class="model-controls" aria-label="Model residency controls">
+  <div class="model-inventory">
+    <div><strong>Configured:</strong> <span id="configured-tiers">loading…</span></div>
+    <div><strong>Loaded:</strong> <span id="loaded-tiers">loading…</span></div>
+  </div>
+  <div class="model-actions">
+    <button id="refresh-btn" type="button">Refresh status</button>
+    <button id="load-btn" class="primary" type="button" disabled>Load selected tiers</button>
+  </div>
+  <div class="memory-warning" role="note">Loading multiple MLX models can consume substantial unified memory. This page keeps already loaded tiers resident and never unloads them.</div>
+</section>
+<main class="columns">
+  <section class="col" aria-label="Left model response">
     <div class="col-head">
-      <label>Left:</label>
-      <select id="tier-l"></select>
+      <label for="tier-l">Left:</label>
+      <select id="tier-l" disabled></select>
       <span class="metric" id="metric-l">—</span>
     </div>
-    <div class="col-body" id="out-l"></div>
-  </div>
-  <div class="col">
+    <div class="col-body" id="out-l" data-state="empty" role="log" aria-live="polite">Choose two loaded models and enter a prompt.</div>
+  </section>
+  <section class="col" aria-label="Right model response">
     <div class="col-head">
-      <label>Right:</label>
-      <select id="tier-r"></select>
+      <label for="tier-r">Right:</label>
+      <select id="tier-r" disabled></select>
       <span class="metric" id="metric-r">—</span>
     </div>
-    <div class="col-body" id="out-r"></div>
-  </div>
-</div>
+    <div class="col-body" id="out-r" data-state="empty" role="log" aria-live="polite">Choose two loaded models and enter a prompt.</div>
+  </section>
+</main>
 <script>
-let TIERS = [];
+let ALL_TIERS = [];
+let LOADED_TIERS = new Set();
+let activeRuns = 0;
+let loadingModels = false;
+let refreshingConfig = false;
+let configLoadError = '';
 
 function setCompareStatus(message, kind = 'info') {
   const status = document.getElementById('compare-status');
@@ -73,134 +124,307 @@ function setCompareStatus(message, kind = 'info') {
   status.hidden = !message;
 }
 
+function uniqueTiers(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter(tier => typeof tier === 'string' && tier.trim()).map(tier => tier.trim()))];
+}
+
+function renderTierInventory() {
+  document.getElementById('configured-tiers').textContent = ALL_TIERS.join(', ') || 'none';
+  document.getElementById('loaded-tiers').textContent = [...LOADED_TIERS].join(', ') || 'none';
+}
+
 function fillTierSelect(select) {
   select.replaceChildren();
-  if (!TIERS.length) {
+  if (!ALL_TIERS.length) {
     const option = document.createElement('option');
-    option.textContent = 'No models available';
+    option.textContent = 'No configured tiers';
     option.disabled = true;
     option.selected = true;
     select.appendChild(option);
     return;
   }
-  TIERS.forEach(tier => {
+  ALL_TIERS.forEach(tier => {
     const option = document.createElement('option');
     option.value = tier;
-    option.textContent = tier;
+    option.textContent = `${tier} — ${LOADED_TIERS.has(tier) ? 'loaded' : 'configured'}`;
     select.appendChild(option);
   });
 }
 
-function validateComparison(changedSide = '') {
+function refillTierSelects(preferredLeft = '', preferredRight = '') {
+  const left = document.getElementById('tier-l');
+  const right = document.getElementById('tier-r');
+  const loadedConfigured = ALL_TIERS.filter(tier => LOADED_TIERS.has(tier));
+  fillTierSelect(left);
+  fillTierSelect(right);
+  const leftTier = ALL_TIERS.includes(preferredLeft)
+    ? preferredLeft
+    : loadedConfigured[0] || ALL_TIERS[0] || '';
+  const rightTier = ALL_TIERS.includes(preferredRight) && preferredRight !== leftTier
+    ? preferredRight
+    : loadedConfigured.find(tier => tier !== leftTier)
+      || ALL_TIERS.find(tier => tier !== leftTier)
+      || leftTier;
+  left.value = leftTier;
+  right.value = rightTier;
+}
+
+function selectedTiers() {
+  return [document.getElementById('tier-l').value, document.getElementById('tier-r').value];
+}
+
+function missingSelectedTiers() {
+  const [left, right] = selectedTiers();
+  return [...new Set([left, right].filter(tier => tier && !LOADED_TIERS.has(tier)))];
+}
+
+function validateComparison() {
   const left = document.getElementById('tier-l');
   const right = document.getElementById('tier-r');
   const runButton = document.getElementById('run-btn');
-  if (!TIERS.length) {
-    left.disabled = true;
-    right.disabled = true;
-    runButton.disabled = true;
-    setCompareStatus('No models are available. Load a model before starting a comparison.', 'error');
-    return false;
-  }
-  if (TIERS.length === 1) {
-    left.disabled = true;
-    right.disabled = true;
-    runButton.disabled = true;
-    setCompareStatus(`Only ${TIERS[0]} is available. Load a second model for a meaningful comparison.`, 'warning');
-    return false;
-  }
+  const loadButton = document.getElementById('load-btn');
+  const refreshButton = document.getElementById('refresh-btn');
+  const [leftTier, rightTier] = selectedTiers();
+  const distinct = Boolean(leftTier && rightTier && leftTier !== rightTier);
+  const selectedLoaded = distinct && LOADED_TIERS.has(leftTier) && LOADED_TIERS.has(rightTier);
+  const missing = missingSelectedTiers();
+  const hasPrompt = Boolean(document.getElementById('prompt').value.trim());
+  const busy = activeRuns > 0 || loadingModels || refreshingConfig;
 
-  left.disabled = false;
-  right.disabled = false;
-  runButton.disabled = false;
-  if (left.value === right.value) {
-    const changed = changedSide === 'r' ? right : left;
-    const other = changed === left ? right : left;
-    other.value = TIERS.find(tier => tier !== changed.value) || '';
-    setCompareStatus(`Adjusted the ${other === left ? 'left' : 'right'} model: both sides must be distinct.`, 'warning');
+  left.disabled = busy || !ALL_TIERS.length;
+  right.disabled = busy || !ALL_TIERS.length;
+  refreshButton.disabled = busy;
+  loadButton.disabled = busy || Boolean(configLoadError) || !distinct || missing.length === 0;
+  runButton.disabled = busy || Boolean(configLoadError) || !selectedLoaded || !hasPrompt;
+
+  if (refreshingConfig) {
+    setCompareStatus('Refreshing configured and loaded tiers…', 'loading');
+  } else if (loadingModels) {
+    setCompareStatus('Loading selected tiers. Existing loaded tiers remain resident…', 'loading');
+  } else if (activeRuns) {
+    setCompareStatus('Generating both responses…', 'loading');
+  } else if (configLoadError) {
+    setCompareStatus(`Could not verify model residency: ${configLoadError}`, 'error');
+  } else if (!ALL_TIERS.length) {
+    setCompareStatus('No model tiers are configured. Add tiers to Mio before comparing.', 'error');
+  } else if (ALL_TIERS.length < 2) {
+    setCompareStatus(`Only ${ALL_TIERS[0]} is configured. Two distinct tiers are required.`, 'warning');
+  } else if (!distinct) {
+    setCompareStatus('Choose two distinct configured tiers.', 'warning');
+  } else if (missing.length) {
+    setCompareStatus(`${missing.join(' and ')} ${missing.length === 1 ? 'is' : 'are'} configured but not loaded. Use “Load selected tiers” explicitly to continue.`, 'warning');
+  } else if (!hasPrompt) {
+    setCompareStatus('Both selected tiers are loaded. Enter a prompt to enable Run.', 'info');
   } else {
-    setCompareStatus('');
+    setCompareStatus('Ready to compare two distinct loaded tiers.', 'info');
   }
-  return left.value !== right.value;
+  return selectedLoaded && !configLoadError && !busy;
 }
 
-async function loadTiers() {
+async function refreshConfig() {
+  const previousLeft = document.getElementById('tier-l').value;
+  const previousRight = document.getElementById('tier-r').value;
+  refreshingConfig = true;
+  validateComparison();
   try {
-    const response = await fetch('/v1/models');
+    const response = await fetch('/ui/api/config');
     if (!response.ok) throw new Error('HTTP ' + response.status);
     const data = await response.json();
-    TIERS = [...new Set((data.data || [])
-      .map(model => typeof model.id === 'string' ? model.id.replace(/^mio-/, '') : '')
-      .filter(Boolean))];
+    if (!data || typeof data !== 'object' || !Array.isArray(data.all_tiers) || !Array.isArray(data.loaded_tiers)) {
+      throw new Error('invalid configuration response');
+    }
+    ALL_TIERS = uniqueTiers(data.all_tiers);
+    LOADED_TIERS = new Set(uniqueTiers(data.loaded_tiers));
+    configLoadError = '';
   } catch (error) {
-    TIERS = [];
-    setCompareStatus('Could not load the model list. Check the Mio server and retry this page.', 'error');
+    LOADED_TIERS = new Set();
+    configLoadError = String(error?.message || error);
+  } finally {
+    refreshingConfig = false;
   }
-  const left = document.getElementById('tier-l');
-  const right = document.getElementById('tier-r');
-  fillTierSelect(left);
-  fillTierSelect(right);
-  if (TIERS.length) {
-    left.value = TIERS[0];
-    right.value = TIERS[TIERS.length - 1];
-  }
+  refillTierSelects(previousLeft, previousRight);
+  renderTierInventory();
   validateComparison();
 }
-loadTiers();
 
-function go() {
+function responseError(payload, fallback) {
+  if (typeof payload?.detail === 'string') return payload.detail;
+  if (typeof payload?.error === 'string') return payload.error;
+  return fallback;
+}
+
+async function requestTierLoad(tier) {
+  const response = await fetch('/v1/models/load', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tier }),
+  });
+  let payload;
+  try {
+    payload = await response.json();
+  } catch (error) {
+    throw new Error(response.ok ? 'Mio returned invalid JSON' : `HTTP ${response.status}`);
+  }
+  if (!response.ok) throw new Error(responseError(payload, `HTTP ${response.status}`));
+  if (payload?.status !== 'loaded' || payload?.tier !== tier) {
+    throw new Error('Mio did not confirm the requested tier load');
+  }
+}
+
+async function loadSelectedTiers() {
+  validateComparison();
+  const selected = selectedTiers();
+  const distinct = selected[0] && selected[1] && selected[0] !== selected[1];
+  const missing = missingSelectedTiers();
+  if (!distinct || configLoadError || !missing.length) return;
+  const accepted = window.confirm(
+    `Load ${missing.join(' and ')} while keeping every currently loaded tier resident? This may consume substantial unified memory.`,
+  );
+  if (!accepted) {
+    setCompareStatus('Model loading cancelled. No residency changes were requested.', 'warning');
+    return;
+  }
+
+  loadingModels = true;
+  validateComparison();
+  let failure = null;
+  for (const tier of missing) {
+    try {
+      await requestTierLoad(tier);
+    } catch (error) {
+      failure = { tier, message: String(error?.message || error) };
+      break;
+    }
+  }
+  await refreshConfig();
+  loadingModels = false;
+  validateComparison();
+
+  if (failure) {
+    setCompareStatus(`Could not load ${failure.tier}: ${failure.message}. No tier was unloaded by Compare.`, 'error');
+    return;
+  }
+  if (configLoadError) return;
+  const stillMissing = selected.filter(tier => !LOADED_TIERS.has(tier));
+  if (stillMissing.length) {
+    setCompareStatus(`Mio did not report ${stillMissing.join(' and ')} as loaded. Run remains disabled.`, 'error');
+    return;
+  }
+  setCompareStatus('Selected tiers are loaded. Existing tiers were kept resident.', 'success');
+}
+
+async function go() {
   const prompt = document.getElementById('prompt').value.trim();
   if (!prompt || !validateComparison()) return;
-  run('l');
-  run('r');
+  activeRuns = 2;
+  validateComparison();
+  setCompareStatus('Generating both responses…', 'loading');
+  const results = await Promise.all([run('l'), run('r')]);
+  activeRuns = 0;
+  validateComparison();
+  setCompareStatus(
+    results.every(Boolean) ? 'Comparison complete.' : 'Comparison finished with an error. You can retry.',
+    results.every(Boolean) ? 'success' : 'error',
+  );
 }
 
 function run(side) {
-  const tier = document.getElementById('tier-' + side).value;
-  const prompt = document.getElementById('prompt').value.trim();
-  const out = document.getElementById('out-' + side);
-  const metric = document.getElementById('metric-' + side);
-  out.innerHTML = '<span class="cursor"></span>';
-  metric.textContent = 'starting…';
-  const ws = window.Mio.security.openWebSocket('/ui/ws/chat');
-  let buf = '';
-  let startMs = null;
-  ws.onopen = () => {
-    ws.send(JSON.stringify({
-      action: 'chat',
-      tier,
-      messages: [{ role: 'user', content: prompt }],
-      max_tokens: 1500,
-      skills: false,
-    }));
-  };
-  ws.onmessage = (e) => {
-    const m = JSON.parse(e.data);
-    if (m.type === 'start') startMs = Date.now();
-    if (m.type === 'token' && m.text) {
-      buf += m.text;
-      out.innerHTML = escapeHTML(buf) + '<span class="cursor"></span>';
+  return new Promise(resolve => {
+    const tier = document.getElementById('tier-' + side).value;
+    const prompt = document.getElementById('prompt').value.trim();
+    const out = document.getElementById('out-' + side);
+    const metric = document.getElementById('metric-' + side);
+    let buffer = '';
+    let startMs = null;
+    let settled = false;
+    let socket;
+
+    showStreaming(out, '');
+    metric.textContent = 'starting…';
+
+    function finish(ok, message, metrics = {}) {
+      if (settled) return;
+      settled = true;
+      out.dataset.state = ok ? 'ready' : 'error';
+      out.textContent = message || (ok ? 'No text returned.' : 'The model request failed.');
+      if (ok) {
+        const tokens = finite(metrics.completion_tokens);
+        const tps = finite(metrics.generation_tps);
+        const seconds = startMs ? ((Date.now() - startMs) / 1000).toFixed(1) + 's' : 'time —';
+        metric.textContent = `${tokens === null ? '?' : Math.round(tokens)} tok · ${tps === null ? '?' : tps.toFixed(1)} tok/s · ${seconds}`;
+      } else {
+        metric.textContent = 'error';
+      }
+      try { socket.close(); } catch (error) {}
+      resolve(ok);
     }
-    if (m.type === 'done' || m.type === 'error') {
-      out.innerHTML = escapeHTML(m.full_text || buf);
-      const met = m.metrics || {};
-      const secs = startMs ? ((Date.now() - startMs) / 1000).toFixed(1) : '—';
-      metric.textContent = (met.completion_tokens || '?') + ' tok · ' + (met.generation_tps || '?') + ' tok/s · ' + secs + 's';
-      ws.close();
+
+    try {
+      socket = window.Mio.security.openWebSocket('/ui/ws/chat');
+    } catch (error) {
+      finish(false, 'Could not open a connection to Mio.');
+      return;
     }
-  };
-  ws.onerror = () => { out.innerHTML += '\n\n[connection error]'; metric.textContent = 'error'; };
+
+    socket.onopen = () => {
+      socket.send(JSON.stringify({
+        action: 'chat',
+        tier,
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 1500,
+        skills: false,
+      }));
+    };
+    socket.onmessage = event => {
+      let message;
+      try {
+        message = JSON.parse(event.data);
+      } catch (error) {
+        finish(false, 'Mio returned an unreadable response.');
+        return;
+      }
+      if (message.type === 'start') startMs = Date.now();
+      if (message.type === 'token' && typeof message.text === 'string') {
+        buffer += message.text;
+        showStreaming(out, buffer);
+      }
+      if (message.type === 'done') {
+        finish(true, typeof message.full_text === 'string' ? message.full_text : buffer, message.metrics || {});
+      } else if (message.type === 'error') {
+        finish(false, String(message.error || message.message || 'The model request failed.'));
+      }
+    };
+    socket.onerror = () => finish(false, 'Connection error while generating this response.');
+    socket.onclose = () => {
+      if (!settled) finish(false, 'The connection closed before the response completed.');
+    };
+  });
 }
 
-function escapeHTML(s) {
-  return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function showStreaming(output, text) {
+  const cursor = document.createElement('span');
+  cursor.className = 'cursor';
+  cursor.setAttribute('aria-hidden', 'true');
+  output.dataset.state = 'loading';
+  output.replaceChildren(document.createTextNode(text), cursor);
 }
 
-document.getElementById('prompt').addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); go(); }
+function finite(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+document.getElementById('run-btn').addEventListener('click', go);
+document.getElementById('load-btn').addEventListener('click', loadSelectedTiers);
+document.getElementById('refresh-btn').addEventListener('click', refreshConfig);
+document.getElementById('prompt').addEventListener('input', () => validateComparison());
+document.getElementById('prompt').addEventListener('keydown', event => {
+  if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); go(); }
 });
-document.getElementById('tier-l').addEventListener('change', () => validateComparison('l'));
-document.getElementById('tier-r').addEventListener('change', () => validateComparison('r'));
+document.getElementById('tier-l').addEventListener('change', validateComparison);
+document.getElementById('tier-r').addEventListener('change', validateComparison);
+void refreshConfig();
 </script>
 </body>
 </html>

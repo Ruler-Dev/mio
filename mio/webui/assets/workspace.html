@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Mio Workspace</title>
 <script src="/ui/assets/security.js"></script>
+<script src="/ui/assets/api_client.js"></script>
 <style>
 :root {
   --bg: #0a0a14; --panel: #161621; --border: #2a2a38; --accent: #3b82f6;
@@ -61,6 +62,7 @@ button.danger:hover { background: rgba(239,68,68,0.1); }
 <div class="content" id="content"></div>
 <script>
 let TAB = 'schedules';
+let INDEXES = [];
 function switchTab(t) {
   TAB = t;
   document.querySelectorAll('.tab').forEach(el => el.classList.toggle('active', el.dataset.tab === t));
@@ -221,18 +223,30 @@ function copyWebhook(slug) {
 }
 
 async function renderIndexes(c) {
-  const r = await fetch('/ui/api/skills/run', {
-    method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ name: 'list_indexes', args: {} })
-  }).then(r => r.json());
-  const list = (r.result && r.result.indexes) || [];
+  if (!window.confirm('Allow Mio to list folders indexed in the local RAG database?')) {
+    renderIndexPanel(c, INDEXES, 'Index access cancelled.');
+    return;
+  }
+  c.innerHTML = '<div style="color:var(--muted)">Loading indexed folders…</div>';
+  try {
+    const result = await window.Mio.api.runSkill('list_indexes', {}, { confirmSensitive: true });
+    if (result?.error) throw new Error(result.error);
+    INDEXES = Array.isArray(result?.indexes) ? result.indexes : [];
+    renderIndexPanel(c, INDEXES);
+  } catch (error) {
+    renderIndexPanel(c, INDEXES, error.message, true);
+  }
+}
+
+function renderIndexPanel(c, list, notice = '', failed = false) {
   c.innerHTML = `
     <div class="card">
       <h2>Index a folder</h2>
       <div class="row"><label>Path</label><input id="ix-path" type="text" placeholder="/Users/…/notes"></div>
       <div class="row"><label>Label</label><input id="ix-label" type="text" placeholder="Notes"></div>
-      <div class="row"><label></label><button onclick="indexFolder()">Index</button></div>
+      <div class="row"><label></label><button id="ix-index-btn" onclick="indexFolder(this)">Index</button></div>
     </div>
+    ${notice ? `<div class="card" style="border-color:var(${failed ? '--bad' : '--warn'});color:var(${failed ? '--bad' : '--warn'})">${escapeHTML(notice)}</div>` : ''}
     <h2 style="margin:22px 0 10px">Indexed folders</h2>
     ${list.map(i => `
       <div class="item">
@@ -242,26 +256,68 @@ async function renderIndexes(c) {
             <div class="sub">${escapeHTML(i.path)}</div>
           </div>
           <div class="actions">
-            <button class="danger" onclick="dropIndex(${i.id})">Drop</button>
+            <button class="danger" onclick="dropIndex(${Number(i.id)}, this)">Drop</button>
           </div>
         </div>
       </div>
     `).join('') || '<div style="color:var(--muted);padding:12px">No folders indexed yet.</div>'}
   `;
 }
-async function indexFolder() {
-  const body = { name: 'index_folder', args: {
-    path: document.getElementById('ix-path').value,
-    label: document.getElementById('ix-label').value || undefined,
-  }};
-  const r = await fetch('/ui/api/skills/run', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) }).then(r => r.json());
-  if (r.result && r.result.error) alert(r.result.error);
-  render();
+
+async function indexFolder(button) {
+  const path = document.getElementById('ix-path').value.trim();
+  const label = document.getElementById('ix-label').value.trim() || undefined;
+  if (!path) {
+    alert('Choose a folder path first.');
+    return;
+  }
+  if (!window.confirm(`Allow Mio to read and index text files under “${path}”?`)) return;
+  setButtonBusy(button, true, 'Indexing…');
+  try {
+    const result = await window.Mio.api.runSkill(
+      'index_folder',
+      { path, label },
+      { confirmSensitive: true },
+    );
+    if (result?.error) throw new Error(result.error);
+    const indexed = {
+      id: result.index_id,
+      path: result.path,
+      label: result.label,
+      file_count: result.file_count,
+    };
+    INDEXES = [indexed, ...INDEXES.filter(item => item.id !== indexed.id && item.path !== indexed.path)];
+    renderIndexPanel(document.getElementById('content'), INDEXES, `Indexed ${indexed.file_count} files.`);
+  } catch (error) {
+    renderIndexPanel(document.getElementById('content'), INDEXES, error.message, true);
+  } finally {
+    setButtonBusy(button, false, 'Index');
+  }
 }
-async function dropIndex(id) {
+
+async function dropIndex(id, button) {
   if (!confirm('Drop this index?')) return;
-  await fetch('/ui/api/skills/run', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name: 'drop_index', args: { index_id: id } }) });
-  render();
+  setButtonBusy(button, true, 'Dropping…');
+  try {
+    const result = await window.Mio.api.runSkill(
+      'drop_index',
+      { index_id: id },
+      { confirmSensitive: true },
+    );
+    if (result?.error || result?.ok === false) throw new Error(result?.error || 'Drop failed.');
+    INDEXES = INDEXES.filter(item => Number(item.id) !== Number(id));
+    renderIndexPanel(document.getElementById('content'), INDEXES, 'Index removed.');
+  } catch (error) {
+    renderIndexPanel(document.getElementById('content'), INDEXES, error.message, true);
+  } finally {
+    setButtonBusy(button, false, 'Drop');
+  }
+}
+
+function setButtonBusy(button, busy, label) {
+  if (!button || !button.isConnected) return;
+  button.disabled = busy;
+  button.textContent = label;
 }
 
 function escapeHTML(s) {

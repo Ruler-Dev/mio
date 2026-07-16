@@ -4,7 +4,7 @@
 //   python   — runs in Pyodide (Web Worker); outputs stdout / return repr
 //   markdown — rendered prose
 //   chat     — one-shot question to the loaded Mio model, output is text
-//   skill    — calls /ui/api/skills/run, output is JSON
+//   skill    — calls Mio.api.runSkill, output is JSON
 //
 // Notebooks persist in localStorage (mio.notebook.v1) as a flat list
 // of cells. Execution order is linear for now (no reactive cell-DAG
@@ -277,12 +277,7 @@
   async function runSkill(srcJSON) {
     let body;
     try { body = JSON.parse(srcJSON); } catch (e) { throw new Error("invalid JSON: " + e.message); }
-    const r = await fetch("/ui/api/skills/run", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: body.skill, arguments: body.args || {} }),
-    });
-    return await r.json();
+    return window.Mio.api.runSkill(body.skill, body.args || {});
   }
 
   function renderMarkdown(src) {

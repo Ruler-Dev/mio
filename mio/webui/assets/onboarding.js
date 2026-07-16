@@ -4,6 +4,7 @@
 (function () {
   const NS = (window.Mio = window.Mio || {});
   const SEEN_KEY = 'mio-onboarded-v1';
+  const SOVEREIGNTY_SEEN_KEY = 'mio.sovereignty.onboarded.v1';
 
   const STEPS = [
     {
@@ -13,7 +14,7 @@
     },
     {
       title: "Slash commands",
-      body: "Type / in the message box. 100+ templates cover documents, diagrams, 3D scenes, interactive artifacts, personas, and more. Type /keys to see them all.",
+      body: "Type / in the message box to search Mio's live command and template catalog for documents, diagrams, 3D scenes, artifacts, and more.",
       icon: "/",
     },
     {
@@ -23,7 +24,7 @@
     },
     {
       title: "Artifacts",
-      body: "Anything visual or interactive opens in the side panel: React components, Chart.js dashboards, mermaid diagrams, maps, 3D scenes, piano, flashcards, and 90+ more.",
+      body: "Anything visual or interactive opens in the artifact panel, including native MLX benchmarks, model cards, inference traces, speculative acceptance atlases, React, charts, Mermaid, maps, and 3D scenes.",
       icon: "✨",
     },
     {
@@ -141,9 +142,18 @@
 
   injectCSS();
 
-  // Auto-show on first visit, after DOM settles
+  // Sequence the two first-run surfaces. The sovereignty card explains the
+  // local boundary first; the feature tour starts only after that card has
+  // been acknowledged, never underneath it.
   if (shouldShow()) {
-    setTimeout(() => { if (shouldShow()) open(); }, 600);
+    const maybeOpen = () => {
+      if (shouldShow() && localStorage.getItem(SOVEREIGNTY_SEEN_KEY)) open();
+    };
+    if (localStorage.getItem(SOVEREIGNTY_SEEN_KEY)) {
+      setTimeout(maybeOpen, 600);
+    } else {
+      window.addEventListener('mio:sovereignty-onboarded', () => setTimeout(maybeOpen, 180), { once: true });
+    }
   }
 
   NS.tour = { open, close, next, prev, dismiss };

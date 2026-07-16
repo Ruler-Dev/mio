@@ -26,14 +26,31 @@ def test_sovereignty_onboarding_opens_the_real_network_monitor():
     assert "networkMonitor.click();" in source
 
 
+def test_first_run_onboarding_is_sequenced_and_uses_current_capabilities():
+    root = Path(__file__).parents[1]
+    sovereignty = (root / "mio" / "webui" / "assets" / "onboarding_sovereignty.js").read_text(encoding="utf-8")
+    tour = (root / "mio" / "webui" / "assets" / "onboarding.js").read_text(encoding="utf-8")
+    css = (root / "mio" / "webui" / "assets" / "main.css").read_text(encoding="utf-8")
+
+    assert 'new CustomEvent("mio:sovereignty-onboarded")' in sovereignty
+    assert "SOVEREIGNTY_SEEN_KEY" in tour
+    assert "mio:sovereignty-onboarded" in tour
+    assert "100+ templates" not in tour
+    assert "90+ more" not in tour
+    assert "native MLX benchmarks" in tour
+    assert "--sov-surface" in css
+    assert "background: var(--sov-surface)" in css
+
+
 def test_compare_requires_two_distinct_real_models():
     page = Path(__file__).parents[1] / "mio" / "webui" / "assets" / "compare.html"
     source = page.read_text(encoding="utf-8")
 
-    assert "TIERS.length === 1" in source
-    assert "left.value === right.value" in source
-    assert "both sides must be distinct" in source
-    assert "runButton.disabled = true" in source
+    assert "ALL_TIERS.length < 2" in source
+    assert "leftTier !== rightTier" in source
+    assert "Two distinct tiers are required" in source
+    assert "LOADED_TIERS.has(leftTier) && LOADED_TIERS.has(rightTier)" in source
+    assert "runButton.disabled = busy || Boolean(configLoadError) || !selectedLoaded || !hasPrompt" in source
     assert "['small', 'medium', 'large', 'large-moe']" not in source
     assert "if (!prompt || !validateComparison()) return;" in source
 
@@ -98,16 +115,23 @@ def test_flow_has_a_canvas_first_mobile_layout():
 
 def test_native_mlx_artifact_lab_renders_without_remote_dependencies():
     root = Path(__file__).parents[1]
+    registry = root / "mio" / "webui" / "assets" / "artifact_registry.js"
     asset = root / "mio" / "webui" / "assets" / "artifact_lab.js"
+    registry_source = registry.read_text(encoding="utf-8")
     source = asset.read_text(encoding="utf-8")
     shell = (root / "mio" / "webui" / "mio_ui.html").read_text(encoding="utf-8")
 
+    assert '<script src="/ui/assets/artifact_registry.js"></script>' in shell
     assert '<script src="/ui/assets/artifact_lab.js"></script>' in shell
+    assert shell.index("artifact_registry.js") < shell.index("artifact_lab.js")
+    assert "https://" not in registry_source
+    assert ".innerHTML" not in registry_source
     assert "https://" not in source
     assert ".innerHTML" not in source
     assert "application/vnd.pimio.benchmark+json" in source
     assert "application/vnd.pimio.model-card+json" in source
     assert "application/vnd.pimio.inference-trace+json" in source
+    assert "application/vnd.pimio.speculative-acceptance-atlas+json" in source
 
     node = shutil.which("node")
     if not node:
@@ -126,22 +150,31 @@ class Element {
 global.window = {};
 global.document = { createElement: (tag) => new Element(tag) };
 require(process.argv[1]);
+require(process.argv[2]);
 const lab = window.Mio.artifactLab;
-assert.equal(lab.catalog().length, 3);
+const registry = window.Mio.artifactTypes;
+assert.equal(lab.catalog().length, 4);
+assert.equal(registry.catalog().length, 4);
 for (const artifact of [
   {type:'application/vnd.pimio.benchmark+json', content:JSON.stringify({runs:[{label:'base',prefill_tps:20,decode_tps:10,ttft_ms:5}]})},
   {type:'application/vnd.pimio.model-card+json', content:JSON.stringify({name:'Qwen',quantization:'Q4'})},
   {type:'application/vnd.pimio.inference-trace+json', content:JSON.stringify({spans:[{name:'prefill',start_ms:0,duration_ms:4}]})},
+  {type:'application/vnd.pimio.speculative-acceptance-atlas+json', content:lab.sample('application/vnd.pimio.speculative-acceptance-atlas+json')},
 ]) {
   const body = new Element('div');
   assert.equal(lab.render(body, artifact), true);
   assert.equal(body.children.length, 1);
   assert.equal(body.children[0].className.includes('has-error'), false);
   assert.equal(lab.download(artifact).extension, '.json');
+  const registeredBody = new Element('div');
+  assert.equal(registry.render(registeredBody, artifact), true);
+  assert.equal(registeredBody.children.length, 1);
+  assert.equal(registry.download(artifact).extension, '.json');
 }
+assert.equal(registry.render(new Element('div'), {type:'application/vnd.pimio.unknown',content:'{}'}), false);
 """
     subprocess.run(
-        [node, "-e", smoke, str(asset)],
+        [node, "-e", smoke, str(registry), str(asset)],
         check=True,
         capture_output=True,
         text=True,
@@ -158,7 +191,7 @@ def test_artifact_mime_normalization_is_idempotent_and_reaches_real_renderers():
     node = shutil.which("node")
     if not node:
         pytest.skip("Node.js is unavailable")
-    check = function_source + r"""
+    check = "global.window = {};\n" + function_source + r"""
 const assert = require('node:assert/strict');
 const cases = new Map([
   ['application/vnd.ant.react', 'application/vnd.ant.react'],
@@ -175,6 +208,109 @@ for (const [input, expected] of cases) {
 }
 """
     subprocess.run([node, "-e", check], check=True, capture_output=True, text=True)
+
+
+def test_unknown_artifact_types_are_preserved_as_source_instead_of_executed():
+    root = Path(__file__).parents[1]
+    shell = (root / "mio" / "webui" / "mio_ui.html").read_text(encoding="utf-8")
+    css = (root / "mio" / "webui" / "assets" / "main.css").read_text(encoding="utf-8")
+    preview = shell.split("function renderArtifactPreview(body, art)", 1)[1].split(
+        "function makeSandboxedIframe", 1
+    )[0]
+
+    assert "if (art.type === 'text/html')" in preview
+    assert "Renderer not installed" in preview
+    assert "source.textContent = String(art.content || '')" in preview
+    assert "Default: text/html" not in preview
+    assert ".artifact-unsupported" in css
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is unavailable")
+    start = shell.index("function legacyArtifactDocument(art)")
+    end = shell.index("function artifactIcon(t)", start)
+    helpers = shell[start:end]
+    check = "global.window = {Mio: {}};\n" + helpers + r"""
+const assert = require('node:assert/strict');
+assert.deepEqual(
+  artifactDownloadPayload({type:'application/vnd.pimio.unknown', content:'<script>boom()</script>'}),
+  {content:'<script>boom()</script>', extension:'.txt', mime:'text/plain'}
+);
+assert.equal(
+  artifactDownloadPayload({type:'application/vnd.ant.code', content:'const x = 1'}).extension,
+  '.txt'
+);
+assert.equal(
+  artifactDownloadPayload({type:'text/html', content:'<h1>safe boundary</h1>'}).extension,
+  '.html'
+);
+window.reactTemplate = (source) => '<!doctype html>' + source;
+assert.equal(
+  artifactDownloadPayload({type:'application/vnd.ant.react', content:'<App />'}).extension,
+  '.html'
+);
+"""
+    subprocess.run([node, "-e", check], check=True, capture_output=True, text=True)
+
+
+def test_node_editor_is_a_real_local_interactive_renderer():
+    root = Path(__file__).parents[1]
+    shell = (root / "mio" / "webui" / "mio_ui.html").read_text(encoding="utf-8")
+    start = shell.index("function nodeEditorTemplate(json)")
+    end = shell.index("function abcMusicTemplate", start)
+    template = shell[start:end]
+
+    assert "Loading Rete.js" not in template
+    assert "rete.min.js" not in template
+    assert "function drawEdges()" in template
+    assert "function autoLayout()" in template
+    assert "pointerdown" in template
+    assert "Add node" in template
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is unavailable")
+    embedded = template.split("<script>\n", 1)[1].split("<\\/script>", 1)[0]
+    embedded = embedded.replace("${safeJSONForScript(json)}", "'{}'")
+    subprocess.run(
+        [node, "--check", "-"],
+        input=embedded,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_periodic_table_has_all_118_elements_and_local_interactions():
+    root = Path(__file__).parents[1]
+    asset = root / "mio" / "webui" / "assets" / "artifact_periodic.js"
+    source = asset.read_text(encoding="utf-8")
+    shell = (root / "mio" / "webui" / "mio_ui.html").read_text(encoding="utf-8")
+
+    assert '<script src="/ui/assets/artifact_periodic.js"></script>' in shell
+    assert "window.Mio.artifactPeriodic.template()" in shell
+    assert "SYMBOLS.length !== 118 || NAMES.length !== 118" in source
+    assert "complete local dataset" in source
+    assert "Search name, symbol, or number" in source
+    assert "https://" not in source
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is unavailable")
+    smoke = r"""
+global.window = {};
+require(process.argv[1]);
+if (window.Mio.artifactPeriodic.count() !== 118) throw new Error('incomplete table');
+const html = window.Mio.artifactPeriodic.template();
+if (!html.includes('Oganesson') || !html.includes("data-number='118'")) throw new Error('missing final element');
+if (!html.includes("id='query'")) throw new Error('missing search');
+"""
+    subprocess.run(
+        [node, "-e", smoke, str(asset)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 def test_artifact_state_v2_round_trips_revisions_and_dotted_identifiers():
@@ -234,6 +370,27 @@ async def test_session_endpoint_preserves_artifact_revision_state(tmp_path, monk
     assert loaded["artifact_state"] == state
     assert loaded["artifact_state"]["chains"][0]["active_index"] == 1
     assert loaded["artifact_state"]["chains"][0]["revisions"][1]["provenance"]["parent"] == "fnv1a32:00000001"
+
+
+@pytest.mark.asyncio
+async def test_shared_native_artifact_uses_the_registry_and_accepts_dotted_ids():
+    router._shared_artifacts.clear()
+    result = await router.share_artifact(
+        {
+            "identifier": "mlx.trace.v1",
+            "type": "application/vnd.pimio.inference-trace+json",
+            "title": "Measured trace",
+            "content": '{"spans":[{"name":"prefill","start_ms":0,"duration_ms":4}]}',
+        }
+    )
+    response = await router.view_shared_artifact(result["id"])
+    html = response.body.decode("utf-8")
+
+    assert result["url"] == "/ui/share/mlx.trace.v1"
+    assert "/ui/assets/artifact_registry.js" in html
+    assert "/ui/assets/artifact_lab.js" in html
+    assert "artifactTypes?.render(mount, art)" in html
+    assert "art.type.startsWith('application/vnd.pimio.')" not in html
 
 
 def test_artifact_panel_is_mobile_sheet_and_core_controls_are_accessible():

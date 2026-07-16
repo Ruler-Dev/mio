@@ -1,72 +1,236 @@
 <!doctype html>
-<html lang="en"><head>
+<html lang="en">
+<head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Mio Attachments</title>
 <script src="/ui/assets/security.js"></script>
 <style>
 :root {
   --bg: #0a0a14; --panel: #161621; --border: #2a2a38; --accent: #3b82f6;
-  --text: #e5e5e5; --muted: #9ca3af; --input: #1f1f2e;
+  --text: #e5e5e5; --muted: #9ca3af; --input: #1f1f2e; --danger: #f87171;
 }
 * { box-sizing: border-box; }
-body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: var(--bg); color: var(--text); font-size: 14px; }
-.header { padding: 18px 28px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 16px; }
+body {
+  margin: 0; min-height: 100vh; font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  background: var(--bg); color: var(--text); font-size: 14px;
+}
+.header {
+  padding: 18px 28px; border-bottom: 1px solid var(--border); display: flex;
+  align-items: center; gap: 16px;
+}
 .title { font-size: 18px; font-weight: 600; }
 .back { margin-left: auto; color: var(--accent); text-decoration: none; font-size: 13px; }
-.bar { padding: 12px 28px; border-bottom: 1px solid var(--border); display: flex; gap: 10px; align-items: center; }
-.bar input { flex: 1; background: var(--input); border: 1px solid var(--border); color: var(--text); padding: 8px 12px; border-radius: 8px; font-size: 13px; }
-.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; padding: 20px 28px; }
-.file { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; cursor: pointer; transition: all 120ms; }
+.bar {
+  padding: 12px 28px; border-bottom: 1px solid var(--border); display: flex;
+  gap: 10px; align-items: center; position: sticky; top: 0; z-index: 2; background: var(--bg);
+}
+.bar label { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.bar input {
+  flex: 1; min-width: 0; background: var(--input); border: 1px solid var(--border);
+  color: var(--text); padding: 9px 12px; border-radius: 8px; font-size: 13px;
+}
+.bar input:focus-visible, .back:focus-visible, button:focus-visible, .file:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 3px;
+}
+.state {
+  margin: 20px 28px 0; padding: 14px 16px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--panel); color: var(--muted); display: flex; align-items: center;
+  justify-content: space-between; gap: 16px;
+}
+.state[data-kind="error"] { color: var(--danger); }
+.state[hidden], .state button[hidden] { display: none; }
+.state button {
+  border: 1px solid var(--border); border-radius: 7px; background: transparent; color: var(--text);
+  padding: 6px 10px; cursor: pointer;
+}
+.grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr));
+  gap: 14px; padding: 20px 28px 28px;
+}
+.grid[hidden] { display: none; }
+.file {
+  min-width: 0; background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  padding: 14px; cursor: pointer; transition: border-color 120ms, transform 120ms;
+  color: inherit; text-decoration: none;
+}
 .file:hover { border-color: var(--accent); transform: translateY(-2px); }
-.file .thumb { height: 100px; border-radius: 8px; background: var(--input); margin-bottom: 10px; display: flex; align-items: center; justify-content: center; font-size: 40px; overflow: hidden; }
+.file .thumb {
+  height: 112px; border-radius: 8px; background: var(--input); margin-bottom: 10px;
+  display: flex; align-items: center; justify-content: center; font-size: 40px; overflow: hidden;
+}
 .file .thumb img { width: 100%; height: 100%; object-fit: cover; }
 .file .name { font-weight: 500; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.file .meta { color: var(--muted); font-family: ui-monospace, monospace; font-size: 11px; margin-top: 4px; }
-</style></head>
+.file .meta { color: var(--muted); font-family: ui-monospace, monospace; font-size: 11px; margin-top: 4px; overflow-wrap: anywhere; }
+
+@media (max-width: 600px) {
+  .header { padding: 14px 16px; align-items: flex-start; }
+  .back { max-width: 45%; text-align: right; }
+  .bar { padding: 10px 16px; flex-wrap: wrap; }
+  .bar label { width: 100%; }
+  .state { margin: 14px 16px 0; align-items: flex-start; }
+  .grid { grid-template-columns: minmax(0, 1fr); padding: 14px 16px 20px; }
+  .file { display: grid; grid-template-columns: 72px minmax(0, 1fr); column-gap: 12px; align-items: center; }
+  .file .thumb { grid-row: 1 / span 2; width: 72px; height: 64px; margin: 0; font-size: 28px; }
+}
+</style>
+</head>
 <body>
-<div class="header">
+<header class="header">
   <div class="title">Attachment library</div>
   <a class="back" href="/ui">← back to chat</a>
+</header>
+<div class="bar">
+  <label for="filter">Find an attachment</label>
+  <input id="filter" type="search" placeholder="Filter by name or extension…" autocomplete="off" disabled>
 </div>
-<div class="bar"><input id="filter" placeholder="Filter by name / extension…" oninput="render()"></div>
-<div id="grid" class="grid"></div>
+<div id="state" class="state" data-kind="loading" role="status" aria-live="polite">
+  <span id="state-message">Loading attachments…</span>
+  <button id="retry" type="button" hidden>Retry</button>
+</div>
+<main id="grid" class="grid" aria-label="Attachments" hidden></main>
 <script>
 let FILES = [];
-fetch('/ui/api/attachments').then(r => r.json()).then(d => {
-  FILES = d.files || [];
-  render();
-});
+let loadState = 'loading';
+
+const filter = document.getElementById('filter');
+const grid = document.getElementById('grid');
+const state = document.getElementById('state');
+const stateMessage = document.getElementById('state-message');
+const retryButton = document.getElementById('retry');
 
 const ICON = { '.pdf': '📕', '.docx': '📘', '.xlsx': '📗', '.pptx': '📙',
   '.csv': '📊', '.ics': '📅', '.svg': '🖼', '.png': '🖼', '.jpg': '🖼',
   '.jpeg': '🖼', '.md': '📝', '.txt': '📝', '.html': '🌐',
   '.sqlite': '🗄', '.db': '🗄' };
+const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.svg']);
+
+filter.addEventListener('input', render);
+retryButton.addEventListener('click', loadAttachments);
+loadAttachments();
+
+async function loadAttachments() {
+  loadState = 'loading';
+  FILES = [];
+  filter.disabled = true;
+  grid.hidden = true;
+  setState('loading', 'Loading attachments…');
+  try {
+    const response = await fetch('/ui/api/attachments');
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    const data = await response.json();
+    if (!data || typeof data !== 'object' || data.error || !Array.isArray(data.files)) {
+      throw new Error(data && data.error ? data.error : 'Invalid response');
+    }
+    FILES = data.files.slice(0, 500).map(normalizeFile).filter(Boolean);
+    loadState = 'ready';
+    filter.disabled = false;
+    render();
+  } catch (error) {
+    loadState = 'error';
+    grid.replaceChildren();
+    grid.hidden = true;
+    setState('error', 'Attachments are unavailable. Check the Mio server, then try again.', true);
+  }
+}
 
 function render() {
-  const q = (document.getElementById('filter').value || '').toLowerCase();
-  const items = FILES.filter(f => !q || f.name.toLowerCase().includes(q) || f.ext.includes(q));
-  document.getElementById('grid').innerHTML = items.map(f => {
-    const thumb = ['.png', '.jpg', '.jpeg', '.svg'].includes(f.ext)
-      ? `<img src="${f.url}" alt="${f.name}">`
-      : `<span>${ICON[f.ext] || '📄'}</span>`;
-    return `
-      <a class="file" href="${f.url}" target="_blank">
-        <div class="thumb">${thumb}</div>
-        <div class="name">${escHTML(f.name)}</div>
-        <div class="meta">${fmtBytes(f.size)} · ${new Date(f.mtime*1000).toLocaleDateString()}</div>
-      </a>`;
-  }).join('');
+  if (loadState !== 'ready') return;
+  const query = filter.value.trim().toLocaleLowerCase();
+  const items = FILES.filter(file => !query || file.name.toLocaleLowerCase().includes(query) || file.ext.includes(query));
+  grid.replaceChildren(...items.map(makeFileCard));
+  grid.hidden = items.length === 0;
+
+  if (items.length) {
+    state.hidden = true;
+  } else if (FILES.length) {
+    setState('empty', `No attachments match “${filter.value.trim()}”.`);
+  } else {
+    setState('empty', 'No generated attachments yet. Files exported by Mio will appear here.');
+  }
 }
 
-function fmtBytes(n) {
-  if (!n) return '0 B';
-  const u = ['B','KB','MB','GB']; let i = 0; let v = n;
-  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
-  return (v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)) + ' ' + u[i];
+function makeFileCard(file) {
+  const link = document.createElement('a');
+  link.className = 'file';
+  link.href = file.url;
+  link.target = '_blank';
+  link.rel = 'noopener';
+  link.setAttribute('aria-label', `Open ${file.name} in a new tab`);
+
+  const thumb = element('div', 'thumb');
+  if (IMAGE_EXTENSIONS.has(file.ext)) {
+    const image = document.createElement('img');
+    image.src = file.url;
+    image.alt = '';
+    image.loading = 'lazy';
+    image.addEventListener('error', () => thumb.replaceChildren(document.createTextNode(ICON[file.ext] || '📄')));
+    thumb.appendChild(image);
+  } else {
+    thumb.appendChild(document.createTextNode(ICON[file.ext] || '📄'));
+  }
+
+  const name = element('div', 'name', file.name);
+  name.title = file.name;
+  const date = Number.isFinite(file.mtime) && file.mtime > 0
+    ? new Date(file.mtime * 1000).toLocaleDateString()
+    : 'date unknown';
+  const meta = element('div', 'meta', `${fmtBytes(file.size)} · ${date}`);
+  link.append(thumb, name, meta);
+  return link;
 }
 
-function escHTML(s) {
-  return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function normalizeFile(value) {
+  if (!value || typeof value !== 'object') return null;
+  const name = String(value.name || '').trim();
+  const ext = String(value.ext || '').toLocaleLowerCase();
+  const url = safeFileUrl(value.url);
+  if (!name || !url) return null;
+  return {
+    name,
+    ext,
+    url,
+    size: nonNegativeNumber(value.size),
+    mtime: nonNegativeNumber(value.mtime),
+  };
+}
+
+function safeFileUrl(value) {
+  try {
+    const url = new URL(String(value || ''), location.href);
+    if (url.origin !== location.origin || !url.pathname.startsWith('/ui/files/')) return '';
+    return url.pathname + url.search;
+  } catch (error) {
+    return '';
+  }
+}
+
+function nonNegativeNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : 0;
+}
+
+function fmtBytes(number) {
+  if (!number) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let unit = 0;
+  let value = number;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; }
+  return (value >= 10 || unit === 0 ? Math.round(value) : value.toFixed(1)) + ' ' + units[unit];
+}
+
+function setState(kind, message, retry = false) {
+  state.hidden = false;
+  state.dataset.kind = kind;
+  stateMessage.textContent = message;
+  retryButton.hidden = !retry;
+}
+
+function element(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = String(text);
+  return node;
 }
 </script>
 </body>

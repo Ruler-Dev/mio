@@ -62,6 +62,7 @@ _manager = None
 _caveman_level = "full"
 _prompt_policy = PromptPolicy()
 _gpu_lock = threading.Lock()
+_runtime_config_lock = threading.RLock()
 _sessions_dir: Path | None = None
 _system_prompt: str | None = None
 _temperature: float = 0.0  # exact greedy DFlash default; positive values are explicit sampling
@@ -75,6 +76,8 @@ _MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
 _MAX_SHARED_ARTIFACT_BYTES = 5 * 1024 * 1024
 _MAX_SHARED_ARTIFACTS = 128
+_ARTIFACT_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_ARTIFACT_MIME_RE = re.compile(r"^[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*$")
 _MAX_LOCAL_NOTE_BYTES = 2 * 1024 * 1024
 _MAX_PROJECT_FILE_BYTES = 25 * 1024 * 1024
 _FILE_STREAM_CHUNK_BYTES = 1024 * 1024
@@ -253,10 +256,13 @@ def mount_webui(
     """Initialize the webui module with server state."""
     global _manager, _caveman_level, _prompt_policy, _gpu_lock, _sessions_dir
     _manager = manager
-    _prompt_policy = prompt_policy or PromptPolicy.resolve(caveman=caveman_level)
-    _caveman_level = (
-        _prompt_policy.level.value if _prompt_policy.mode is PromptMode.CAVEMAN else "off"
-    )
+    with _runtime_config_lock:
+        _prompt_policy = prompt_policy or PromptPolicy.resolve(caveman=caveman_level)
+        _caveman_level = (
+            _prompt_policy.level.value
+            if _prompt_policy.mode is PromptMode.CAVEMAN
+            else "off"
+        )
     if gpu_lock is not None:
         _gpu_lock = gpu_lock
     _sessions_dir = sessions_dir or mio_home() / "sessions"
@@ -271,14 +277,15 @@ def mount_webui(
 
 def _resolve_chat_prompt_policy(data: dict) -> PromptPolicy:
     """Resolve per-request modern flags without legacy UI defaults erasing Ponytail."""
-    if "prompt_mode" in data:
-        return PromptPolicy.resolve(
-            prompt_mode=data.get("prompt_mode"),
-            prompt_level=data.get("prompt_level"),
-        )
-    if "caveman" in data and _prompt_policy.mode is not PromptMode.PONYTAIL:
-        return PromptPolicy.resolve(caveman=str(data["caveman"]))
-    return _prompt_policy
+    with _runtime_config_lock:
+        if "prompt_mode" in data:
+            return PromptPolicy.resolve(
+                prompt_mode=data.get("prompt_mode"),
+                prompt_level=data.get("prompt_level"),
+            )
+        if "caveman" in data and _prompt_policy.mode is not PromptMode.PONYTAIL:
+            return PromptPolicy.resolve(caveman=str(data["caveman"]))
+        return _prompt_policy
 
 
 # --- UI page ---
@@ -638,6 +645,57 @@ def _update_projects(update) -> list[dict]:
     )
 
 
+def _switch_tier_locked(manager, tier: str, *, loaded: list[str] | None = None) -> bool:
+    """Switch tiers while the caller holds ``_gpu_lock``.
+
+    Loading the candidate is the prepare step. If retiring a previous tier
+    fails, make a best-effort rollback to the exact pre-activation tier set
+    before propagating the error. Prompt-policy publication happens only
+    after this helper returns successfully.
+    """
+    loaded_before = list(manager.loaded_tiers() if loaded is None else loaded)
+    already_loaded = tier in loaded_before
+    try:
+        if not already_loaded:
+            manager.load_tier(tier)
+        for loaded_tier in loaded_before:
+            if loaded_tier != tier:
+                manager.unload_tier(loaded_tier)
+    except Exception as exc:
+        rollback_errors: list[str] = []
+        try:
+            current = set(manager.loaded_tiers())
+        except Exception as rollback_exc:  # pragma: no cover - defensive manager failure
+            current = set()
+            rollback_errors.append(f"could not inspect tiers: {rollback_exc}")
+
+        if not already_loaded and tier in current:
+            try:
+                manager.unload_tier(tier)
+            except Exception as rollback_exc:  # pragma: no cover - defensive manager failure
+                rollback_errors.append(f"could not unload candidate '{tier}': {rollback_exc}")
+
+        try:
+            current = set(manager.loaded_tiers())
+        except Exception as rollback_exc:  # pragma: no cover - defensive manager failure
+            current = set()
+            rollback_errors.append(f"could not re-inspect tiers: {rollback_exc}")
+        for previous_tier in loaded_before:
+            if previous_tier not in current:
+                try:
+                    manager.load_tier(previous_tier)
+                except Exception as rollback_exc:  # pragma: no cover - defensive manager failure
+                    rollback_errors.append(
+                        f"could not restore tier '{previous_tier}': {rollback_exc}"
+                    )
+
+        if rollback_errors:
+            detail = "; ".join(rollback_errors)
+            raise RuntimeError(f"{exc}; rollback incomplete: {detail}") from exc
+        raise
+    return already_loaded
+
+
 @router.get("/api/projects")
 async def list_projects():
     try:
@@ -646,9 +704,45 @@ async def list_projects():
         _raise_store_conflict("projects", exc)
 
 
+def _resolve_workspace_prompt_policy(project: dict) -> PromptPolicy | None:
+    """Resolve modern workspace policy fields, then the legacy Caveman field.
+
+    ``None`` means that the workspace inherits the current runtime policy.
+    An explicit ``prompt_mode=none`` is therefore distinct from an absent pin.
+    Legacy projects are upgraded to modern fields when they are next saved.
+    """
+    raw_mode = project.get("prompt_mode")
+    raw_level = project.get("prompt_level")
+    if raw_mode not in (None, ""):
+        if not isinstance(raw_mode, str):
+            raise ValueError("prompt mode must be text")
+        if raw_level not in (None, "") and not isinstance(raw_level, str):
+            raise ValueError("prompt level must be text")
+        return PromptPolicy.resolve(
+            prompt_mode=raw_mode,
+            prompt_level=None if raw_level in (None, "") else raw_level,
+        )
+    if raw_level not in (None, ""):
+        raise ValueError("prompt level requires a prompt mode")
+
+    raw_caveman = project.get("caveman_level")
+    if raw_caveman in (None, ""):
+        return None
+    if not isinstance(raw_caveman, str):
+        raise ValueError("legacy Caveman level must be text")
+    return PromptPolicy.resolve(caveman=raw_caveman)
+
+
 @router.post("/api/projects")
 async def save_project(body: dict):
     pid = _validate_identifier(body.get("id") or str(uuid.uuid4())[:8], label="project id")
+    try:
+        prompt_policy = _resolve_workspace_prompt_policy(body)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid workspace prompt policy: {exc}",
+        ) from exc
     raw_files = body.get("files", [])
     files = []
     if isinstance(raw_files, list):
@@ -665,13 +759,17 @@ async def save_project(body: dict):
         "color": body.get("color", "#3b82f6"),
         "icon": body.get("icon", ""),           # optional emoji/icon
         "files": files,                           # validated filenames in ~/Downloads
-        # Optional per-workspace model / context overrides. Unset = use
-        # global defaults. The UI reads these to pre-apply a tier before
-        # sending the first message of a session in that workspace.
+        # Optional workspace runtime profile. ``context_window`` is a minimum
+        # capacity requirement checked against the selected/active tier; it is
+        # never presented as an independent hot-resize setting.
         "tier": body.get("tier") or None,
         "context_window": body.get("context_window") or None,
-        "caveman_level": body.get("caveman_level") or None,
-        "pinned_prompts": body.get("pinned_prompts", []),
+        "prompt_mode": prompt_policy.mode.value if prompt_policy is not None else None,
+        "prompt_level": (
+            prompt_policy.level.value
+            if prompt_policy is not None and prompt_policy.mode is not PromptMode.NONE
+            else None
+        ),
         "updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     def upsert(projects: list[dict]) -> list[dict]:
@@ -709,6 +807,176 @@ async def get_project(pid: str):
     return {"error": "not found"}
 
 
+@router.post("/api/projects/{pid}/activate")
+async def activate_project(pid: str):
+    """Validate and publish the runtime-supported parts of a workspace.
+
+    Project prompt/files remain request-scoped and become effective when the
+    browser selects the returned project id. Tier and prompt policy are the
+    only runtime mutations here. Every persisted field is validated before
+    either mutation, and the policy is published only after a successful tier
+    switch while generation is excluded by ``_gpu_lock``.
+    """
+    pid = _validate_identifier(pid, label="project id")
+    try:
+        projects = _load_projects()
+    except (json.JSONDecodeError, PersistentStoreError) as exc:
+        _raise_store_conflict("projects", exc)
+
+    project = next((item for item in projects if item.get("id") == pid), None)
+    if project is None:
+        raise HTTPException(status_code=404, detail="workspace not found")
+
+    system_prompt = project.get("system_prompt", "")
+    if not isinstance(system_prompt, str):
+        raise HTTPException(status_code=409, detail="workspace system_prompt must be text")
+    files = project.get("files", [])
+    if not isinstance(files, list):
+        raise HTTPException(status_code=409, detail="workspace files must be a list")
+
+    raw_tier = project.get("tier")
+    desired_tier = None if raw_tier in (None, "") else raw_tier
+    if desired_tier is not None and not isinstance(desired_tier, str):
+        raise HTTPException(status_code=409, detail="workspace tier must be text")
+
+    raw_context = project.get("context_window")
+    required_context = None if raw_context in (None, "") else raw_context
+    if required_context is not None and (
+        isinstance(required_context, bool)
+        or not isinstance(required_context, int)
+        or required_context <= 0
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="workspace context requirement must be a positive integer",
+        )
+
+    try:
+        candidate_policy = _resolve_workspace_prompt_policy(project)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"invalid workspace prompt policy: {exc}",
+        ) from exc
+
+    manager = _manager
+    if desired_tier is not None:
+        if manager is None:
+            raise HTTPException(status_code=503, detail="model manager is unavailable")
+        if desired_tier not in manager.config.tiers:
+            raise HTTPException(
+                status_code=409,
+                detail=f"unknown workspace tier: {desired_tier}",
+            )
+    if required_context is not None and manager is None:
+        raise HTTPException(status_code=503, detail="cannot verify context without a model manager")
+
+    def _activate_runtime() -> dict:
+        global _caveman_level, _prompt_policy
+
+        with _gpu_lock:
+            loaded = list(manager.loaded_tiers()) if manager is not None else []
+            effective_tier = desired_tier or (loaded[0] if loaded else None)
+            available_context = None
+            if effective_tier is not None:
+                tier_config = manager.config.tiers.get(effective_tier)
+                if tier_config is None:
+                    raise ValueError(f"active tier '{effective_tier}' has no configuration")
+                available_context = getattr(tier_config, "context_window", None)
+                if (
+                    isinstance(available_context, bool)
+                    or not isinstance(available_context, int)
+                    or available_context <= 0
+                ):
+                    raise ValueError(
+                        f"tier '{effective_tier}' has no valid context capacity"
+                    )
+            if required_context is not None:
+                if effective_tier is None or available_context is None:
+                    raise ValueError("no active tier is available for context verification")
+                if required_context > available_context:
+                    raise ValueError(
+                        f"workspace requires {required_context} context tokens, but tier "
+                        f"'{effective_tier}' supports {available_context}"
+                    )
+
+            already_loaded = None
+            if desired_tier is not None:
+                already_loaded = _switch_tier_locked(
+                    manager,
+                    desired_tier,
+                    loaded=loaded,
+                )
+
+            with _runtime_config_lock:
+                previous_policy = _prompt_policy
+                if candidate_policy is not None:
+                    _prompt_policy = candidate_policy
+                    _caveman_level = (
+                        candidate_policy.level.value
+                        if candidate_policy.mode is PromptMode.CAVEMAN
+                        else "off"
+                    )
+                effective_policy = _prompt_policy
+
+            return {
+                "tier": effective_tier,
+                "tier_changed": desired_tier is not None and not already_loaded,
+                "tier_pinned": desired_tier is not None,
+                "prompt_policy": effective_policy.label,
+                "prompt_policy_pinned": candidate_policy is not None,
+                "prompt_policy_source": (
+                    "workspace" if candidate_policy is not None else "current runtime"
+                ),
+                "prompt_policy_changed": (
+                    candidate_policy is not None and effective_policy != previous_policy
+                ),
+                "context_window": available_context,
+            }
+
+    try:
+        runtime = await asyncio.to_thread(_activate_runtime)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"workspace activation failed: {exc}",
+        ) from exc
+
+    warnings = []
+    legacy_pins = project.get("pinned_prompts")
+    if legacy_pins:
+        count = len(legacy_pins) if isinstance(legacy_pins, list) else 1
+        warnings.append(
+            {
+                "field": "pinned_prompts",
+                "message": (
+                    f"{count} legacy pinned prompt(s) were not applied; "
+                    "workspace prompt pinning is not supported"
+                ),
+            }
+        )
+
+    return {
+        "ok": True,
+        "workspace": {"id": pid, "name": str(project.get("name") or "Untitled")},
+        "runtime": runtime,
+        "project_context": {
+            "system_prompt": bool(system_prompt.strip()),
+            "files": len(files),
+        },
+        "context_requirement": (
+            {
+                "requested": required_context,
+                "available": runtime["context_window"],
+                "satisfied": True,
+            }
+            if required_context is not None
+            else None
+        ),
+        "warnings": warnings,
+    }
+
+
 # Cache of the last effective system prompt so the UI can verify what was
 # actually sent to the model (caveman, memory, style, project, etc.)
 _last_system_prompt: str | None = None
@@ -723,74 +991,85 @@ async def debug_last_prompt():
 async def get_config():
     tiers = _manager.loaded_tiers() if _manager else []
     all_tiers = list(_manager.config.tiers.keys()) if _manager else []
+    with _runtime_config_lock:
+        caveman = _caveman_level
+        prompt_policy = _prompt_policy
+        system_prompt = _system_prompt
+        temperature = _temperature
+        max_tokens = _max_tokens
     return {
         "loaded_tiers": tiers,
         "all_tiers": all_tiers,
-        "caveman": _caveman_level,
-        "prompt_mode": _prompt_policy.mode.value,
-        "prompt_level": _prompt_policy.level.value if _prompt_policy.mode is not PromptMode.NONE else None,
-        "prompt_policy": _prompt_policy.label,
+        "caveman": caveman,
+        "prompt_mode": prompt_policy.mode.value,
+        "prompt_level": prompt_policy.level.value if prompt_policy.mode is not PromptMode.NONE else None,
+        "prompt_policy": prompt_policy.label,
         "active_tier": tiers[0] if tiers else None,
-        "system_prompt": _system_prompt or "",
-        "temperature": _temperature,
-        "max_tokens": _max_tokens,
+        "system_prompt": system_prompt or "",
+        "temperature": temperature,
+        "max_tokens": max_tokens,
     }
 
 
 @router.post("/api/config")
 async def update_config(body: dict):
     global _caveman_level, _prompt_policy, _system_prompt, _temperature, _max_tokens
-    candidate_policy = _prompt_policy
-    try:
-        if "prompt_mode" in body:
-            candidate_policy = PromptPolicy.resolve(
-                prompt_mode=body.get("prompt_mode"),
-                prompt_level=body.get("prompt_level"),
-            )
-        elif "caveman" in body:
-            candidate_policy = PromptPolicy.resolve(caveman=str(body["caveman"]))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    candidate_system_prompt = _system_prompt
-    if "system_prompt" in body:
-        candidate_system_prompt = body["system_prompt"] or None
-    candidate_temperature = _temperature
-    if "temperature" in body:
+    with _runtime_config_lock:
+        candidate_policy = _prompt_policy
         try:
-            candidate_temperature = float(body["temperature"])
-        except (TypeError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail="temperature must be numeric") from exc
-        if not math.isfinite(candidate_temperature) or not 0.0 <= candidate_temperature <= 2.0:
-            raise HTTPException(status_code=400, detail="temperature must be between 0 and 2")
-    candidate_max_tokens = _max_tokens
-    if "max_tokens" in body:
-        try:
-            candidate_max_tokens = _validate_webui_max_tokens(body["max_tokens"])
+            if "prompt_mode" in body:
+                candidate_policy = PromptPolicy.resolve(
+                    prompt_mode=body.get("prompt_mode"),
+                    prompt_level=body.get("prompt_level"),
+                )
+            elif "caveman" in body:
+                candidate_policy = PromptPolicy.resolve(caveman=str(body["caveman"]))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    # Publish only after every supplied setting validates, avoiding partial
-    # mutation when one field in a multi-setting request is malformed.
-    _prompt_policy = candidate_policy
-    _caveman_level = (
-        candidate_policy.level.value
-        if candidate_policy.mode is PromptMode.CAVEMAN
-        else "off"
-    )
-    _system_prompt = candidate_system_prompt
-    _temperature = candidate_temperature
-    _max_tokens = candidate_max_tokens
-    return {
-        "ok": True,
-        "caveman": _caveman_level,
-        "prompt_mode": _prompt_policy.mode.value,
-        "prompt_level": _prompt_policy.level.value if _prompt_policy.mode is not PromptMode.NONE else None,
-        "prompt_policy": _prompt_policy.label,
-        "system_prompt": _system_prompt or "",
-        "temperature": _temperature,
-        "max_tokens": _max_tokens,
-    }
+        candidate_system_prompt = _system_prompt
+        if "system_prompt" in body:
+            candidate_system_prompt = body["system_prompt"] or None
+        candidate_temperature = _temperature
+        if "temperature" in body:
+            try:
+                candidate_temperature = float(body["temperature"])
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail="temperature must be numeric") from exc
+            if not math.isfinite(candidate_temperature) or not 0.0 <= candidate_temperature <= 2.0:
+                raise HTTPException(status_code=400, detail="temperature must be between 0 and 2")
+        candidate_max_tokens = _max_tokens
+        if "max_tokens" in body:
+            try:
+                candidate_max_tokens = _validate_webui_max_tokens(body["max_tokens"])
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        # Publish only after every supplied setting validates, avoiding partial
+        # mutation when one field in a multi-setting request is malformed.
+        _prompt_policy = candidate_policy
+        _caveman_level = (
+            candidate_policy.level.value
+            if candidate_policy.mode is PromptMode.CAVEMAN
+            else "off"
+        )
+        _system_prompt = candidate_system_prompt
+        _temperature = candidate_temperature
+        _max_tokens = candidate_max_tokens
+        return {
+            "ok": True,
+            "caveman": _caveman_level,
+            "prompt_mode": _prompt_policy.mode.value,
+            "prompt_level": (
+                _prompt_policy.level.value
+                if _prompt_policy.mode is not PromptMode.NONE
+                else None
+            ),
+            "prompt_policy": _prompt_policy.label,
+            "system_prompt": _system_prompt or "",
+            "temperature": _temperature,
+            "max_tokens": _max_tokens,
+        }
 
 
 # --- Model info ---
@@ -833,21 +1112,7 @@ async def switch_tier(body: dict):
 
     def _switch() -> bool:
         with _gpu_lock:
-            # Snapshot only after taking the same lifecycle lock used by
-            # generation and the model endpoints.  Two concurrent switch
-            # requests can therefore never act on the same stale tier list.
-            loaded = manager.loaded_tiers()
-            already_loaded = tier in loaded
-
-            # Loading is the transactional prepare step.  ``ModelManager``
-            # publishes an engine only after ``engine.load()`` succeeds, so a
-            # load failure leaves every currently serving tier untouched.
-            if not already_loaded:
-                manager.load_tier(tier)
-            for loaded_tier in loaded:
-                if loaded_tier != tier:
-                    manager.unload_tier(loaded_tier)
-            return already_loaded
+            return _switch_tier_locked(manager, tier)
 
     try:
         already_loaded = await asyncio.to_thread(_switch)
@@ -953,17 +1218,23 @@ _shared_artifacts: dict[str, dict] = {}
 
 @router.post("/api/share")
 async def share_artifact(body: dict):
-    art_id = _validate_identifier(
-        body.get("identifier") or str(uuid.uuid4())[:8], label="artifact id"
-    )
+    art_id = str(body.get("identifier") or str(uuid.uuid4())[:8])
+    if not _ARTIFACT_IDENTIFIER_RE.fullmatch(art_id):
+        raise HTTPException(
+            status_code=400,
+            detail="invalid artifact id: use 1-128 ASCII letters, digits, '.', '-' or '_'",
+        )
+    artifact_type = str(body.get("type", "text/html")).strip().lower()
+    if len(artifact_type) > 128 or not _ARTIFACT_MIME_RE.fullmatch(artifact_type):
+        raise HTTPException(status_code=400, detail="invalid artifact MIME type")
     content = str(body.get("content", ""))
     if len(content.encode("utf-8")) > _MAX_SHARED_ARTIFACT_BYTES:
         raise HTTPException(status_code=413, detail="artifact exceeds the 5 MiB limit")
     if art_id not in _shared_artifacts and len(_shared_artifacts) >= _MAX_SHARED_ARTIFACTS:
         _shared_artifacts.pop(next(iter(_shared_artifacts)))
     _shared_artifacts[art_id] = {
-        "type": str(body.get("type", "text/html"))[:160],
-        "title": str(body.get("title", "Artifact"))[:500],
+        "type": artifact_type,
+        "title": str(body.get("title", "Artifact"))[:200],
         "content": content,
         "language": body.get("language", ""),
         "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -973,34 +1244,40 @@ async def share_artifact(body: dict):
 
 @router.get("/share/{art_id}", response_class=HTMLResponse)
 async def view_shared_artifact(art_id: str):
-    art_id = _validate_identifier(art_id, label="artifact id")
+    if not _ARTIFACT_IDENTIFIER_RE.fullmatch(art_id):
+        raise HTTPException(status_code=400, detail="invalid artifact id")
     art = _shared_artifacts.get(art_id)
     if not art:
         return HTMLResponse(status_code=404, content="Artifact not found or expired.")
     import html as _html
     j = _json_for_inline_script(art)
-    page = f"""<!doctype html><html><head><meta charset="utf-8"><title>{_html.escape(art['title'])}</title>
+    page = f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{_html.escape(art['title'])}</title>
+<link rel="stylesheet" href="/ui/assets/main.css">
+<script src="/ui/assets/artifact_registry.js"></script><script src="/ui/assets/artifact_lab.js"></script>
 <style>body{{margin:0;font-family:-apple-system,sans-serif;background:#111;color:#eee}}
 .hdr{{padding:10px 16px;border-bottom:1px solid #333;font-size:13px;display:flex;gap:12px;align-items:center}}
 .hdr .t{{font-weight:500;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
 .hdr .d{{color:#888;font-family:monospace;font-size:11px}}
-iframe,pre{{width:100vw;height:calc(100vh - 42px);border:0;margin:0}}
-pre{{background:#1a1a1a;color:#eee;padding:16px;box-sizing:border-box;overflow:auto}}</style></head>
+iframe,pre{{width:100%;height:calc(100vh - 42px);border:0;margin:0}}
+pre{{background:#1a1a1a;color:#eee;padding:16px;box-sizing:border-box;overflow:auto}}
+#mount{{height:calc(100vh - 42px);overflow:auto}}</style></head>
 <body><div class="hdr"><div class="t">{_html.escape(art['title'])}</div><div class="d">{art['created']}</div></div>
 <div id="mount"></div>
 <script>const art = {j};
 const mount = document.getElementById('mount');
-if (art.type === 'text/html' || art.type.startsWith('application/vnd.pimio.') || art.type.startsWith('application/vnd.ant.')) {{
+let rendered = false;
+try {{ rendered = Boolean(window.Mio?.artifactTypes?.render(mount, art)); }} catch (_) {{ rendered = false; }}
+if (!rendered && art.type === 'text/html') {{
   const f = document.createElement('iframe');
   f.sandbox = 'allow-scripts';
   f.srcdoc = art.content;
   mount.appendChild(f);
-}} else if (art.type === 'image/svg+xml') {{
+}} else if (!rendered && art.type === 'image/svg+xml') {{
   const f = document.createElement('iframe');
   f.sandbox = '';
   f.srcdoc = art.content;
   mount.appendChild(f);
-}} else {{
+}} else if (!rendered) {{
   const p = document.createElement('pre');
   p.textContent = art.content;
   mount.appendChild(p);
@@ -3184,6 +3461,13 @@ async def _handle_chat(websocket: WebSocket, data: dict):
             "total_ms?, spans:[{name, start_ms, duration_ms, category?, "
             "detail?}]}. Use for measured load/prefill/draft/verify/decode "
             "timelines; never fabricate spans.\n"
+            "  - application/vnd.pimio.speculative-acceptance-atlas+json — "
+            "body: schema-v1 JSON with baseline/candidate prefill_tps, "
+            "decode_tps and peak_memory_gb; positions with acceptance and "
+            "samples; workload phases with speedup/memory; reliability with "
+            "confidence, speedup_ci and regression_rate; and an explicit "
+            "decision. Use only for supplied matched measurements; the UI "
+            "does not measure or establish parity, so never invent values.\n"
             "  - application/vnd.pimio.pyrepl — body: Python code. An "
             "in-browser Pyodide REPL runs it with numpy, pandas, matplotlib "
             "available. Use for 'show me Python that does X' with live "

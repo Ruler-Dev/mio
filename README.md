@@ -197,7 +197,7 @@ See [docs/02-commands.md](docs/02-commands.md) for the CLI and API surface.
 
 `mio serve --webui` exposes the browser application at
 `http://127.0.0.1:9090/ui`. In addition to the general artifact renderers, the
-UI ships three MLX-oriented Artifact Lab renderers as local JavaScript and
+UI ships four MLX-oriented Artifact Lab renderers as local JavaScript and
 CSS assets:
 
 | MIME type | Required payload shape | Purpose |
@@ -205,8 +205,9 @@ CSS assets:
 | `application/vnd.pimio.benchmark+json` | `{runs: [...]}` with at least one prefill, decode, or TTFT value | Compare matched MLX runs |
 | `application/vnd.pimio.model-card+json` | `{name: "..."}` or `{model: "..."}` | Record checkpoint and compatibility metadata |
 | `application/vnd.pimio.inference-trace+json` | `{spans: [...]}` with non-negative start and duration values | Inspect a measured request timeline |
+| `application/vnd.pimio.speculative-acceptance-atlas+json` | schema-v1 baseline/candidate, position, phase, reliability, and decision data | Audit whether speculative speedup survives depth, workload, memory, and uncertainty checks |
 
-These three renderers have no CDN dependency, do not execute artifact content,
+These four renderers have no CDN dependency, do not execute artifact content,
 and insert payload values into the page as text. Each JSON document is limited
 to 512 KiB; benchmark payloads accept at most 48 runs and trace payloads at
 most 256 spans. Invalid input produces an error card and remains editable in
@@ -278,6 +279,135 @@ focus receives a visible outline. These changes improve the current keyboard
 and mobile structure, but live cross-browser and assistive-technology QA is
 still part of the release gate. The complete renderer matrix and payload
 examples are in [docs/11-mio-ui.md](docs/11-mio-ui.md).
+
+### UI reliability and artifact-runtime checkpoint
+
+The current UI checkpoint separates renderer availability from a label in a
+help table. `/ui/assets/artifact_registry.js` owns registration, aliases,
+canonical MIME names, labels, rendering, and structured downloads for native
+artifact types. A registry entry is accepted only when it has a bounded label
+and a real render function; duplicate types and aliases are rejected. The
+four Artifact Lab types above are the first definitions registered through
+this interface. Older renderers still use the established dispatch code, so
+the registry is an integration boundary for gradual migration rather than a
+claim that every historical artifact has already been rewritten.
+
+The execution boundary is explicit. Registered native types build parent-DOM
+output from parsed data. Maintained executable types use their dedicated
+renderer, and only the exact `text/html` MIME type reaches the generic
+sandboxed HTML iframe. An unknown vendor MIME does not inherit HTML execution:
+its preview and read-only share page show an inert **Renderer not installed**
+source panel. This protects the preview boundary, but it is not a content
+signature or a complete browser sandbox; known executable renderers remain
+active code and must be treated accordingly.
+
+Two previously skeletal artifacts now have local implementations:
+
+- the node editor accepts bounded `{nodes, connections}` or `{nodes, edges}`
+  JSON, draws SVG connections, and supports drag, add-node, auto-layout, and
+  centering without loading Rete.js or another remote editor. It currently
+  caps a view at 80 nodes and 160 connections, and visual edits are not written
+  back to the artifact source;
+- the periodic table uses a packaged 118-element data set, the conventional
+  group/period layout including the two f-block rows, local search by name,
+  symbol, or atomic number, and an element detail region. A small legacy
+  fallback remains in the HTML shell for asset-load failure; the complete
+  renderer is the normal packaged path.
+
+The view router now treats lifecycle hooks as asynchronous contracts. It
+awaits `mount`/`render`, `activate`, `deactivate`, returned cleanup handles, and
+the explicit cleanup hook; provides an `AbortSignal` and navigation token;
+serializes teardown; and commits the selected view only after successful
+activation. Loading and error panels are visible, and failed mounts expose a
+Retry action. Synchronous views remain valid. Cancellation is cooperative: a
+view which ignores its signal can still finish work in the background, though
+late cleanup handles are executed and stale content is not committed.
+
+Calls to executable UI skills now share `/ui/assets/api_client.js`. Its
+`Mio.api.runSkill` path validates the request shape, network/HTTP result, JSON
+body, and `{ok, result}` envelope, then returns the unwrapped result. It uses
+the existing security transport when available, otherwise a same-origin
+request, and carries the explicit confirmation fields required for a
+sensitive call. Design research, Notebook, ShaderToy import, the constrained
+Blender bridge, Playground, and the standalone workspace use this contract.
+The helper does not grant a skill or bypass server policy; permission and
+confirmation remain backend decisions.
+
+Workspace **Open chat** is now a checked activation flow rather than an
+optimistic view switch. `POST /ui/api/projects/{id}/activate` validates the
+tier, minimum context requirement, project fields, and optional prompt policy
+before a runtime change. Workspaces can pin `none`, Caveman, or Ponytail at
+`lite`/`full`/`ultra`, or explicitly inherit the current runtime policy; legacy
+`caveman_level` records remain readable and migrate when saved. Under the
+engine lock Mio verifies context capacity, loads the requested tier before
+retiring the previous one, and publishes the prompt policy only after the tier
+switch succeeds. The browser selects the project
+only after that response, which makes its system prompt and files
+request-scoped for subsequent chat calls. Unsupported legacy pinned prompts
+produce a warning instead of being reported as active. This is not a model
+memory transaction: if the runtime commits and the later browser-side project
+selection fails, the UI reports that partial outcome rather than attempting a
+blind rollback.
+
+The main Settings surface uses the same modern prompt-policy contract. Its
+single accessible selector exposes `none` plus all Caveman and Ponytail
+levels, reads older Caveman-only config responses, and sends
+`prompt_mode`/`prompt_level` on new, regenerated, and edited chat requests.
+`prompt_level` is omitted for `none`, preserving the backend's mutually
+exclusive validation instead of relying on a display-only Ponytail option.
+
+The Compare page distinguishes configured from resident models. It does not
+load a model on page open. Run remains disabled until the operator selects two
+different tiers that the refreshed config reports as loaded. Missing selected
+tiers can be loaded only through an explicit, confirmed
+`POST /v1/models/load`; the dialog warns about unified-memory pressure, the
+page re-checks residency, and Compare never unloads an existing tier. The two
+generations then run concurrently over their existing WebSocket paths. This
+surface compares responses and reported throughput; it is not a matched-run
+benchmark or a model-quality evaluator.
+
+The floating MLX HUD also uses backend inventory rather than a compiled-in
+tier list. It combines `/ui/api/config` with `/ui/api/model-info` to show the
+active and loaded tiers, last reported generation tok/s, prompt/context use,
+and reported VRAM, with explicit loading, no-model, switching, ready, and
+error states. Its throughput is the most recent request metric, not a
+continuous profiler, and the five-second poll pauses while the page is hidden.
+
+Standalone Stats, Compare, Attachments, Playground, and Workspace surfaces
+now include a viewport declaration, responsive layouts, and explicit
+loading/empty/error feedback appropriate to their data. Stats provides Retry
+and changes from four to two to one columns; Attachments keeps generated file
+links same-origin and adds search and Retry; Playground and Workspace consume
+the same skill response contract as the main shell. These changes remove the
+known blank or indefinitely loading states, but they do not replace a full
+browser/device accessibility matrix.
+
+First-run onboarding is sequential: the local-data/sovereignty explanation is
+acknowledged before the feature tour is allowed to open, using a persisted
+flag and the `mio:sovereignty-onboarded` event. The tour describes the live
+catalog and native MLX artifacts instead of advertising a fixed template
+count. Focus trapping and complete assistive-technology validation are still
+open release work.
+
+`/screenshot-artifact` now has a bounded, local PNG path for artifacts rendered
+in the parent DOM. It clones the rendered node, copies a selected set of
+computed styles and current form values, embeds same-origin/data images and
+canvas pixels, serializes an SVG `foreignObject`, and encodes it through a
+canvas. Limits include 2,048×4,096 CSS pixels, 1,800 DOM nodes, 8 megapixels,
+4 MiB of embedded images, and a 16 MiB PNG. Sandboxed artifact iframes retain
+an opaque origin and are never inspected; for those, Mio returns an actionable
+fallback to download the artifact or use the operating-system screenshot
+tool. Browser `foreignObject` support, external/CSS images, and live media can
+also make local PNG export unavailable.
+
+The checkpoint has focused contract tests for registry and MIME behavior,
+Artifact Lab payloads, the complete periodic table, node-editor syntax,
+session/share round trips, async routing and cancellation, the skill client,
+workspace activation, explicit Compare loads, standalone states, and PNG
+export limits. Visual smoke testing was performed in Mio's integrated in-app
+browser at desktop and narrow/mobile viewport sizes. That smoke validates the
+tested first-run and responsive paths only; it is not evidence of Safari,
+Chrome, Firefox, touch-device, screen-reader, or WCAG conformance.
 
 ## Prompt policies
 

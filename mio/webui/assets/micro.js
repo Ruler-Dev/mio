@@ -136,6 +136,22 @@
       .off-dot { width: 8px; height: 8px; background: #fff; border-radius: 50%; animation: offpulse 1.2s infinite; }
       @keyframes offpulse { 0%,100% {opacity:1} 50%{opacity:0.25} }
       .tod-greeting { color: var(--accent); font-weight: 500; margin-bottom: 4px; font-size: 15px; }
+      @media (max-width: 560px) {
+        .offline-bar {
+          top: 8px;
+          right: 8px;
+          left: auto;
+          max-width: calc(100vw - 216px);
+          padding: 6px 10px;
+          transform: none;
+          overflow: hidden;
+          font-size: 10px;
+          line-height: 1.3;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .offline-bar .off-dot { width: 6px; height: 6px; flex: 0 0 auto; }
+      }
     `;
     document.head.appendChild(css);
   }

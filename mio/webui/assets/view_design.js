@@ -647,6 +647,8 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
           onConsoleEvent(host, { kind: "log", ...e.data });
         } else if (e.data.__mioDesignNet === true) {
           onConsoleEvent(host, { kind: "net", ...e.data });
+        } else if (e.data.__mioDesignSkillRun === true) {
+          void handleDesignSkillRequest(iframe, e.data);
         }
       };
       window.addEventListener("message", handler);
@@ -658,6 +660,35 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
           applyTokenOverride(host, name, value);
         }
       });
+    }
+  }
+
+  const DESIGN_SKILL_ALLOWLIST = new Set(["blender_exec", "blender_snapshot"]);
+
+  async function handleDesignSkillRequest(iframe, request) {
+    const id = typeof request.id === "string" ? request.id.slice(0, 128) : "";
+    const name = typeof request.name === "string" ? request.name : "";
+    const args = request.args && typeof request.args === "object" && !Array.isArray(request.args)
+      ? request.args
+      : {};
+    const reply = (message) => {
+      try { iframe.contentWindow?.postMessage({ __mioDesignSkillResult: true, id, ...message }, "*"); } catch {}
+    };
+
+    if (!id || !DESIGN_SKILL_ALLOWLIST.has(name)) {
+      reply({ ok: false, error: "Design preview requested a disallowed skill" });
+      return;
+    }
+    if (!window.confirm(`Run local skill “${name}” from this Design preview?`)) {
+      reply({ ok: false, error: "Skill invocation cancelled" });
+      return;
+    }
+
+    try {
+      const result = await window.Mio.api.runSkill(name, args, { confirmSensitive: true });
+      reply({ ok: true, result });
+    } catch (error) {
+      reply({ ok: false, error: String(error?.message || error) });
     }
   }
 
@@ -2174,16 +2205,8 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
   async function doResearch(prompt, platform) {
     const q = `${platform === "ios" ? "iOS app " : platform === "android" ? "Android app " : "web "}UI design ${prompt}`;
     const [searchRes, imageRes] = await Promise.allSettled([
-      fetch("/ui/api/skills/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: "web_search", arguments: { query: q, limit: 5 } }),
-      }).then((r) => r.json()),
-      fetch("/ui/api/skills/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: "search_images", arguments: { query: q, limit: 6 } }),
-      }).then((r) => r.json()),
+      window.Mio.api.runSkill("web_search", { query: q, max_results: 5 }),
+      window.Mio.api.runSkill("search_images", { query: q, count: 6 }),
     ]);
 
     const lines = [];
@@ -2363,12 +2386,27 @@ Output ONE <antArtifact type="text/html"> with <!doctype html> and viewport meta
   <pre><code>${escaped}</code></pre>
 <script>
 const code = ${json};
+const skillRequests = new Map();
+window.addEventListener("message", (event) => {
+  const data = event.data;
+  if (event.source !== parent || !data || data.__mioDesignSkillResult !== true) return;
+  const request = skillRequests.get(data.id);
+  if (!request) return;
+  skillRequests.delete(data.id);
+  clearTimeout(request.timeout);
+  if (data.ok) request.resolve(data.result);
+  else request.reject(new Error(data.error || "Skill execution failed"));
+});
 async function run(skill, args){
-  const r = await fetch("/ui/api/skills/run", {
-    method:"POST", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({name: skill, arguments: args || {}})
+  return new Promise((resolve, reject) => {
+    const id = "mio-skill-" + Date.now() + "-" + Math.random().toString(36).slice(2);
+    const timeout = setTimeout(() => {
+      skillRequests.delete(id);
+      reject(new Error("Skill request timed out"));
+    }, 60000);
+    skillRequests.set(id, {resolve, reject, timeout});
+    parent.postMessage({__mioDesignSkillRun:true, id, name:skill, args:args || {}}, "*");
   });
-  return r.json();
 }
 function status(msg, cls){ const el = document.getElementById('status'); el.textContent = msg; el.className = cls||""; }
 document.getElementById('send').addEventListener('click', async () => {
@@ -2385,12 +2423,16 @@ document.getElementById('send').addEventListener('click', async () => {
 });
 document.getElementById('snap').addEventListener('click', async () => {
   status("Rendering viewport…");
-  const data = await run("blender_snapshot", {});
-  if (data.url) {
-    const img = new Image(); img.src = data.url; img.style.maxWidth = '100%'; img.style.marginTop = '8px';
-    const s = document.getElementById('status'); s.textContent = ""; s.className=""; s.appendChild(img);
-  } else {
-    status("Snapshot failed: " + (data.error || "unknown"), "err");
+  try {
+    const data = await run("blender_snapshot", {});
+    if (data.url) {
+      const img = new Image(); img.src = data.url; img.style.maxWidth = '100%'; img.style.marginTop = '8px';
+      const s = document.getElementById('status'); s.textContent = ""; s.className=""; s.appendChild(img);
+    } else {
+      status("Snapshot failed: " + (data.error || "unknown"), "err");
+    }
+  } catch (e) {
+    status("Snapshot failed: " + e.message, "err");
   }
 });
 </script>

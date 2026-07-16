@@ -87,6 +87,286 @@ Slash commands: `/weather /chart /pdf /docx /xlsx /pptx /qr /ical /resume /invoi
   action; every stdio probe is sandboxed, while remote, authenticated and
   unisolatable HTTP/SSE providers are never contacted by this view
 
+## July 2026 UI reliability checkpoint
+
+This checkpoint is a set of implementation contracts and failure-state fixes,
+not a redesign claim or a benchmark result. It covers the artifact type
+boundary, view lifecycle, shared skill calls, model/workspace activation, and
+the standalone surfaces that previously depended on optimistic assumptions.
+
+### Artifact registry and MIME execution boundary
+
+`/ui/assets/artifact_registry.js` exposes `window.Mio.artifactTypes` with the
+following operations:
+
+- `register(definition)` validates and records a canonical MIME type, bounded
+  display metadata, aliases, a required renderer, and optional download and
+  standalone handlers;
+- `normalize(type)` follows registered aliases without looping;
+- `definition`, `supports`, and `catalog` report only definitions that were
+  successfully registered with a renderer;
+- `render` and `download` pass a canonical artifact record to the owning
+  definition.
+
+Registration rejects malformed MIME names, duplicate canonical types,
+duplicate alias ownership, missing render functions, and empty or oversized
+labels. The native MLX benchmark, model-card, inference-trace, and speculative
+acceptance-atlas definitions are currently the first consumers. Labels, help
+entries, preview dispatch,
+normalization, and structured downloads for those types therefore derive from
+the same definition. The large historical renderer set has not all migrated
+to this interface; its maintained branches still live in the main artifact
+dispatcher. The registry should be read as the stable migration boundary, not
+as an assertion that legacy dispatch no longer exists.
+
+Preview dispatch follows this order:
+
+1. normalize the incoming type;
+2. ask the registered native renderer;
+3. select an exact maintained legacy renderer where one exists;
+4. execute generic markup only when the canonical type is exactly
+   `text/html`;
+5. otherwise render a parent-DOM **Renderer not installed** panel whose source
+   uses `textContent`.
+
+The share route uses the same registry for the four native Artifact Lab
+types and accepts dotted identifiers. Exact `text/html` remains an
+`allow-scripts` sandboxed iframe. An unknown vendor type is displayed as
+source, rather than being turned into an HTML iframe merely because its name
+starts with `application/vnd.pimio.`. This is an execution routing boundary;
+it does not authenticate the producer or make known executable types safe to
+trust.
+
+### New local artifact implementations
+
+The node-editor artifact no longer waits on a remote Rete.js bootstrap. Its
+packaged template accepts either `{nodes, connections}` or `{nodes, edges}`.
+It constructs nodes with DOM APIs, draws cubic SVG edges, preserves labels and
+ports as text, supports pointer dragging, and provides Add node, Auto layout,
+and Center controls. Input is bounded to 80 nodes, 160 connections, eight
+input/output ports per node, and bounded label fields. Invalid JSON produces a
+visible error panel. Added and moved nodes alter the current preview only;
+there is no serializer that writes those visual changes back to the Source
+revision.
+
+`/ui/assets/artifact_periodic.js` carries a complete local list of 118 element
+symbols and names plus conventional grid positions. The renderer lays out
+groups 1–18, places lanthanides and actinides in separate f-block rows, assigns
+display categories, supports search by name/symbol/number, and updates a live
+detail region on selection. Module initialization asserts exactly 118 records
+and a position for each symbol. The main shell retains its older 36-element
+template only as an asset-load fallback; normal packaged rendering takes the
+complete asset. The data is a navigational periodic table, not a chemistry
+database: it does not include masses, isotopes, oxidation states, or computed
+properties.
+
+### Asynchronous view lifecycle
+
+`/ui/assets/views.js` now treats a route change as an asynchronous lifecycle:
+
+```text
+previous deactivate -> previous cleanup -> new mount/render -> new activate
+                    -> publish host -> persist active view
+```
+
+Each non-chat view receives `{view, token, signal, isCurrent}`. The router
+awaits `mount` or `render`, then `activate`, and awaits `deactivate`, returned
+cleanup handles, and the explicit `cleanup` hook during disposal. It displays
+an `aria-busy` loading panel while mounting, publishes the new host only after
+successful activation, and displays a bounded error panel with Retry if the
+current navigation fails. A later navigation aborts the earlier signal and a
+monotonic token prevents a stale view from becoming active. Synchronous hooks
+continue to work because their return values are normalized to promises.
+
+Cancellation remains cooperative. A hook that starts detached work and does
+not return its promise cannot be awaited. A returned promise that ignores the
+signal may still settle later; its late cleanup handle is executed, and the
+aborted host is not committed, but the underlying operation itself cannot be
+forcibly stopped by the router.
+
+### Shared skill API client
+
+`/ui/assets/api_client.js` defines `Mio.api.runSkill(name, args, options)`. It
+validates the local call shape, delegates to `Mio.security.runSkill` when that
+transport is present, and otherwise performs a credentialed same-origin
+`POST /ui/api/skills/run`. A sensitive call carries both
+`confirm_sensitive: true` and the matching `X-Mio-Dangerous-Action` header.
+The client distinguishes transport failure, non-JSON response, non-successful
+HTTP status, `{ok: false}`, and a missing `result`; successful calls return the
+unwrapped `result` object.
+
+Design Research, Notebook, ShaderToy import, Playground, and both workspace
+surfaces use that contract. The Blender integration sends only the
+allow-listed `blender_exec` and `blender_snapshot` operations through a
+sandbox-safe message bridge and requires explicit confirmation for the
+execution path. The client is not an authorization layer: a listed skill can
+still be denied by Mio's server-side grants, confirmation, or tool policy, and
+each surface remains responsible for clear progress and error feedback.
+
+### Prompt-policy controls and checked workspace activation
+
+The main Settings panel exposes one prompt-policy selector with `none` and all
+Caveman/Ponytail `lite`, `full`, and `ultra` combinations. It reads
+`prompt_mode`, `prompt_level`, and `prompt_policy`, with a fallback for older
+`caveman` responses. Config saves and all three WebSocket chat paths (new
+turn, regenerate, and edit/resend) use the modern fields; `prompt_level` is
+not sent with `none`. The sidebar label therefore reports the effective mode
+and level rather than always claiming Caveman.
+
+The Workspaces view persists a reusable project plus an optional runtime
+profile: tier, minimum context capacity, and prompt policy. A workspace can
+inherit the current policy or pin `none`, Caveman, or Ponytail with a level.
+Legacy `caveman_level` projects remain readable and are rewritten to modern
+fields on their next save. Clicking **Open chat** first calls
+`POST /ui/api/projects/{id}/activate`. The backend validates the persisted
+project shape, known tier, positive minimum context, and prompt policy before
+entering the engine lock. It then:
+
+1. resolves the requested or active tier and validates its configured context
+   capacity;
+2. rejects an unsatisfied requirement before loading/unloading a model or
+   changing prompt policy;
+3. loads a requested tier before retiring the old loaded tier;
+4. publishes the resolved Caveman policy only after the tier operation has
+   succeeded;
+5. returns the effective runtime, context check, project-context summary, and
+   explicit warnings.
+
+Only after this response succeeds does the browser refresh projects, select
+the project ID, refresh config, and switch to Chat. Project files and system
+prompt remain request-scoped: they take effect because later chat requests
+carry the selected project, not because the activation endpoint copies them
+into global configuration. Legacy `pinned_prompts` are not supported and are
+reported as unapplied instead of silently presented as active.
+
+This sequence avoids the previous optimistic UI state, but it is not a
+distributed rollback protocol. A model/policy activation can succeed and a
+subsequent browser-local project-selection step can fail; the card reports
+that distinction (`Runtime profile applied, but chat selection failed`) and
+does not pretend to have reverted engine memory.
+
+### Explicit two-model Compare
+
+`/ui/compare` reads `all_tiers` and `loaded_tiers` from
+`GET /ui/api/config`; it does not derive residency from a static tier list.
+The page displays configured and loaded inventories separately. A comparison
+is runnable only when the prompt is non-empty and two distinct selected tiers
+are confirmed loaded by the latest response.
+
+Selecting a configured but unloaded tier does not trigger work. **Load
+selected tiers** shows a unified-memory warning and, only after confirmation,
+calls `POST /v1/models/load` once for each missing selected tier. It refreshes
+configuration after the load and leaves Run disabled if residency is not
+confirmed. Compare never calls an unload endpoint, so existing resident tiers
+remain in memory. Once ready, it opens the existing per-tier WebSocket paths
+in parallel and reports each completion's returned token/tok/s metadata and
+elapsed wall time.
+
+This behavior favors explicitness over memory automation. Loading two large
+tiers can fail or pressure unified memory; the operator must unload elsewhere
+when appropriate. Compare also does not establish prompt parity beyond using
+the same entered text, normalize generation settings into a benchmark
+protocol, score output quality, or save a research result. Use the benchmark
+harness and native benchmark artifact for measured claims.
+
+### Backend-driven MLX HUD
+
+`/ui/assets/engine_hud.js` combines `GET /ui/api/config` with
+`GET /ui/api/model-info`. It renders explicit loading, empty, ready, switching,
+and error states; reports configured/loaded and active tiers; and shows the
+backend's `last_gen_tps`, last prompt tokens, context capacity/use, model name,
+and reported VRAM where available. Expanding the HUD exposes only tiers from
+the backend inventory. Switching delegates to the main shell's tier operation
+and refreshes state afterward; there is no phantom hard-coded tier fallback.
+
+The HUD refreshes every five seconds while the document is visible and also
+on expansion or return to the page. `last_gen_tps` describes the last completed
+generation available to the endpoint. It is not a real-time sampling stream,
+an average, or a substitute for the benchmark harness. Context use can use the
+shell's last observed value before falling back to model-info data.
+
+### Standalone states and responsive behavior
+
+The standalone pages now declare a mobile viewport and avoid treating a
+pending request as a final UI:
+
+| Surface | Implemented states and narrow-layout behavior | Remaining limits |
+|---|---|---|
+| Stats | loading, empty, error, Retry; 4/2/1-column responsive cards | saved-session summaries, not live engine telemetry |
+| Compare | configuration/residency inventory, explicit loading and WebSocket errors; one response column below 720 px | keeping two resident tiers can exceed memory |
+| Attachments | loading, empty, error, Retry, local search; same-origin generated-file URLs | only Mio's generated-file inventory, not a general file browser |
+| Playground | shared skill response handling with disabled/loading and surfaced failures | a skill may still require a grant or confirmation |
+| Workspace | shared skill response handling and explicit failures | separate from File System Access live-folder permissions |
+
+These changes target the known indefinite-loading, empty-crash, response-
+envelope, and horizontal-overflow failures. They do not imply uniform feature
+parity between the main shell and every standalone page.
+
+### Sequential onboarding
+
+Two first-run surfaces remain, but they cannot open simultaneously. The
+local-data/sovereignty card stores `mio.sovereignty.onboarded.v1` and emits
+`mio:sovereignty-onboarded` when dismissed. The feature tour opens only when
+that flag already exists or after that event. Its copy refers to the live
+command/template catalog and named native MLX artifacts rather than a fixed
+marketing count. Both flows remain replayable through their existing UI
+entrypoints.
+
+The sequencing removes overlapping overlays and the sovereignty card has
+dark/light surface variables that do not depend on an accidental global card
+color. Complete focus trapping, focus restoration, reduced-motion review,
+screen-reader validation, and all onboarding actions' failure feedback remain
+release work.
+
+### Local parent-DOM PNG export
+
+`/ui/assets/artifact_export.js` implements `/screenshot-artifact` without a
+remote screenshot library. For an active parent-DOM artifact it measures and
+clones the rendered node, copies an allow-listed set of computed styles and
+the current values of form controls, replaces local canvas pixels and
+same-origin/data images with embedded data, serializes the clone inside an SVG
+`foreignObject`, draws that image to a canvas, and downloads an `image/png`.
+Object URLs are revoked after use.
+
+The pipeline fails closed at these bounds:
+
+| Resource | Bound |
+|---|---:|
+| CSS dimensions | 2,048 × 4,096 |
+| cloned DOM nodes | 1,800 |
+| output pixels | 8 MiPixels |
+| embedded images in aggregate | 4 MiB |
+| serialized SVG | 10 MiB |
+| PNG | 16 MiB |
+
+An artifact body containing an iframe is not inspected. Mio's executable
+artifact frames deliberately omit `allow-same-origin`, so reading their
+document would violate the intended opaque-origin boundary. The command
+instead reports `sandboxed-frame` and directs the operator to **Download as
+file** or the operating-system screenshot tool. External images, CSS
+background URLs, tainted canvases, live audio/video, excessive dimensions,
+and browsers that cannot rasterize SVG `foreignObject` also receive explicit
+failures. Native Artifact Lab output is a primary supported parent-DOM case;
+PNG export is not guaranteed for every legacy renderer.
+
+### Verification scope
+
+Focused automated tests cover registry ownership/aliases, native artifact
+parsing and downloads, unknown-MIME preview/share behavior, dotted share IDs,
+schema-v2 revision persistence, the 118-element invariant, node-editor script
+syntax, asynchronous navigation ordering/cancellation/cleanup, skill response
+validation, transactional workspace activation, explicit Compare loads, the
+standalone response states, and PNG bounds/fallbacks. JavaScript syntax checks
+run with Node, while backend contracts run through pytest.
+
+A manual visual smoke was run in Mio's integrated in-app browser at desktop
+and narrow/mobile viewport sizes. It checked the sequential first-run overlays,
+dark-surface contrast, the main shell/artifact layout, and responsive
+standalone structure. It did not use or claim control of the user's Chrome
+session. This smoke is narrower than a release matrix: Safari, Chrome,
+Firefox, physical touch devices, zoom, screen readers, and full keyboard-only
+flows still require dedicated passes.
+
 ### Keyboard and accessibility structure
 
 Preview, Source, and Diff are native buttons in a `tablist`, and their
@@ -134,7 +414,7 @@ current UI; it is not derived from a hard-coded marketing count. Some known
 defined by the canonical renderer key rather than by accepting every possible
 name in either namespace. For compactness, older matrix rows written as
 `vnd.*` omit the leading `application/` from their on-wire MIME value; the
-three Artifact Lab rows show their complete values.
+four Artifact Lab rows show their complete values.
 
 Alias normalization is idempotent. In particular,
 `application/vnd.pimio.react`, `application/vnd.pimio.code`, and
@@ -159,6 +439,7 @@ placeholder, version store, gallery, and session reload path.
 | `application/vnd.pimio.benchmark+json` | Matched-run JSON | native DOM comparison |
 | `application/vnd.pimio.model-card+json` | Checkpoint metadata JSON | native DOM compatibility card |
 | `application/vnd.pimio.inference-trace+json` | Timed span JSON | native DOM timeline |
+| `application/vnd.pimio.speculative-acceptance-atlas+json` | Versioned matched-experiment JSON | native DOM acceptance/robustness atlas |
 
 ### Visual / interactive
 | Type | Body | Library |
@@ -223,7 +504,7 @@ placeholder, version store, gallery, and session reload path.
 
 ## Native Artifact Lab payloads
 
-The three MLX research renderers are implemented by the packaged
+The four MLX research renderers are implemented by the packaged
 `/ui/assets/artifact_lab.js` asset. They do not fetch a CDN library, navigate
 to a remote URL, or execute payload code. The module parses a JSON object and
 builds ordinary DOM nodes; payload values enter those nodes through
@@ -231,7 +512,7 @@ builds ordinary DOM nodes; payload values enter those nodes through
 executable iframe-based artifact types, but it is not a signature or a claim
 that the supplied measurements are true.
 
-All three types reject a UTF-8 payload larger than 512 KiB and show an error
+All four types reject a UTF-8 payload larger than 512 KiB and show an error
 card for malformed JSON or a top-level value other than an object. The Source
 tab remains available for inspection and editing. A successful download is
 pretty-printed JSON with a trailing newline; malformed source is downloaded
@@ -317,9 +598,32 @@ span end times as its timeline extent.
 }
 ```
 
-The model-facing system prompt instructs the model to use benchmark and trace
-artifacts only for supplied measurements and never to fabricate values or
-spans.
+The model-facing system prompt instructs the model to use benchmark, trace,
+and acceptance-atlas artifacts only for supplied measurements and never to
+fabricate values or spans.
+
+### Speculative acceptance atlas
+
+`application/vnd.pimio.speculative-acceptance-atlas+json` is a decision aid
+for matched speculative-decoding experiments. It requires schema
+`pimio.speculative-acceptance-atlas`, version `1`, positive baseline and
+candidate prefill/decode rates, peak-memory values, and:
+
+- 1–64 unique draft-position rows with an acceptance fraction and sample
+  count;
+- 1–24 named workload/context phases with token bounds, acceptance, speedup,
+  peak memory, and sample count;
+- a reliability block with matched-run count, confidence level, ordered
+  speedup interval, and regression rate;
+- an explicit `promote`, `hold`, `reject`, or `collect-more` decision and a
+  bounded rationale.
+
+The renderer derives the headline prefill/decode ratios, weighted acceptance,
+and memory delta, then keeps the phase table and uncertainty next to the
+decision. It does not run an experiment or validate parity. The packaged
+`artifactLab.sample()` payload is labeled synthetic and exists only to
+exercise the schema and renderer; replace every value with benchmark output
+before using the artifact as evidence.
 
 ## Artifact persistence and JSON export
 
@@ -447,8 +751,10 @@ remain release work.
 | `WS /ui/ws/chat` | Streaming chat + tool loop |
 | `GET /ui/api/config` | Session config |
 | `POST /ui/api/config` | Update config (caveman, temp, sys prompt, max_tokens) |
+| `POST /ui/api/projects/{id}/activate` | Validate and activate the supported workspace runtime profile |
 | `GET/POST/DELETE /ui/api/sessions[/id]` | Chat persistence |
 | `GET /ui/api/model-info` | Active tier, VRAM, context |
+| `POST /v1/models/load` | Explicitly load an additional configured tier, including from Compare |
 | `POST /v1/mcp/health` | CSRF-protected, redacted and bounded health probe for eligible local MCP providers |
 | `GET /ui/compare` | Distinct-loaded-model side-by-side comparison |
 | `GET /dashboard` / `WS /ws/metrics` | Live schema-v1 inference metrics and reconnecting dashboard |

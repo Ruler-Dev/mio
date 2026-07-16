@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Mio Skill Playground</title>
 <script src="/ui/assets/security.js"></script>
+<script src="/ui/assets/api_client.js"></script>
 <style>
 :root {
   --bg: #0a0a14; --panel: #161621; --border: #2a2a38; --accent: #3b82f6;
@@ -73,10 +74,21 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; ba
 let SKILLS = [];
 let active = null;
 
-fetch('/ui/api/skills').then(r => r.json()).then(d => {
-  SKILLS = d.skills || [];
-  render();
-});
+async function loadSkills() {
+  const list = document.getElementById('skillList');
+  list.innerHTML = '<div class="empty">Loading skills…</div>';
+  try {
+    const response = await fetch('/ui/api/skills');
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    const data = await response.json();
+    SKILLS = Array.isArray(data.skills) ? data.skills : [];
+    render();
+  } catch (error) {
+    list.innerHTML = `<div class="empty">Could not load skills: ${escapeHTML(error.message)}</div>`;
+  }
+}
+
+void loadSkills();
 
 function render() {
   const q = (document.getElementById('filter').value || '').toLowerCase();
@@ -155,23 +167,24 @@ async function run() {
   }
   try {
     const skill = SKILLS.find(s => s.name === active);
+    if (!skill) throw new Error('Select a skill first.');
     let confirmSensitive = false;
-    if (skill && skill.risk !== 'read') {
+    if (skill.risk !== 'read') {
       if (!skill.operator_granted) {
         showResult({ error: `Disabled by default. Add ${active} to MIO_WEBUI_SKILL_GRANTS and restart Mio.` }, true);
-        btn.disabled = false; btn.textContent = '▶ Run skill'; return;
+        return;
       }
       confirmSensitive = window.confirm(`Run sensitive skill “${active}” (${skill.risk}) with these arguments?`);
-      if (!confirmSensitive) { btn.disabled = false; btn.textContent = '▶ Run skill'; return; }
+      if (!confirmSensitive) return;
     }
-    const res = await window.Mio.security.runSkill(active, args, { confirmSensitive });
-    const data = await res.json();
-    showResult(data.result || data, !data.ok);
+    const result = await window.Mio.api.runSkill(active, args, { confirmSensitive });
+    showResult(result, Boolean(result?.error || result?.ok === false));
   } catch (e) {
     showResult({ error: e.message }, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '▶ Run skill';
   }
-  btn.disabled = false;
-  btn.textContent = '▶ Run skill';
 }
 
 function showResult(r, err) {

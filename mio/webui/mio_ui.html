@@ -5,7 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Mio UI</title>
 <script src="/ui/assets/security.js"></script>
+<script src="/ui/assets/api_client.js"></script>
+<script src="/ui/assets/artifact_registry.js"></script>
 <script src="/ui/assets/artifact_lab.js"></script>
+<script src="/ui/assets/artifact_periodic.js"></script>
 <!-- Markdown and syntax-highlighting are vendored so the shell boots offline. -->
 <script src="/ui/assets/vendor_marked_12.0.2.min.js"></script>
 <script src="/ui/assets/vendor_prism_1.29.0.js"></script>
@@ -46,7 +49,7 @@
     'view_workspaces', 'view_docs', 'view_design', 'view_obsidian', 'view_dashboards', 'view_flow', 'view_journal', 'view_notebook', 'view_graph',
     // Cross-cutting chat-surface enhancements
     'sovereignty', 'at_mention', 'rerun', 'g_nav', 'voice', 'selection_bar', 'prompt_autosuggest', 'onboarding_sovereignty', 'nl_schedule', 'scratchpad', 'smart_paste', 'focus_mode', 'pomo_hud', 'minimap', 'refine_prompt',
-    'pinned', 'density', 'tips', 'clipboard_context', 'artifact_export',
+    'pinned', 'density', 'engine_hud', 'tips', 'clipboard_context', 'artifact_export',
     'presentation', 'image_paste', 'keys', 'onboarding', 'templates',
     'followups', 'chat_export', 'branching', 'reactions', 'chat_import',
     'prompt_library', 'extras', 'chat_system_prompt', 'compress', 'theme',
@@ -118,7 +121,7 @@
         <select class="control-select" id="tierSelect" onchange="switchTier(this.value)"></select>
       </div>
       <div class="control-row">
-        <span class="control-label" id="cavemanLabel" style="flex:1">Caveman: lite</span>
+        <span class="control-label" id="promptPolicyLabel" style="flex:1">Prompt: Caveman Full</span>
         <button class="icon-btn" onclick="openSettings()" title="Settings" style="width:28px;height:28px">
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="2.5"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.8 3.8l1.4 1.4M10.8 10.8l1.4 1.4M3.8 12.2l1.4-1.4M10.8 5.2l1.4-1.4"/></svg>
         </button>
@@ -145,7 +148,7 @@
           <div class="welcome-chips" id="welcomeChips"></div>
           <div style="font-size:11px;color:var(--text-muted);margin-top:16px;line-height:1.8">
             <strong style="color:var(--text-secondary)">Try:</strong> /slash commands · ⌘K palette · drag-drop a PDF · click 🎤 for voice · /focus zen mode · /gallery artifact browser<br>
-            <strong style="color:var(--text-secondary)">Artifacts:</strong> native MLX benchmark · model compatibility card · inference trace · HTML · SVG · three.js · Chart.js · Mermaid · React · code · documents and more
+            <strong style="color:var(--text-secondary)">Artifacts:</strong> native MLX benchmark · model compatibility card · inference trace · speculative acceptance atlas · HTML · SVG · three.js · Chart.js · Mermaid · React · code · documents and more
           </div>
         </div>
       </div>
@@ -333,14 +336,21 @@
 
       <div class="settings-section">Generation</div>
       <div class="settings-field">
-        <label class="settings-label" for="settCaveman">Caveman mode</label>
-        <select class="settings-select" id="settCaveman">
-          <option value="off">Off</option>
-          <option value="lite" selected>Lite</option>
-          <option value="full">Full</option>
-          <option value="ultra">Ultra</option>
+        <label class="settings-label" for="settPromptPolicy">Prompt policy</label>
+        <select class="settings-select" id="settPromptPolicy" aria-describedby="settPromptPolicyHint">
+          <option value="none">None</option>
+          <optgroup label="Caveman">
+            <option value="caveman/lite">Caveman · Lite</option>
+            <option value="caveman/full" selected>Caveman · Full</option>
+            <option value="caveman/ultra">Caveman · Ultra</option>
+          </optgroup>
+          <optgroup label="Ponytail">
+            <option value="ponytail/lite">Ponytail · Lite</option>
+            <option value="ponytail/full">Ponytail · Full</option>
+            <option value="ponytail/ultra">Ponytail · Ultra</option>
+          </optgroup>
         </select>
-        <div class="settings-hint">Token-saving communication style</div>
+        <div class="settings-hint" id="settPromptPolicyHint">Choose one mutually exclusive system-prompt policy and intensity.</div>
       </div>
       <div class="settings-field">
         <label class="settings-label" for="settTemp">Temperature</label>
@@ -1133,7 +1143,7 @@ function renderArtifactCard(art) {
 }
 
 function artifactTypeLabel(t) {
-  const nativeLabel = window.Mio?.artifactLab?.label(t);
+  const nativeLabel = window.Mio?.artifactTypes?.label(t) || window.Mio?.artifactLab?.label(t);
   if (nativeLabel) return nativeLabel;
   const map = {
     'text/html': 'HTML',
@@ -1239,8 +1249,61 @@ function artifactTypeLabel(t) {
   return map[t] || 'Unsupported artifact';
 }
 
+// Export is a separate capability from preview. A type can have an in-app
+// renderer without having a standalone document serializer; in that case we
+// preserve its source as text instead of pretending the source itself is HTML.
+function legacyArtifactDocument(art) {
+  const renderers = {
+    'application/vnd.ant.react': 'reactTemplate',
+    'application/vnd.pimio.threejs': 'threejsTemplate',
+    'application/vnd.pimio.p5': 'p5Template',
+    'application/vnd.pimio.chartjs': 'chartjsTemplate',
+    'application/vnd.pimio.leaflet': 'leafletTemplate',
+    'application/vnd.pimio.math': 'katexTemplate',
+    'application/vnd.pimio.graphviz': 'graphvizTemplate',
+    'application/vnd.pimio.mindmap': 'mindmapTemplate',
+    'application/vnd.pimio.revealjs': 'revealTemplate',
+    'application/vnd.pimio.timeline': 'timelineTemplate',
+    'application/vnd.pimio.pyrepl': 'pyodideTemplate',
+    'application/vnd.pimio.tone': 'toneTemplate',
+    'application/vnd.pimio.shader': 'shaderTemplate',
+    'application/vnd.pimio.jsonviewer': 'jsonViewerTemplate',
+    'application/vnd.pimio.table': 'sortableTableTemplate',
+    'application/vnd.pimio.diff': 'diffTemplate',
+    'application/vnd.pimio.regex': 'regexTemplate',
+    'application/vnd.pimio.piano': 'pianoTemplate',
+    'application/vnd.pimio.flashcards': 'flashcardsTemplate',
+    'application/vnd.pimio.kanban': 'kanbanTemplate',
+  };
+  const render = window[renderers[art?.type]];
+  if (typeof render !== 'function') return null;
+  try { return render(String(art.content || '')); }
+  catch (_) { return null; }
+}
+
+function artifactDownloadPayload(art) {
+  const native = window.Mio?.artifactTypes?.download(art) || window.Mio?.artifactLab?.download(art);
+  if (native) {
+    return {
+      content: String(native.content ?? ''),
+      extension: native.extension || '.json',
+      mime: native.mime || 'application/json',
+    };
+  }
+  if (art.type === 'text/html')
+    return {content: String(art.content || ''), extension: '.html', mime: 'text/html'};
+  if (art.type === 'image/svg+xml')
+    return {content: String(art.content || ''), extension: '.svg', mime: 'image/svg+xml'};
+  if (art.type === 'text/markdown')
+    return {content: String(art.content || ''), extension: '.md', mime: 'text/markdown'};
+  const document = legacyArtifactDocument(art);
+  if (document !== null)
+    return {content: document, extension: '.html', mime: 'text/html'};
+  return {content: String(art.content || ''), extension: '.txt', mime: 'text/plain'};
+}
+
 function artifactIcon(t) {
-  if (window.Mio?.artifactLab?.supports(t))
+  if (window.Mio?.artifactTypes?.supports(t) || window.Mio?.artifactLab?.supports(t))
     return '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19V9M10 19V5M16 19v-7M22 19H2"/><circle cx="4" cy="7" r="1.5"/><circle cx="10" cy="3" r="1.5"/><circle cx="16" cy="10" r="1.5"/></svg>';
   if (t === 'application/pdf')
     return '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M9 13h6M9 17h6M9 9h2"/></svg>';
@@ -1685,32 +1748,9 @@ function downloadArtifactAsFile() {
   if (!activeArtifactId) return;
   const art = allArtifacts[activeArtifactId];
   if (!art) return;
-  const nativeDownload = window.Mio?.artifactLab?.download(art);
-  const isHTML = !nativeDownload && (art.type === 'text/html' || art.type.startsWith('application/vnd.pimio.') || art.type.startsWith('application/vnd.ant.'));
-  const ext = nativeDownload?.extension || (isHTML ? '.html' : (art.type === 'image/svg+xml' ? '.svg' : art.type === 'text/markdown' ? '.md' : '.txt'));
-  const name = (art.title || art.id).replace(/[^a-z0-9-]+/gi, '-').slice(0, 40) + ext;
-  let content = nativeDownload?.content || art.content;
-  if (nativeDownload) {
-    // Native structured artifacts export as deterministic, editable JSON.
-  } else if (art.type === 'text/markdown' || art.type === 'image/svg+xml' || art.type === 'text/html' || art.type === 'application/vnd.ant.code') {
-    // raw
-  } else if (art.type.startsWith('application/vnd.pimio.') || art.type.startsWith('application/vnd.ant.')) {
-    // Wrap template output so the downloaded file actually works offline
-    const t = art.type;
-    try {
-      if (t.endsWith('threejs')) content = threejsTemplate(art.content);
-      else if (t.endsWith('p5')) content = p5Template(art.content);
-      else if (t.endsWith('chartjs')) content = chartjsTemplate(art.content);
-      else if (t.endsWith('leaflet')) content = leafletTemplate(art.content);
-      else if (t.endsWith('math')) content = katexTemplate(art.content);
-      else if (t.endsWith('graphviz')) content = graphvizTemplate(art.content);
-      else if (t.endsWith('mindmap')) content = mindmapTemplate(art.content);
-      else if (t.endsWith('revealjs')) content = revealTemplate(art.content);
-      else if (t.endsWith('timeline')) content = timelineTemplate(art.content);
-      else if (t === 'application/vnd.ant.react') content = reactTemplate(art.content);
-    } catch (e) {}
-  }
-  const blob = new Blob([content], { type: nativeDownload?.mime || (isHTML ? 'text/html' : 'text/plain') });
+  const payload = artifactDownloadPayload(art);
+  const name = (art.title || art.id).replace(/[^a-z0-9-]+/gi, '-').slice(0, 40) + payload.extension;
+  const blob = new Blob([payload.content], { type: payload.mime });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = name;
@@ -1763,7 +1803,7 @@ function regenerateAfter(idx) {
   ws.send(JSON.stringify({
     action: 'chat',
     messages: chatMessages.filter(m => m.role !== 'assistant' || m.content),
-    tier, max_tokens: currentConfig.max_tokens, caveman: currentConfig.caveman,
+    tier, max_tokens: currentConfig.max_tokens, ...promptPolicyRequestFields(),
     system_prompt: _effectiveSystemPrompt(),
     temperature: (currentConfig.temperature ?? 0.0) + 0.1,
   }));
@@ -2215,34 +2255,9 @@ function saveArtifactToWorkspace() {
   if (!activeArtifactId) return;
   const art = allArtifacts[activeArtifactId];
   if (!art) return;
-  const ext = art.type === 'text/markdown' ? '.md' : art.type === 'image/svg+xml' ? '.svg' : '.html';
-  const slug = (art.title || art.id).replace(/[^a-z0-9-]+/gi, '-').slice(0, 40) + ext;
-  // Use same template-wrapping as downloadArtifactAsFile
-  let content = art.content;
-  const t = art.type;
-  try {
-    if (t === 'application/vnd.pimio.threejs') content = threejsTemplate(art.content);
-    else if (t === 'application/vnd.pimio.p5') content = p5Template(art.content);
-    else if (t === 'application/vnd.pimio.chartjs') content = chartjsTemplate(art.content);
-    else if (t === 'application/vnd.pimio.leaflet') content = leafletTemplate(art.content);
-    else if (t === 'application/vnd.pimio.math') content = katexTemplate(art.content);
-    else if (t === 'application/vnd.pimio.graphviz') content = graphvizTemplate(art.content);
-    else if (t === 'application/vnd.pimio.mindmap') content = mindmapTemplate(art.content);
-    else if (t === 'application/vnd.pimio.revealjs') content = revealTemplate(art.content);
-    else if (t === 'application/vnd.pimio.timeline') content = timelineTemplate(art.content);
-    else if (t === 'application/vnd.pimio.pyrepl') content = pyodideTemplate(art.content);
-    else if (t === 'application/vnd.pimio.tone') content = toneTemplate(art.content);
-    else if (t === 'application/vnd.pimio.shader') content = shaderTemplate(art.content);
-    else if (t === 'application/vnd.pimio.jsonviewer') content = jsonViewerTemplate(art.content);
-    else if (t === 'application/vnd.pimio.table') content = sortableTableTemplate(art.content);
-    else if (t === 'application/vnd.pimio.diff') content = diffTemplate(art.content);
-    else if (t === 'application/vnd.pimio.regex') content = regexTemplate(art.content);
-    else if (t === 'application/vnd.pimio.piano') content = pianoTemplate(art.content);
-    else if (t === 'application/vnd.pimio.flashcards') content = flashcardsTemplate(art.content);
-    else if (t === 'application/vnd.pimio.kanban') content = kanbanTemplate(art.content);
-    else if (t === 'application/vnd.ant.react') content = reactTemplate(art.content);
-  } catch (e) {}
-  workspaceWriteFile(slug, content);
+  const payload = artifactDownloadPayload(art);
+  const slug = (art.title || art.id).replace(/[^a-z0-9-]+/gi, '-').slice(0, 40) + payload.extension;
+  workspaceWriteFile(slug, payload.content);
 }
 
 // ===== Focus / Zen mode =====
@@ -2269,7 +2284,7 @@ function openHelp() {
   const types = document.getElementById('helpTypes');
   slash.innerHTML = slashCommands().map(c => `<div><span style="color:var(--accent)">${c.cmd}</span> <span style="color:var(--text-muted)">— ${escapeHtml(c.desc)}</span></div>`).join('');
   const TYPES = [
-    ...(window.Mio?.artifactLab?.catalog() || []).map((entry) => [entry.type, entry.description]),
+    ...(window.Mio?.artifactTypes?.catalog() || window.Mio?.artifactLab?.catalog() || []).map((entry) => [entry.type, entry.description]),
     ['text/html', 'Full HTML page'],
     ['image/svg+xml', 'Inline SVG'],
     ['text/markdown', 'Rendered markdown'],
@@ -2581,7 +2596,7 @@ async function shareActiveArtifact() {
 // ===== Command palette (⌘K) + slash commands =====
 const COMMANDS = [
   { id:'new-chat',    title:'New chat',           desc:'Start a fresh conversation', kbd:'⌘N', run: () => newChat() },
-  { id:'settings',    title:'Open settings',       desc:'System prompt, temperature, caveman', kbd:'⌘,', run: () => openSettings() },
+  { id:'settings',    title:'Open settings',       desc:'System prompt, temperature, prompt policy', kbd:'⌘,', run: () => openSettings() },
   { id:'theme',       title:'Toggle dark mode',    desc:'Switch light/dark',          kbd:'',   run: () => toggleDarkMode() },
   { id:'export',      title:'Export chat',         desc:'Download the current chat as Markdown', kbd:'',   run: () => exportChat() },
   { id:'share',       title:'Share current artifact', desc:'Copy a public link to the open artifact', kbd:'', run: () => shareActiveArtifact() },
@@ -2606,20 +2621,16 @@ const COMMANDS = [
       const v = prompt('ShaderToy ID or URL:');
       if (!v) return;
       try {
-        const r = await fetch('/ui/api/skills/run', {
-          method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ name: 'import_shadertoy', arguments: { id_or_url: v } }),
-        });
-        const data = await r.json();
-        if (data.error) alert(data.error);
+        const data = await window.Mio.api.runSkill('import_shadertoy', { id_or_url: v });
+        if (data.error) toast(data.error);
         else if (data.artifact_html) {
           const input = document.getElementById('inputArea');
           if (input) {
             input.value = `Imported ShaderToy ${data.id} by ${data.author} — show as artifact.\n\n<antArtifact identifier="shader-${data.id}" type="text/html" title="${data.title}">${data.artifact_html}</antArtifact>`;
             if (typeof sendMessage === 'function') sendMessage();
           }
-        }
-      } catch (e) { alert('Failed: ' + e.message); }
+        } else toast('ShaderToy import returned no artifact');
+      } catch (e) { toast('ShaderToy import failed: ' + e.message); }
     }},
 ];
 
@@ -2914,7 +2925,7 @@ function clearPersona() {
 // Compose the effective system prompt sent to the model: active persona
 // (if any) + per-chat override + user-configured custom system prompt.
 // Per-chat override wins over the global one when both are set. The
-// server still adds today's date, caveman mode, and tool protocol on top.
+// server still adds today's date, the selected prompt policy, and tool protocol on top.
 function _effectiveSystemPrompt() {
   const parts = [];
   if (_activePersona && _activePersona.prompt) parts.push(_activePersona.prompt);
@@ -2943,6 +2954,8 @@ function artifactFileUrl(art) {
 // under application/vnd.pimio.*. Accept both.
 function _normalizeArtifactType(t) {
   if (!t) return t;
+  const registered = window.Mio?.artifactTypes?.normalize(t);
+  if (registered && registered !== String(t).trim().toLowerCase()) return registered;
   const aliases = {
     // Claude-native types remain canonical because their renderers are keyed
     // under vnd.ant.*. These identity entries make normalization idempotent.
@@ -3023,7 +3036,7 @@ function _normalizeArtifactType(t) {
 
 function renderArtifactPreview(body, art) {
   art = { ...art, type: _normalizeArtifactType(art.type) };
-  if (window.Mio?.artifactLab?.render(body, art)) return;
+  if (window.Mio?.artifactTypes?.render(body, art) || window.Mio?.artifactLab?.render(body, art)) return;
   if (art.type === 'image/png' || art.type === 'image/jpeg' || art.type === 'image/jpg' || art.type === 'image/webp' || art.type === 'image/gif' || art.type.startsWith('image/') && art.type !== 'image/svg+xml') {
     const url = (art.content || '').trim();
     const wrap = document.createElement('div');
@@ -3549,8 +3562,20 @@ try {
     body.appendChild(makeSandboxedIframe(youtubeGridTemplate(art.content)));
     return;
   }
-  // Default: text/html
-  body.appendChild(makeSandboxedIframe(art.content));
+  if (art.type === 'text/html') {
+    body.appendChild(makeSandboxedIframe(art.content));
+    return;
+  }
+  const unsupported = document.createElement('section');
+  unsupported.className = 'artifact-unsupported';
+  const heading = document.createElement('h3');
+  heading.textContent = 'Renderer not installed';
+  const detail = document.createElement('p');
+  detail.textContent = `${art.type || 'Unknown type'} is preserved as source and was not executed.`;
+  const source = document.createElement('pre');
+  source.textContent = String(art.content || '');
+  unsupported.append(heading, detail, source);
+  body.appendChild(unsupported);
 }
 
 function makeSandboxedIframe(srcdoc, allowScripts = true) {
@@ -5224,10 +5249,83 @@ if (cfg) {
 }
 
 function nodeEditorTemplate(json) {
-  return `<!doctype html><html><head><meta charset="utf-8"><script src="https://cdn.jsdelivr.net/npm/rete@2.0.4/rete.min.js"><\/script><style>html,body,#e{margin:0;height:100vh;background:#1a1a1a;color:#eee;font-family:-apple-system,sans-serif}#h{padding:8px 14px;font-size:12px;color:#888;background:#222}</style></head>
-<body><div id="h" style="text-align:center;padding:40px">Loading Rete.js node editor… the model emitted a graph description:</div>
-<pre id="d" style="color:#888;font-family:ui-monospace,monospace;padding:20px;font-size:12px">${(typeof json === 'string' ? json : JSON.stringify(json, null, 2)).replace(/</g,'&lt;')}</pre>
-</body></html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+:root{color-scheme:dark}*{box-sizing:border-box}html,body{margin:0;height:100%;overflow:hidden;background:#0b0d12;color:#e8eaf0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.bar{height:48px;display:flex;align-items:center;gap:8px;padding:0 12px;border-bottom:1px solid #242833;background:#12151c}.bar strong{font-size:13px}.bar span{color:#858c9b;font-size:11px;flex:1}.bar button{border:1px solid #303747;border-radius:7px;background:#1b202b;color:#dce1eb;padding:6px 10px;cursor:pointer}.bar button:hover,.bar button:focus-visible{border-color:#6d8cff;outline:none}
+#viewport{position:relative;height:calc(100% - 48px);overflow:auto;background-color:#0b0d12;background-image:radial-gradient(#2b3140 1px,transparent 1px);background-size:20px 20px}.stage{position:relative;width:1800px;height:1100px}svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}.edge{fill:none;stroke:#65718a;stroke-width:2}.edge-label{fill:#98a2b8;font:10px ui-monospace,monospace}.node{position:absolute;width:190px;min-height:92px;border:1px solid #343b4b;border-radius:11px;background:#181c25;box-shadow:0 12px 30px #0007;overflow:hidden;touch-action:none}.node.dragging{border-color:#7c9cff;box-shadow:0 16px 40px #000a}.node-head{display:flex;align-items:center;gap:8px;padding:10px 11px;background:#202532;cursor:grab;font-weight:650;font-size:12px}.node-head:active{cursor:grabbing}.node-dot{width:9px;height:9px;border-radius:50%;background:#6d8cff}.node-kind{margin-left:auto;color:#8e97aa;font:9px ui-monospace,monospace;text-transform:uppercase}.node-body{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:10px;color:#aeb6c6;font:10px/1.4 ui-monospace,monospace}.ports:last-child{text-align:right}.port{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.port::before{content:'●';color:#58637a;margin-right:4px}.ports:last-child .port::before{content:''}.ports:last-child .port::after{content:' ●';color:#6d8cff}.empty{position:absolute;left:50%;top:45%;transform:translate(-50%,-50%);padding:18px 22px;border:1px dashed #394153;border-radius:12px;color:#8d96a8;text-align:center}.error{margin:18px;padding:14px;border:1px solid #713e47;border-radius:9px;background:#2a151b;color:#ffb4bf;font:12px/1.5 ui-monospace,monospace;white-space:pre-wrap}
+</style></head><body>
+<header class="bar"><strong>Node graph</strong><span id="summary">Loading graph…</span><button id="add" type="button">Add node</button><button id="layout" type="button">Auto layout</button><button id="fit" type="button">Center</button></header>
+<main id="viewport"><div class="stage" id="stage"><svg id="edges" aria-hidden="true"></svg><div id="nodes"></div></div></main>
+<script>
+'use strict';
+const input = ${safeJSONForScript(json)};
+const viewport = document.getElementById('viewport');
+const nodeLayer = document.getElementById('nodes');
+const edgeLayer = document.getElementById('edges');
+const summary = document.getElementById('summary');
+const NS = 'http://www.w3.org/2000/svg';
+let graph;
+try {
+  const parsed = typeof input === 'string' ? JSON.parse(input || '{}') : (input || {});
+  graph = Array.isArray(parsed) ? {nodes:parsed,connections:[]} : parsed;
+  if (!graph || typeof graph !== 'object' || !Array.isArray(graph.nodes)) throw new Error('Expected {nodes:[...], connections:[...]}');
+} catch (error) {
+  const panel = document.createElement('pre'); panel.className = 'error'; panel.textContent = 'Invalid node graph\n' + error.message; viewport.replaceChildren(panel); throw error;
+}
+const nodes = graph.nodes.slice(0,80).map((raw,index) => ({
+  id:String(raw && (raw.id ?? raw.key) || 'node-'+(index+1)).slice(0,80),
+  label:String(raw && (raw.label ?? raw.name ?? raw.title) || 'Node '+(index+1)).slice(0,80),
+  kind:String(raw && (raw.type ?? raw.kind) || 'process').slice(0,30),
+  inputs:Array.isArray(raw && raw.inputs) ? raw.inputs.slice(0,8).map(String) : [],
+  outputs:Array.isArray(raw && raw.outputs) ? raw.outputs.slice(0,8).map(String) : [],
+  x:Number.isFinite(Number(raw && raw.x)) ? Number(raw.x) : 80+(index%5)*290,
+  y:Number.isFinite(Number(raw && raw.y)) ? Number(raw.y) : 70+Math.floor(index/5)*180,
+  color:/^#[0-9a-f]{6}$/i.test(String(raw && raw.color || '')) ? String(raw.color) : '#6d8cff'
+}));
+const connections = (Array.isArray(graph.connections) ? graph.connections : Array.isArray(graph.edges) ? graph.edges : []).slice(0,160).map((raw) => ({
+  from:String(raw && (raw.from ?? raw.source ?? raw.source_id) || ''),
+  to:String(raw && (raw.to ?? raw.target ?? raw.target_id) || ''),
+  label:String(raw && raw.label || '').slice(0,60)
+})).filter((edge) => edge.from && edge.to);
+const elements = new Map();
+
+function portColumn(values, fallback) {
+  const column = document.createElement('div'); column.className = 'ports';
+  const items = values.length ? values : [fallback];
+  for (const value of items) { const port = document.createElement('span'); port.className = 'port'; port.textContent = value; column.append(port); }
+  return column;
+}
+function mountNode(node) {
+  const card = document.createElement('article'); card.className = 'node'; card.dataset.nodeId = node.id; card.style.left = node.x+'px'; card.style.top = node.y+'px';
+  const head = document.createElement('div'); head.className = 'node-head'; head.tabIndex = 0;
+  const dot = document.createElement('span'); dot.className = 'node-dot'; dot.style.background = node.color;
+  const label = document.createElement('span'); label.textContent = node.label;
+  const kind = document.createElement('span'); kind.className = 'node-kind'; kind.textContent = node.kind;
+  head.append(dot,label,kind);
+  const body = document.createElement('div'); body.className = 'node-body'; body.append(portColumn(node.inputs,'input'),portColumn(node.outputs,'output'));
+  card.append(head,body); nodeLayer.append(card); elements.set(node.id,card);
+  let drag = null;
+  head.addEventListener('pointerdown',(event)=>{ drag={x:event.clientX,y:event.clientY,left:node.x,top:node.y}; card.classList.add('dragging'); head.setPointerCapture(event.pointerId); });
+  head.addEventListener('pointermove',(event)=>{ if(!drag)return; node.x=Math.max(0,drag.left+event.clientX-drag.x); node.y=Math.max(0,drag.top+event.clientY-drag.y); card.style.left=node.x+'px'; card.style.top=node.y+'px'; drawEdges(); });
+  const stop=()=>{drag=null;card.classList.remove('dragging')}; head.addEventListener('pointerup',stop); head.addEventListener('pointercancel',stop);
+}
+function drawEdges() {
+  edgeLayer.replaceChildren();
+  for (const edge of connections) {
+    const source=elements.get(edge.from), target=elements.get(edge.to); if(!source||!target)continue;
+    const x1=source.offsetLeft+source.offsetWidth, y1=source.offsetTop+source.offsetHeight/2, x2=target.offsetLeft, y2=target.offsetTop+target.offsetHeight/2, bend=Math.max(50,Math.abs(x2-x1)*.45);
+    const path=document.createElementNS(NS,'path'); path.setAttribute('class','edge'); path.setAttribute('d','M '+x1+' '+y1+' C '+(x1+bend)+' '+y1+', '+(x2-bend)+' '+y2+', '+x2+' '+y2); edgeLayer.append(path);
+    if(edge.label){const text=document.createElementNS(NS,'text');text.setAttribute('class','edge-label');text.setAttribute('x',String((x1+x2)/2));text.setAttribute('y',String((y1+y2)/2-6));text.textContent=edge.label;edgeLayer.append(text);}
+  }
+}
+function autoLayout() { nodes.forEach((node,index)=>{node.x=80+(index%5)*290;node.y=70+Math.floor(index/5)*180;const card=elements.get(node.id);if(card){card.style.left=node.x+'px';card.style.top=node.y+'px';}});drawEdges(); }
+function center() { const width=Math.min(1500,Math.max(600,...nodes.map(n=>n.x+230))); const height=Math.min(900,Math.max(400,...nodes.map(n=>n.y+150))); viewport.scrollTo({left:Math.max(0,(width-viewport.clientWidth)/2),top:Math.max(0,(height-viewport.clientHeight)/2),behavior:'smooth'}); }
+nodes.forEach(mountNode); drawEdges(); summary.textContent=nodes.length+' nodes · '+connections.length+' connections';
+if(!nodes.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='No nodes yet. Add one to start a graph.';nodeLayer.append(empty);}
+document.getElementById('layout').onclick=autoLayout; document.getElementById('fit').onclick=center;
+document.getElementById('add').onclick=()=>{nodeLayer.querySelector('.empty')?.remove();const index=nodes.length;const node={id:'local-'+Date.now(),label:'New node',kind:'process',inputs:['input'],outputs:['output'],x:80+(index%5)*290,y:70+Math.floor(index/5)*180,color:'#6d8cff'};nodes.push(node);mountNode(node);drawEdges();summary.textContent=nodes.length+' nodes · '+connections.length+' connections';};
+addEventListener('resize',drawEdges);
+<\/script></body></html>`;
 }
 
 function abcMusicTemplate(src) {
@@ -5250,6 +5348,7 @@ document.getElementById('play').onclick = async () => {
 }
 
 function periodicTableTemplate(_) {
+  if (window.Mio?.artifactPeriodic?.template) return window.Mio.artifactPeriodic.template();
   const elements = [['H',1,'Hydrogen',1,1],['He',2,'Helium',18,1],['Li',3,'Lithium',1,2],['Be',4,'Beryllium',2,2],['B',5,'Boron',13,2],['C',6,'Carbon',14,2],['N',7,'Nitrogen',15,2],['O',8,'Oxygen',16,2],['F',9,'Fluorine',17,2],['Ne',10,'Neon',18,2],['Na',11,'Sodium',1,3],['Mg',12,'Magnesium',2,3],['Al',13,'Aluminum',13,3],['Si',14,'Silicon',14,3],['P',15,'Phosphorus',15,3],['S',16,'Sulfur',16,3],['Cl',17,'Chlorine',17,3],['Ar',18,'Argon',18,3],['K',19,'Potassium',1,4],['Ca',20,'Calcium',2,4],['Sc',21,'Scandium',3,4],['Ti',22,'Titanium',4,4],['V',23,'Vanadium',5,4],['Cr',24,'Chromium',6,4],['Mn',25,'Manganese',7,4],['Fe',26,'Iron',8,4],['Co',27,'Cobalt',9,4],['Ni',28,'Nickel',10,4],['Cu',29,'Copper',11,4],['Zn',30,'Zinc',12,4],['Ga',31,'Gallium',13,4],['Ge',32,'Germanium',14,4],['As',33,'Arsenic',15,4],['Se',34,'Selenium',16,4],['Br',35,'Bromine',17,4],['Kr',36,'Krypton',18,4]];
   return `<!doctype html><html><head><meta charset="utf-8"><style>
 body{margin:0;font-family:-apple-system,sans-serif;background:#0a0a0a;color:#eee;padding:20px;min-height:100vh}
@@ -7164,7 +7263,7 @@ function sendMessage() {
     messages: chatMessages.filter(m => m.role !== 'assistant' || m.content),
     tier: tier,
     max_tokens: currentConfig.max_tokens,
-    caveman: currentConfig.caveman,
+    ...promptPolicyRequestFields(),
     system_prompt: _effectiveSystemPrompt(),
     temperature: currentConfig.temperature,
     style: currentConfig.style || undefined,
@@ -7446,16 +7545,78 @@ async function generateChatTitle() {
 
 
 // ===== Controls =====
-let currentConfig = { caveman: 'lite', system_prompt: '', temperature: 0.0, max_tokens: 16384, voice_output: false, style: '' };
+let currentConfig = {
+  prompt_mode: 'caveman', prompt_level: 'full',
+  system_prompt: '', temperature: 0.0, max_tokens: 16384,
+  voice_output: false, style: '',
+};
 let modelInfo = {};
 let contextWindow = 131072;
+
+const PROMPT_MODES = ['none', 'caveman', 'ponytail'];
+const PROMPT_LEVELS = ['lite', 'full', 'ultra'];
+
+function parsePromptPolicyLabel(label) {
+  if (label === 'none') return { prompt_mode: 'none', prompt_level: null };
+  const match = /^(caveman|ponytail)\/(lite|full|ultra)$/.exec(String(label || '').toLowerCase());
+  return match ? { prompt_mode: match[1], prompt_level: match[2] } : null;
+}
+
+function normalizePromptPolicyConfig(cfg = {}) {
+  const labelled = parsePromptPolicyLabel(cfg.prompt_policy);
+  const modernMode = PROMPT_MODES.includes(cfg.prompt_mode) ? cfg.prompt_mode : null;
+  let promptMode = modernMode || labelled?.prompt_mode || null;
+  let promptLevel = PROMPT_LEVELS.includes(cfg.prompt_level) ? cfg.prompt_level : null;
+
+  // Legacy WebUI/config payloads exposed Caveman as off/lite/full/ultra.
+  // Only consult that shape when no modern mode was supplied.
+  const legacyCaveman = String(cfg.caveman ?? '').toLowerCase();
+  if (!promptMode && legacyCaveman) {
+    promptMode = legacyCaveman === 'off' ? 'none' : 'caveman';
+    if (PROMPT_LEVELS.includes(legacyCaveman)) promptLevel = legacyCaveman;
+  }
+  if (!promptMode) promptMode = 'caveman';
+  if (promptMode === 'none') return { prompt_mode: 'none', prompt_level: null };
+  if (!promptLevel && labelled?.prompt_mode === promptMode) promptLevel = labelled.prompt_level;
+  if (!promptLevel && promptMode === 'caveman' && PROMPT_LEVELS.includes(legacyCaveman)) {
+    promptLevel = legacyCaveman;
+  }
+  return { prompt_mode: promptMode, prompt_level: promptLevel || 'full' };
+}
+
+function promptPolicySettingValue(config = currentConfig) {
+  return config.prompt_mode === 'none'
+    ? 'none'
+    : `${config.prompt_mode}/${config.prompt_level || 'full'}`;
+}
+
+function promptPolicyDisplayLabel(config = currentConfig) {
+  if (config.prompt_mode === 'none') return 'None';
+  const mode = config.prompt_mode === 'ponytail' ? 'Ponytail' : 'Caveman';
+  const level = String(config.prompt_level || 'full');
+  return `${mode} ${level.charAt(0).toUpperCase()}${level.slice(1)}`;
+}
+
+function promptPolicyRequestFields(config = currentConfig) {
+  const fields = { prompt_mode: config.prompt_mode };
+  if (config.prompt_mode !== 'none') fields.prompt_level = config.prompt_level || 'full';
+  return fields;
+}
+
+function applyPromptPolicyConfig(cfg) {
+  const policy = normalizePromptPolicyConfig(cfg);
+  currentConfig.prompt_mode = policy.prompt_mode;
+  currentConfig.prompt_level = policy.prompt_level;
+  const label = document.getElementById('promptPolicyLabel');
+  if (label) label.textContent = 'Prompt: ' + promptPolicyDisplayLabel(policy);
+}
 
 async function loadConfig() {
   try {
     const res = await fetch('/ui/api/config');
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const cfg = await res.json();
-    currentConfig.caveman = cfg.caveman || 'lite';
+    applyPromptPolicyConfig(cfg);
     if (cfg.system_prompt !== undefined) currentConfig.system_prompt = cfg.system_prompt;
     if (cfg.temperature !== undefined) currentConfig.temperature = cfg.temperature;
     if (cfg.max_tokens !== undefined) currentConfig.max_tokens = cfg.max_tokens;
@@ -7470,7 +7631,6 @@ async function loadConfig() {
       select.appendChild(opt);
     });
     document.getElementById('metricModel').textContent = cfg.active_tier || '—';
-    document.getElementById('cavemanLabel').textContent = 'Caveman: ' + currentConfig.caveman;
     loadModelInfo();
   } catch (e) {
     if (window._flashInitError) window._flashInitError('loadConfig', e);
@@ -7650,7 +7810,7 @@ function openSettings() {
   const ov = document.getElementById('settingsOverlay');
   ov.classList.add('open');
   document.getElementById('settSystemPrompt').value = currentConfig.system_prompt || '';
-  document.getElementById('settCaveman').value = currentConfig.caveman;
+  document.getElementById('settPromptPolicy').value = promptPolicySettingValue();
   document.getElementById('settTemp').value = currentConfig.temperature;
   document.getElementById('settTempVal').textContent = Number(currentConfig.temperature).toFixed(1);
   document.getElementById('settMaxTok').value = currentConfig.max_tokens;
@@ -7844,21 +8004,40 @@ function closeSettings() {
 }
 
 async function saveSettings() {
-  currentConfig.system_prompt = document.getElementById('settSystemPrompt').value;
-  currentConfig.caveman = document.getElementById('settCaveman').value;
-  currentConfig.temperature = parseFloat(document.getElementById('settTemp').value);
-  currentConfig.max_tokens = parseInt(document.getElementById('settMaxTok').value);
+  const policy = parsePromptPolicyLabel(document.getElementById('settPromptPolicy').value);
+  if (!policy) {
+    toast('Choose a valid prompt policy');
+    return;
+  }
+  const candidate = {
+    ...currentConfig,
+    ...policy,
+    system_prompt: document.getElementById('settSystemPrompt').value,
+    temperature: parseFloat(document.getElementById('settTemp').value),
+    max_tokens: parseInt(document.getElementById('settMaxTok').value),
+  };
   const sStyle = document.getElementById('settStyle');
-  if (sStyle) currentConfig.style = sStyle.value;
-  document.getElementById('cavemanLabel').textContent = 'Caveman: ' + currentConfig.caveman;
+  if (sStyle) candidate.style = sStyle.value;
+  const body = { ...candidate, ...promptPolicyRequestFields(candidate) };
+  delete body.caveman;
+  if (candidate.prompt_mode === 'none') delete body.prompt_level;
   try {
-    await fetch('/ui/api/config', {
+    const response = await fetch('/ui/api/config', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(currentConfig),
+      body: JSON.stringify(body),
     });
-  } catch (e) {}
-  closeSettings();
+    let saved = {};
+    try { saved = await response.json(); } catch (_) {}
+    if (!response.ok || saved.ok === false) {
+      throw new Error(saved.detail || saved.error || `HTTP ${response.status}`);
+    }
+    Object.assign(currentConfig, candidate);
+    applyPromptPolicyConfig(saved);
+    closeSettings();
+  } catch (e) {
+    toast('Settings not saved: ' + (e?.message || String(e)));
+  }
 }
 
 // Settings range live update + welcome chip randomizer
@@ -7987,7 +8166,7 @@ function saveEdit(index) {
   ws.send(JSON.stringify({
     action: 'chat',
     messages: chatMessages.filter(m => m.role !== 'assistant' || m.content),
-    tier, max_tokens: currentConfig.max_tokens, caveman: currentConfig.caveman,
+    tier, max_tokens: currentConfig.max_tokens, ...promptPolicyRequestFields(),
     system_prompt: _effectiveSystemPrompt(),
   }));
 }
