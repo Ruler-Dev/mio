@@ -352,6 +352,13 @@ def test_context_specific_transition_precedes_global_fallback() -> None:
     assert ctrl.decide(math_state).transition_source == "global"
 
 
+def test_frozen_transition_estimates_have_stable_public_order() -> None:
+    alternative = estimate(ControllerAction.GENERATE_ALTERNATIVE, context="zeta")
+    repair = estimate(ControllerAction.GENERATE_REPAIR, context="alpha")
+    model = FrozenTransitionModel(CALIBRATION_IDENTITY, (alternative, repair))
+    assert model.estimates == (repair, alternative)
+
+
 def test_token_and_latency_budgets_gate_before_generation() -> None:
     token_limited = EffortProfile(
         max_candidates=2,

@@ -301,6 +301,18 @@ class FrozenTransitionModel:
             rows[key] = estimate
         self._rows = MappingProxyType(rows)
 
+    @property
+    def estimates(self) -> tuple[TransitionEstimate, ...]:
+        """Return a stable immutable snapshot for provenance serialization."""
+
+        return tuple(
+            self._rows[key]
+            for key in sorted(
+                self._rows,
+                key=lambda item: (item[0], item[1].value, item[2], item[3].value),
+            )
+        )
+
     def lookup(
         self,
         *,
