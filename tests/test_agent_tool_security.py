@@ -427,6 +427,57 @@ def test_sandbox_runtime_roots_are_readable_but_never_writable(tmp_path):
 
 
 @pytest.mark.skipif(platform.system() != "Darwin", reason="macOS inherited sandbox")
+def test_sandbox_can_exec_direct_command_while_denying_child_forks(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    events: list[AgentAuditEvent] = []
+    policy = _policy(
+        workspace,
+        {AgentToolPermission.READ, AgentToolPermission.SHELL},
+        events,
+    )
+
+    direct_argv, environment = agent.sandboxed_command(
+        ["/bin/sh", "-c", "exec /usr/bin/printf direct-ok"],
+        policy,
+        allow_process_fork=False,
+    )
+    direct = agent._run_bounded_process(
+        direct_argv,
+        cwd=workspace,
+        env=environment,
+        timeout_s=policy.command_timeout_s,
+        output_limit_chars=policy.output_limit_chars,
+    )
+    assert direct.returncode == 0
+    assert direct.output == "direct-ok"
+    assert "(allow process-exec)" in direct_argv[2]
+    assert "process-fork" not in direct_argv[2]
+
+    child_argv, environment = agent.sandboxed_command(
+        [
+            "/bin/sh",
+            "-c",
+            "/usr/bin/printf subprocess-allowed | /usr/bin/cat",
+        ],
+        policy,
+        allow_process_fork=False,
+    )
+    child = agent._run_bounded_process(
+        child_argv,
+        cwd=workspace,
+        env=environment,
+        timeout_s=policy.command_timeout_s,
+        output_limit_chars=policy.output_limit_chars,
+    )
+
+    assert child.returncode != 0
+    assert "Operation not permitted" in child.output
+    assert "subprocess-allowed" not in child.output
+    assert not list(workspace.iterdir())
+
+
+@pytest.mark.skipif(platform.system() != "Darwin", reason="macOS inherited sandbox")
 def test_sandbox_runtime_roots_share_the_hardlink_preflight(tmp_path):
     workspace = tmp_path / "workspace"
     runtime = tmp_path / "runtime"

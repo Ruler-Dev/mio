@@ -561,6 +561,7 @@ def sandboxed_command(
     policy: AgentToolPolicy,
     *,
     read_only_roots: Iterable[str | os.PathLike[str]] = (),
+    allow_process_fork: bool = True,
 ) -> tuple[list[str], dict[str, str]]:
     """Wrap one command in a workspace-confined inherited process sandbox.
 
@@ -610,10 +611,15 @@ def sandboxed_command(
     ancestor_metadata = " ".join(
         f"(literal {_sandbox_string(ancestor)})" for ancestor in ancestor_roots
     )
+    process_rule = (
+        "(allow process-fork process-exec)"
+        if allow_process_fork
+        else "(allow process-exec)"
+    )
     rules = [
         "(version 1)",
         "(deny default)",
-        "(allow process-fork process-exec)",
+        process_rule,
         "(allow process-info* signal (target self) (target children))",
         "(allow sysctl-read)",
         # Prevent descendants from escaping the trusted supervisor's process
