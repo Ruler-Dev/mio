@@ -91,6 +91,13 @@ weights and reviewed external skill repositories are intentionally installed
 separately: they are large, independently licensed, and live outside the
 Python package.
 
+The compatible-minor dependency window is currently validated with MLX
+`0.32.0`, mlx-lm `0.31.3`, dflash-mlx `0.1.8`, mlx-dspark `0.5.0`, mlx-vlm
+`0.6.5`, mlx-audio `0.4.4`, huggingface-hub `1.24.0`, and transformers
+`5.14.1`. Run `python3 -m pip check` after an upgrade; these are environment
+checks, not inference benchmark results. Mio generation remains text-only:
+installing mlx-vlm does not yet certify image-in-prompt inference.
+
 ## Qwen 3.6 27B speculative stack
 
 The `large` tier uses the Qwen 3.6 27B MLX target, prefers its compatible

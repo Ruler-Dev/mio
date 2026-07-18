@@ -29,6 +29,15 @@ python3 -m pip check
 python3 -c 'import mlx; print(mlx.__version__)'
 ```
 
+The current validated development environment uses MLX `0.32.0`, mlx-lm
+`0.31.3`, dflash-mlx `0.1.8`, mlx-dspark `0.5.0`, mlx-vlm `0.6.5`, mlx-audio
+`0.4.4`, huggingface-hub `1.24.0`, and transformers `5.14.1`. mlx-audio is a
+required transitive dependency of mlx-vlm. Its `0.4.5` release constrains
+transformers below the version required by mlx-vlm `0.6.5`, so Mio explicitly
+holds the latest compatible leaf, `0.4.4`, instead of relying on pip's silent
+backtracking. These VLM utilities are dependency-compatible, but Mio's current
+generation path is still text-only and does not certify image-in-prompt use.
+
 ## Download the tested Qwen 3.6 stack
 
 ```bash
