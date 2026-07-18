@@ -15,16 +15,28 @@ accepted as a prediction.
 from __future__ import annotations
 
 import copy
+import hashlib
+import importlib.metadata
+import json
 import os
+import platform
+import re
+import stat
 import subprocess
+import sys
+import sysconfig
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Protocol
 
-from scripts import bench_swebench_quality as protocol
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts import bench_swebench_quality as protocol  # noqa: E402
 
 GENERATION_SCHEMA = f"{protocol.SCHEMA}.paired-generation-runner.v1"
 GENERATION_RUN_HEADER_SCHEMA = f"{GENERATION_SCHEMA}.run-header"
@@ -44,11 +56,61 @@ FROZEN_COMMAND_TIMEOUT_SECONDS = 300.0
 CONFIRMATORY_GENERATION_ENABLED = False
 CONFIRMATORY_BLOCKERS = (
     "v2_efficiency_guardrail_and_content_free_round_telemetry",
-    "trusted_automatic_mio_model_and_runtime_fingerprints",
+    "end_to_end_automatic_chain_of_custody_requires_clean_subprocess_or_in_memory_provenance",
     "v2_wall_overrun_adjudication",
     "v2_storage_bounded_external_object_strategy",
     "pinned_x86_64_official_evaluation_image_digests",
 )
+AUTOMATIC_ATTESTATION_SCHEMA = f"{GENERATION_SCHEMA}.automatic-attestation.v1"
+RUNTIME_ATTESTATION_SCHEMA = f"{AUTOMATIC_ATTESTATION_SCHEMA}.runtime"
+AUTOMATIC_BINDING_SOURCE = "automatic_preflight_local_v1"
+NON_EVIDENCE_BINDING_SOURCE = "caller_supplied_non_evidence_smoke_v1"
+_MIO_REQUIRED_TRACKED_PATHS = (
+    "mio/__init__.py",
+    "pyproject.toml",
+    "scripts/run_swebench_quality_generation.py",
+)
+_RUNTIME_RELEVANT_SOURCE_SUFFIXES = frozenset({".dylib", ".jinja", ".json", ".metal", ".py", ".pyi", ".so", ".toml"})
+_CRITICAL_RUNTIME_DISTRIBUTIONS = (
+    "dflash-mlx",
+    "huggingface-hub",
+    "jinja2",
+    "mlx",
+    "mlx-dspark",
+    "mlx-lm",
+    "numpy",
+    "rich",
+    "safetensors",
+    "tokenizers",
+    "transformers",
+)
+_RUNTIME_ENVIRONMENT_NAMES = frozenset(
+    {
+        "ACCELERATE_USE_CPU",
+        "DYLD_LIBRARY_PATH",
+        "HOME",
+        "LD_LIBRARY_PATH",
+        "OMP_NUM_THREADS",
+        "PATH",
+        "PYTHONHASHSEED",
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "SHELL",
+        "TMPDIR",
+        "VECLIB_MAXIMUM_THREADS",
+    }
+)
+_RUNTIME_ENVIRONMENT_PREFIXES = (
+    "ACCELERATE_",
+    "HF_",
+    "METAL_",
+    "MIO_",
+    "MLX_",
+    "TOKENIZERS_",
+    "TRANSFORMERS_",
+)
+_DISTRIBUTION_NAME_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\Z")
+_AUTOMATIC_ATTESTATION_SEAL = object()
 MODEL_INSTRUCTION_TEMPLATE = (
     "Repository: {repo}\n"
     "Base commit: {base_commit}\n\n"
@@ -96,19 +158,580 @@ def _assert_no_visible_git(workspace: Path) -> None:
         raise protocol.ProtocolError("model-visible workspace scan was incomplete")
 
 
+def _canonical_local_directory(path: Path, label: str) -> Path:
+    """Resolve one caller path without accepting symlink or spelling aliases."""
+
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        raise protocol.ProtocolError(f"{label} must be an absolute canonical path")
+    protocol._reject_symlink_path_components(candidate)
+    try:
+        resolved = candidate.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise protocol.ProtocolError(f"{label} does not exist") from exc
+    if candidate != resolved or not resolved.is_dir():
+        raise protocol.ProtocolError(f"{label} must be an ordinary canonical directory, not an alias")
+
+    # Case-insensitive filesystems can resolve a differently-cased spelling to
+    # the same inode without reporting a symlink.  Require every supplied path
+    # component to match the directory entry byte-for-byte as well.
+    current = Path(resolved.anchor)
+    for component in resolved.parts[1:]:
+        try:
+            names = {entry.name for entry in os.scandir(current)}
+        except OSError as exc:
+            raise protocol.ProtocolError(f"cannot inspect canonical {label}") from exc
+        if component not in names:
+            raise protocol.ProtocolError(f"{label} uses a filesystem spelling alias")
+        current /= component
+    return resolved
+
+
+def _hash_regular_attestation_file(path: Path, label: str) -> tuple[int, str]:
+    """Hash a stable regular file descriptor and reject link-swap races."""
+
+    descriptor = -1
+    digest = hashlib.sha256()
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        descriptor = os.open(path, flags)
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise protocol.ProtocolError(f"{label} is not a regular file")
+        while True:
+            block = os.read(descriptor, 8 * 1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+        after = os.fstat(descriptor)
+        named = os.stat(path, follow_symlinks=False)
+    except protocol.ProtocolError:
+        raise
+    except OSError as exc:
+        raise protocol.ProtocolError(f"cannot hash {label}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    before_identity = (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    )
+    after_identity = (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    )
+    named_identity = (
+        named.st_dev,
+        named.st_ino,
+        named.st_size,
+        named.st_mtime_ns,
+        named.st_ctime_ns,
+    )
+    if before_identity != after_identity or after_identity != named_identity:
+        raise protocol.ProtocolError(f"{label} changed while it was fingerprinted")
+    return before.st_size, digest.hexdigest()
+
+
+def _clean_git_document(repo_root: Path) -> dict[str, Any]:
+    _assert_executing_mio_tree(repo_root)
+    top_level = protocol._run_git(repo_root, ["rev-parse", "--show-toplevel"]).decode().strip()
+    try:
+        observed_root = Path(top_level).resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise protocol.ProtocolError("Mio Git root is unavailable") from exc
+    if observed_root != repo_root:
+        raise protocol.ProtocolError("attested Mio path is not the exact Git worktree root")
+
+    def snapshot() -> tuple[str, str]:
+        status = protocol._run_git(
+            repo_root,
+            ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"],
+        )
+        if status:
+            raise protocol.ProtocolError("automatic attestation requires a clean Mio worktree with no untracked files")
+        head = protocol._run_git(repo_root, ["rev-parse", "--verify", "HEAD^{commit}"]).decode().strip()
+        tree = protocol._run_git(repo_root, ["rev-parse", "--verify", "HEAD^{tree}"]).decode().strip()
+        _require_commit(head, "attested Mio HEAD")
+        _require_commit(tree, "attested Mio tree")
+        return head, tree
+
+    before = snapshot()
+    tracked = {
+        os.fsdecode(value)
+        for value in protocol._run_git(
+            repo_root,
+            ["ls-files", "-z", "--", *_MIO_REQUIRED_TRACKED_PATHS],
+        ).split(b"\0")
+        if value
+    }
+    if tracked != set(_MIO_REQUIRED_TRACKED_PATHS):
+        raise protocol.ProtocolError("automatic attestation target is not the required Mio source tree")
+    ignored = {
+        os.fsdecode(value)
+        for value in protocol._run_git(
+            repo_root,
+            [
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "-z",
+                "--",
+                "mio",
+                "scripts",
+                "experimental",
+            ],
+        ).split(b"\0")
+        if value
+    }
+    runtime_relevant_ignored = sorted(
+        path
+        for path in ignored
+        if Path(path).suffix.casefold() in _RUNTIME_RELEVANT_SOURCE_SUFFIXES and "__pycache__" not in Path(path).parts
+    )
+    if runtime_relevant_ignored:
+        raise protocol.ProtocolError("Mio source tree contains ignored runtime-relevant files")
+    for relative_path in _MIO_REQUIRED_TRACKED_PATHS:
+        candidate = repo_root / relative_path
+        try:
+            metadata = candidate.lstat()
+        except OSError as exc:
+            raise protocol.ProtocolError("required Mio source file is unavailable") from exc
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise protocol.ProtocolError("required Mio source file must be regular and single-link")
+    after = snapshot()
+    if after != before:
+        raise protocol.ProtocolError("Mio HEAD changed while it was automatically attested")
+    return {
+        "head_commit": before[0],
+        "head_tree": before[1],
+        "required_tracked_paths": list(_MIO_REQUIRED_TRACKED_PATHS),
+        "worktree_clean": True,
+        "untracked_files": 0,
+        "ignored_runtime_relevant_files": 0,
+    }
+
+
+def _assert_executing_mio_tree(repo_root: Path) -> None:
+    """Bind the clean checkout to the Python source that is actually running."""
+
+    executing_root = Path(__file__).resolve(strict=True).parents[1]
+    if executing_root != repo_root:
+        raise protocol.ProtocolError("attested Mio repository differs from the executing runner source tree")
+
+    from experimental.effort import model_identity
+    from mio import agent, agent_policy, coding_quality, engine
+
+    modules = (
+        sys.modules[__name__],
+        protocol,
+        model_identity,
+        agent,
+        agent_policy,
+        coding_quality,
+        engine,
+    )
+    relative_origins = []
+    for module in modules:
+        raw_origin = getattr(module, "__file__", None)
+        if not isinstance(raw_origin, str):
+            raise protocol.ProtocolError("critical Mio runtime module has no filesystem origin")
+        try:
+            origin = Path(raw_origin).resolve(strict=True)
+            relative = origin.relative_to(repo_root).as_posix()
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise protocol.ProtocolError("critical Mio runtime module was loaded outside the attested tree") from exc
+        metadata = origin.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise protocol.ProtocolError("critical Mio runtime module must be regular and single-link")
+        relative_origins.append(relative)
+    tracked_origins = {
+        os.fsdecode(value)
+        for value in protocol._run_git(
+            repo_root,
+            ["ls-files", "-z", "--", *sorted(relative_origins)],
+        ).split(b"\0")
+        if value
+    }
+    if tracked_origins != set(relative_origins):
+        raise protocol.ProtocolError("critical executing Mio runtime module is not tracked by attested HEAD")
+
+
+def _local_model_document(model_root: Path) -> dict[str, Any]:
+    from experimental.effort.model_identity import ModelIdentityError, fingerprint_local_model
+
+    try:
+        fingerprint = fingerprint_local_model(model_root)
+    except ModelIdentityError as exc:
+        raise protocol.ProtocolError(f"cannot automatically fingerprint local MLX target: {exc}") from exc
+    if fingerprint.revision != protocol.EXPECTED_MODEL_IDENTITY:
+        raise protocol.ProtocolError(
+            "automatic local model fingerprint does not match the frozen Qwen 3.6 27B identity"
+        )
+    if not fingerprint.files or fingerprint.total_bytes <= 0:
+        raise protocol.ProtocolError("automatic local model fingerprint is incomplete")
+    for item in fingerprint.files:
+        relative = Path(item.relative_path)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise protocol.ProtocolError("automatic local model manifest contains an unsafe path")
+        candidate = model_root / relative
+        try:
+            metadata = candidate.lstat()
+        except OSError as exc:
+            raise protocol.ProtocolError("automatic local model manifest changed after hashing") from exc
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise protocol.ProtocolError("automatic local model files must be regular and single-link")
+        if metadata.st_size != item.size_bytes:
+            raise protocol.ProtocolError("automatic local model file size changed after hashing")
+    return {
+        "fingerprint_schema": fingerprint.schema,
+        "identity": fingerprint.revision,
+        "manifest_sha256": fingerprint.digest,
+        "file_count": len(fingerprint.files),
+        "total_bytes": fingerprint.total_bytes,
+        "complete_file_bytes_hashed": True,
+        "canonical_local_directory": True,
+        "single_link_files": True,
+    }
+
+
+def _canonical_distribution_name(value: str) -> str:
+    normalized = re.sub(r"[-_.]+", "-", value.strip().casefold())
+    if not _DISTRIBUTION_NAME_RE.fullmatch(normalized):
+        raise protocol.ProtocolError("installed distribution has an invalid canonical name")
+    return normalized
+
+
+def _installed_distribution_environment() -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    buckets: dict[str, list[Any]] = {}
+    for distribution in importlib.metadata.distributions():
+        raw_name = distribution.metadata.get("Name")
+        version = distribution.version
+        if not isinstance(raw_name, str) or not raw_name.strip() or not isinstance(version, str) or not version.strip():
+            raise protocol.ProtocolError("installed distribution metadata is incomplete")
+        name = _canonical_distribution_name(raw_name)
+        buckets.setdefault(name, []).append(distribution)
+    if not buckets:
+        raise protocol.ProtocolError("runtime distribution environment is empty")
+    critical: dict[str, Any] = {}
+    for name in _CRITICAL_RUNTIME_DISTRIBUTIONS:
+        candidates = buckets.get(name, [])
+        if len(candidates) != 1:
+            raise protocol.ProtocolError(f"critical runtime distribution must have one installation: {name}")
+        critical[name] = candidates[0]
+    installed = [
+        {
+            "name": name,
+            "installations": len(candidates),
+            "versions": sorted(distribution.version for distribution in candidates),
+        }
+        for name, candidates in sorted(buckets.items())
+    ]
+    return critical, installed
+
+
+def _distribution_content_document(name: str, distribution: Any) -> dict[str, Any]:
+    raw_files = distribution.files
+    if raw_files is None:
+        raise protocol.ProtocolError(f"critical runtime distribution lacks a file manifest: {name}")
+    files = sorted(raw_files, key=lambda item: item.as_posix())
+    if not files or len(files) > 25_000:
+        raise protocol.ProtocolError(f"critical runtime distribution file count is invalid: {name}")
+    rows = []
+    seen: set[str] = set()
+    total_bytes = 0
+    for item in files:
+        relative = item.as_posix()
+        if not relative or "\x00" in relative or "\\" in relative or relative in seen:
+            raise protocol.ProtocolError(f"critical runtime distribution manifest is ambiguous: {name}")
+        seen.add(relative)
+        candidate = Path(distribution.locate_file(item))
+        size_bytes, file_sha256 = _hash_regular_attestation_file(
+            candidate,
+            f"{name} runtime distribution file",
+        )
+        total_bytes += size_bytes
+        rows.append({"path": relative, "size_bytes": size_bytes, "sha256": file_sha256})
+    content_sha256 = protocol.sha256_bytes(
+        protocol.canonical_json_bytes(
+            {
+                "schema": f"{RUNTIME_ATTESTATION_SCHEMA}.distribution-content",
+                "name": name,
+                "version": distribution.version,
+                "files": rows,
+            }
+        )
+    )
+    return {
+        "name": name,
+        "version": distribution.version,
+        "file_count": len(rows),
+        "total_bytes": total_bytes,
+        "content_sha256": content_sha256,
+    }
+
+
+def _collect_runtime_document() -> dict[str, Any]:
+    critical_distributions, installed = _installed_distribution_environment()
+    critical_content = [
+        _distribution_content_document(name, critical_distributions[name]) for name in _CRITICAL_RUNTIME_DISTRIBUTIONS
+    ]
+    executable = Path(sys.executable).resolve(strict=True)
+    executable_size, executable_sha256 = _hash_regular_attestation_file(executable, "Python executable")
+    environment = [
+        {
+            "name": name,
+            "value_sha256": protocol.sha256_bytes(os.environ[name].encode("utf-8", errors="surrogateescape")),
+        }
+        for name in sorted(os.environ)
+        if name in _RUNTIME_ENVIRONMENT_NAMES
+        or any(name.startswith(prefix) for prefix in _RUNTIME_ENVIRONMENT_PREFIXES)
+    ]
+    return {
+        "schema": RUNTIME_ATTESTATION_SCHEMA,
+        "python": {
+            "implementation": platform.python_implementation(),
+            "version": platform.python_version(),
+            "cache_tag": str(getattr(sys.implementation, "cache_tag", "")),
+            "soabi": str(sysconfig.get_config_var("SOABI") or ""),
+            "build": list(platform.python_build()),
+            "executable_size_bytes": executable_size,
+            "executable_sha256": executable_sha256,
+        },
+        "platform": {
+            "system": platform.system(),
+            "release": platform.release(),
+            "machine": platform.machine(),
+        },
+        "environment": environment,
+        "installed_distributions": installed,
+        "critical_distribution_contents": critical_content,
+        "absolute_paths_serialized": False,
+        "environment_values_serialized": False,
+        "environment_value_hashes_serialized": True,
+        "full_package_inventory_serialized": True,
+    }
+
+
+@dataclass(frozen=True)
+class AutomaticGenerationAttestation:
+    """Preflight source/model/runtime state; not end-to-end evidence."""
+
+    repository_root: Path = field(repr=False, compare=False)
+    model_root: Path = field(repr=False, compare=False)
+    payload: bytes = field(repr=False)
+    private_runtime_payload: bytes = field(repr=False, compare=False)
+    _seal: object = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._seal is not _AUTOMATIC_ATTESTATION_SEAL:
+            raise protocol.ProtocolError("automatic generation attestation must be collected by the trusted path")
+        try:
+            document = json.loads(self.payload)
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise protocol.ProtocolError("automatic generation attestation payload is invalid") from exc
+        if protocol.canonical_json_bytes(document) != self.payload:
+            raise protocol.ProtocolError("automatic generation attestation is not canonical")
+        if (
+            document.get("schema") != AUTOMATIC_ATTESTATION_SCHEMA
+            or document.get("binding_source") != AUTOMATIC_BINDING_SOURCE
+            or document.get("automatic") is not True
+        ):
+            raise protocol.ProtocolError("automatic generation attestation schema is invalid")
+        try:
+            private_runtime = json.loads(self.private_runtime_payload)
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise protocol.ProtocolError("private runtime attestation payload is invalid") from exc
+        if protocol.canonical_json_bytes(private_runtime) != self.private_runtime_payload:
+            raise protocol.ProtocolError("private runtime attestation is not canonical")
+        if protocol.sha256_bytes(self.private_runtime_payload) != document.get("runtime", {}).get("digest"):
+            raise protocol.ProtocolError("public runtime digest differs from the private runtime manifest")
+
+    @classmethod
+    def collect(cls, *, repository_root: Path, model_root: Path) -> "AutomaticGenerationAttestation":
+        repository = _canonical_local_directory(repository_root, "Mio repository root")
+        model = _canonical_local_directory(model_root, "local model root")
+        git_document = _clean_git_document(repository)
+        model_document = _local_model_document(model)
+        runtime_document = _collect_runtime_document()
+        private_runtime_payload = protocol.canonical_json_bytes(runtime_document)
+        runtime_digest = protocol.sha256_bytes(private_runtime_payload)
+        critical_versions = [
+            {"name": row["name"], "version": row["version"]}
+            for row in runtime_document["critical_distribution_contents"]
+        ]
+        document = {
+            "schema": AUTOMATIC_ATTESTATION_SCHEMA,
+            "binding_source": AUTOMATIC_BINDING_SOURCE,
+            "automatic": True,
+            "git": git_document,
+            "model": model_document,
+            "runtime": {
+                "digest": runtime_digest,
+                "python": {
+                    "implementation": runtime_document["python"].get("implementation", "unavailable"),
+                    "version": runtime_document["python"].get("version", "unavailable"),
+                },
+                "critical_versions": critical_versions,
+            },
+            "privacy": {
+                "absolute_local_paths_serialized": False,
+                "environment_values_serialized": False,
+                "environment_value_hashes_serialized": False,
+                "full_package_inventory_serialized": False,
+                "private_runtime_manifest_retained_in_memory": True,
+            },
+            "end_to_end_confirmatory_chain_of_custody_proven": False,
+        }
+        return cls(
+            repository_root=repository,
+            model_root=model,
+            payload=protocol.canonical_json_bytes(document),
+            private_runtime_payload=private_runtime_payload,
+            _seal=_AUTOMATIC_ATTESTATION_SEAL,
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return json.loads(self.payload)
+
+    @property
+    def mio_commit(self) -> str:
+        return str(self.as_dict()["git"]["head_commit"])
+
+    @property
+    def model_identity(self) -> str:
+        return str(self.as_dict()["model"]["identity"])
+
+    @property
+    def runtime_digest(self) -> str:
+        return str(self.as_dict()["runtime"]["digest"])
+
+    def verify_current(self) -> None:
+        current = type(self).collect(
+            repository_root=self.repository_root,
+            model_root=self.model_root,
+        )
+        if current.payload == self.payload and current.private_runtime_payload == self.private_runtime_payload:
+            return
+        before = self.as_dict()
+        after = current.as_dict()
+        if before["git"] != after["git"]:
+            label = "Mio Git"
+        elif before["model"] != after["model"]:
+            label = "local model"
+        else:
+            label = "runtime/dependency environment"
+        raise protocol.ProtocolError(f"automatic {label} attestation drifted")
+
+
 @dataclass(frozen=True)
 class GenerationBinding:
-    """Trusted identities shared by all 1,000 arms."""
+    """Preflight identities shared by all arms; not end-to-end evidence."""
 
     mio_commit: str
     model_identity: str
     runtime_digest: str
+    binding_source: str
+    automatic_attestation: AutomaticGenerationAttestation | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         _require_commit(self.mio_commit, "Mio commit")
         if self.model_identity != protocol.EXPECTED_MODEL_IDENTITY:
             raise protocol.ProtocolError("generation must use the frozen Qwen 3.6 27B identity")
         _require_sha256(self.runtime_digest, "runtime digest")
+        if self.binding_source == AUTOMATIC_BINDING_SOURCE:
+            if not isinstance(self.automatic_attestation, AutomaticGenerationAttestation):
+                raise protocol.ProtocolError("automatic preflight binding requires an automatic attestation")
+            if (
+                self.mio_commit != self.automatic_attestation.mio_commit
+                or self.model_identity != self.automatic_attestation.model_identity
+                or self.runtime_digest != self.automatic_attestation.runtime_digest
+            ):
+                raise protocol.ProtocolError("generation binding differs from its automatic attestation")
+        elif self.binding_source == NON_EVIDENCE_BINDING_SOURCE:
+            if self.automatic_attestation is not None:
+                raise protocol.ProtocolError("caller-supplied smoke binding cannot claim automatic attestation")
+        else:
+            raise protocol.ProtocolError("generation binding source is not trusted or explicitly non-evidence")
+
+    @classmethod
+    def automatic_local(
+        cls,
+        *,
+        repository_root: Path,
+        model_root: Path,
+    ) -> "GenerationBinding":
+        attestation = AutomaticGenerationAttestation.collect(
+            repository_root=repository_root,
+            model_root=model_root,
+        )
+        return cls(
+            mio_commit=attestation.mio_commit,
+            model_identity=attestation.model_identity,
+            runtime_digest=attestation.runtime_digest,
+            binding_source=AUTOMATIC_BINDING_SOURCE,
+            automatic_attestation=attestation,
+        )
+
+    @classmethod
+    def for_non_evidence_smoke(
+        cls,
+        *,
+        mio_commit: str,
+        model_identity: str,
+        runtime_digest: str,
+    ) -> "GenerationBinding":
+        return cls(
+            mio_commit=mio_commit,
+            model_identity=model_identity,
+            runtime_digest=runtime_digest,
+            binding_source=NON_EVIDENCE_BINDING_SOURCE,
+        )
+
+    def validate_for_run(
+        self,
+        *,
+        evidence_run: bool,
+        executor: ArmExecutor | None = None,
+        tier_config: Any | None = None,
+        require_executor_binding: bool = False,
+    ) -> dict[str, Any]:
+        if self.binding_source != AUTOMATIC_BINDING_SOURCE:
+            if evidence_run:
+                raise protocol.ProtocolError("confirmatory generation requires automatic preflight fingerprints")
+            return _executor_model_binding_document(self, executor, tier_config)
+        assert self.automatic_attestation is not None
+        self.automatic_attestation.verify_current()
+        if executor is None:
+            if require_executor_binding:
+                raise protocol.ProtocolError("automatic generation requires a bound native Mio executor")
+            return {
+                "automatic": True,
+                "environment_reverified": True,
+                "model_identity": self.model_identity,
+            }
+        return _executor_model_binding_document(self, executor, tier_config)
+
+    def attestation_dict(self) -> dict[str, Any]:
+        if self.automatic_attestation is not None:
+            return self.automatic_attestation.as_dict()
+        return {
+            "schema": AUTOMATIC_ATTESTATION_SCHEMA,
+            "binding_source": NON_EVIDENCE_BINDING_SOURCE,
+            "automatic": False,
+            "confirmatory_evidence_admissible": False,
+            "caller_supplied_values": ["mio_commit", "model_identity", "runtime_digest"],
+        }
 
     def as_dict(self) -> dict[str, str]:
         return {
@@ -116,6 +739,73 @@ class GenerationBinding:
             "model_identity": self.model_identity,
             "runtime_digest": self.runtime_digest,
         }
+
+
+def _executor_model_binding_document(
+    binding: GenerationBinding,
+    executor: ArmExecutor | None,
+    supplied_tier_config: Any | None,
+) -> dict[str, Any]:
+    if binding.binding_source != AUTOMATIC_BINDING_SOURCE:
+        return {
+            "automatic": False,
+            "confirmatory_evidence_admissible": False,
+            "reason": "caller_supplied_non_evidence_smoke_binding",
+        }
+    from mio.config import MioConfig, TierConfig
+    from mio.engine import MioEngine
+    from mio.model_manager import ModelManager
+
+    if executor is None or type(executor) is not NativeMioArmExecutor:
+        raise protocol.ProtocolError("automatic generation requires the exact native Mio executor")
+    assert binding.automatic_attestation is not None
+    engine = executor.engine
+    if type(engine) is not MioEngine or type(executor.manager) is not ModelManager:
+        raise protocol.ProtocolError("automatic generation requires exact production engine and manager classes")
+    if type(executor.config) is not MioConfig or executor.config is not executor.manager.config:
+        raise protocol.ProtocolError("automatic generation requires the exact production Mio configuration")
+    if (
+        getattr(engine, "is_loaded", False) is not True
+        or getattr(engine, "_target_model", None) is None
+        or getattr(engine, "_tokenizer", None) is None
+    ):
+        raise protocol.ProtocolError("automatic generation requires an already loaded target engine")
+    tier_config = getattr(engine, "tier_config", None)
+    if type(tier_config) is not TierConfig or supplied_tier_config is not tier_config:
+        raise protocol.ProtocolError("supplied tier config is not the exact loaded engine tier config")
+    if executor.tier != tier_config.name or executor.config.tiers.get(executor.tier) is not tier_config:
+        raise protocol.ProtocolError("loaded engine tier is not bound to the production Mio configuration")
+    validate_target_only_tier(tier_config)
+    target_reference = getattr(tier_config, "target_model", None)
+    target_metadata = getattr(engine, "_target_meta", None)
+    resolved_reference = target_metadata.get("resolved_model_ref") if isinstance(target_metadata, Mapping) else None
+    if not isinstance(target_reference, str) or not isinstance(resolved_reference, (str, Path)):
+        raise protocol.ProtocolError("loaded target engine does not expose a verifiable local model reference")
+    configured_root = _canonical_local_directory(Path(target_reference), "configured target model root")
+    loaded_root = _canonical_local_directory(Path(resolved_reference), "loaded target model root")
+    if configured_root != binding.automatic_attestation.model_root or loaded_root != configured_root:
+        raise protocol.ProtocolError("loaded target engine differs from the automatically fingerprinted model")
+    loaded_tiers = getattr(executor.manager, "loaded_tiers", None)
+    get_engine = getattr(executor.manager, "get_engine", None)
+    if (
+        not callable(loaded_tiers)
+        or not callable(get_engine)
+        or executor.tier not in loaded_tiers()
+        or get_engine(executor.tier) is not engine
+    ):
+        raise protocol.ProtocolError("automatic generation manager is not bound to the attested target engine")
+    return {
+        "automatic": True,
+        "preflight_only": True,
+        "end_to_end_confirmatory_chain_of_custody_proven": False,
+        "executor": _implementation_identity(executor),
+        "engine": _implementation_identity(engine),
+        "manager": _implementation_identity(executor.manager),
+        "tier": executor.tier,
+        "engine_loaded": True,
+        "configured_and_loaded_model_paths_identical": True,
+        "model_identity": binding.model_identity,
+    }
 
 
 @dataclass(frozen=True)
@@ -347,12 +1037,14 @@ def build_run_header(
     tool_surface_sha256: str,
     executor: ArmExecutor,
     workspace_factory: WorkspaceFactory,
+    tier_config: Any,
 ) -> dict[str, Any]:
     """Bind smoke execution inputs before the first pair is admitted.
 
-    The current runner remains non-evidence until v2 replaces caller-supplied
-    identities with automatic fingerprints.  Even for smoke, however, resume
-    and receipt creation cannot re-declare a different factor or binding.
+    Caller-supplied identities are marked smoke-only.  The automatic path
+    records recomputable preflight digests, but does not claim clean-subprocess
+    or in-memory end-to-end provenance.  Resume and receipt creation cannot
+    re-declare a different factor or binding.
     """
 
     factor = factor_document(tool_surface_sha256)
@@ -366,6 +1058,8 @@ def build_run_header(
         "schedule_document_sha256": protocol.sha256_bytes(protocol.canonical_json_bytes(dict(schedule_document))),
         "dataset_public_snapshot_sha256": str(schedule_document["dataset_public_snapshot_sha256"]),
         "generation_binding": binding.as_dict(),
+        "generation_binding_attestation": binding.attestation_dict(),
+        "loaded_target_binding": _executor_model_binding_document(binding, executor, tier_config),
         "tool_surface_sha256": tool_surface_sha256,
         "factor_sha256": protocol.sha256_bytes(protocol.canonical_json_bytes(factor)),
         "factor": factor,
@@ -778,6 +1472,12 @@ def run_generation_pairs(
 
     layout = layout.validated()
     by_id, evidence_run = _validate_schedule_document(schedule_document, schedule)
+    binding.validate_for_run(
+        evidence_run=evidence_run,
+        executor=executor,
+        tier_config=tier_config,
+        require_executor_binding=True,
+    )
     if evidence_run and not CONFIRMATORY_GENERATION_ENABLED:
         raise protocol.ProtocolError(
             "confirmatory SWE-bench is blocked: this runner is smoke-only until every v2 control is frozen"
@@ -797,6 +1497,7 @@ def run_generation_pairs(
             tool_surface_sha256=surface_sha256,
             executor=executor,
             workspace_factory=workspace_factory,
+            tier_config=tier_config,
         ),
     )
     study_factor_sha256 = str(run_header["factor_sha256"])
@@ -976,6 +1677,10 @@ def build_generation_receipt(
     run_header = _load_run_header(layout)
     if run_header.get("generation_binding") != binding.as_dict():
         raise protocol.ProtocolError("receipt binding differs from the immutable run header")
+    evidence_run = run_header.get("evidence_class") == "confirmatory"
+    binding.validate_for_run(evidence_run=evidence_run)
+    if run_header.get("generation_binding_attestation") != binding.attestation_dict():
+        raise protocol.ProtocolError("receipt attestation differs from the immutable run header")
     if run_header.get("tool_surface_sha256") != tool_surface_sha256:
         raise protocol.ProtocolError("receipt tool surface differs from the immutable run header")
     if run_header.get("schedule_sha256") != protocol.schedule_digest(schedule):
@@ -1003,6 +1708,8 @@ def build_generation_receipt(
         "factor_sha256": run_header["factor_sha256"],
         "factor": run_header["factor"],
         "generation_binding": run_header["generation_binding"],
+        "generation_binding_attestation": run_header["generation_binding_attestation"],
+        "loaded_target_binding": run_header["loaded_target_binding"],
         "model_identity_checks": {
             "before_first_generation": observed_model_identity_before,
             "after_last_generation": observed_model_identity_after,

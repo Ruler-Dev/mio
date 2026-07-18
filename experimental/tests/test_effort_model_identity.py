@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from experimental.effort.model_identity import (
     main,
     resolve_model_reference,
 )
+from experimental.effort import model_identity
 
 
 def _write_model(root: Path, *, reverse: bool = False) -> None:
@@ -38,9 +40,7 @@ def test_local_fingerprint_is_path_and_creation_order_independent(tmp_path: Path
 
     assert left.digest == right.digest
     assert left.revision == f"{LOCAL_MODEL_REVISION_PREFIX}{left.digest}"
-    assert [row.relative_path for row in left.files] == sorted(
-        row.relative_path for row in left.files
-    )
+    assert [row.relative_path for row in left.files] == sorted(row.relative_path for row in left.files)
     assert "README.md" not in {row.relative_path for row in left.files}
 
 
@@ -97,6 +97,37 @@ def test_local_fingerprint_rejects_symlinks_and_missing_core_files(tmp_path: Pat
 
     with pytest.raises(ModelIdentityError, match="does not exist"):
         fingerprint_local_model(tmp_path / "not-there")
+
+
+def test_local_fingerprint_rejects_hardlinks_and_named_file_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = tmp_path / "model"
+    _write_model(model)
+    weights = model / "model.safetensors"
+    alias = tmp_path / "weights-alias"
+    os.link(weights, alias)
+    with pytest.raises(ModelIdentityError, match="single-link"):
+        fingerprint_local_model(model)
+    alias.unlink()
+
+    replacement = tmp_path / "replacement.safetensors"
+    replacement.write_bytes(b"weights-v2")
+    real_stat = os.stat
+    swapped = False
+
+    def swap_before_named_stat(path, *args, **kwargs):
+        nonlocal swapped
+        if Path(path) == weights and kwargs.get("follow_symlinks") is True and not swapped:
+            swapped = True
+            os.replace(replacement, weights)
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(model_identity.os, "stat", swap_before_named_stat)
+    with pytest.raises(ModelIdentityError, match="changed while it was fingerprinted"):
+        model_identity._hash_regular_file(weights)
+    assert swapped is True
 
 
 def test_remote_resolution_requires_full_commit_without_network() -> None:

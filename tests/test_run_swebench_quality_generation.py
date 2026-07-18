@@ -34,6 +34,133 @@ def _source_repo(tmp_path: Path) -> tuple[Path, str]:
     return source, _git(source, "rev-parse", "HEAD")
 
 
+def _attested_mio_repo(tmp_path: Path, name: str = "attested-mio") -> Path:
+    repository = tmp_path / name
+    (repository / "mio").mkdir(parents=True, mode=0o700)
+    (repository / "scripts").mkdir()
+    (repository / "mio" / "__init__.py").write_text("__version__ = 'test'\n", encoding="utf-8")
+    (repository / "pyproject.toml").write_text('[project]\nname = "mio"\n', encoding="utf-8")
+    (repository / "scripts" / "run_swebench_quality_generation.py").write_text(
+        "# attested test runner\n",
+        encoding="utf-8",
+    )
+    _git(repository, "init", "--quiet")
+    _git(repository, "config", "user.name", "Mio Test")
+    _git(repository, "config", "user.email", "mio@example.invalid")
+    _git(repository, "add", ".")
+    _git(repository, "commit", "--quiet", "-m", "attested source")
+    return repository.resolve(strict=True)
+
+
+def _local_model_bundle(tmp_path: Path, name: str = "attested-model") -> Path:
+    model = tmp_path / name
+    model.mkdir(mode=0o700)
+    (model / "config.json").write_text('{"model_type":"qwen-test"}\n', encoding="utf-8")
+    (model / "model-00001-of-00001.safetensors").write_bytes(b"complete-test-weight-bytes")
+    (model / "tokenizer.json").write_text('{"version":"1.0"}\n', encoding="utf-8")
+    return model.resolve(strict=True)
+
+
+def _runtime_document(marker: str = "stable") -> dict:
+    return {
+        "schema": runner.RUNTIME_ATTESTATION_SCHEMA,
+        "python": {"implementation": "CPython", "version": "test", "marker": marker},
+        "installed_distributions": [{"name": "mlx", "version": "test"}],
+        "critical_distribution_contents": [{"name": "mlx", "version": "test", "content_sha256": "a" * 64}],
+        "absolute_paths_serialized": False,
+        "environment_values_serialized": False,
+        "environment_value_hashes_serialized": True,
+        "full_package_inventory_serialized": True,
+    }
+
+
+def _automatic_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    name: str = "automatic",
+) -> tuple[runner.GenerationBinding, Path, Path]:
+    from experimental.effort.model_identity import fingerprint_local_model
+
+    repository = _attested_mio_repo(tmp_path, f"{name}-mio")
+    model = _local_model_bundle(tmp_path, f"{name}-model")
+    identity = fingerprint_local_model(model).revision
+    monkeypatch.setattr(protocol, "EXPECTED_MODEL_IDENTITY", identity)
+    monkeypatch.setattr(runner, "_collect_runtime_document", _runtime_document)
+    monkeypatch.setattr(runner, "_assert_executing_mio_tree", lambda _repository: None)
+    binding = runner.GenerationBinding.automatic_local(
+        repository_root=repository,
+        model_root=model,
+    )
+    return binding, repository, model
+
+
+def _native_executor_for_model(model: Path, *, tier_name: str = "large") -> runner.NativeMioArmExecutor:
+    from mio.config import MioConfig, TierConfig
+    from mio.engine import MioEngine
+    from mio.model_manager import ModelManager
+
+    tier_config = TierConfig(
+        name=tier_name,
+        target_model=str(model),
+        draft_model="disabled",
+        context_window=32_768,
+        max_output_tokens=4_096,
+        drafter_backend="target_ar",
+        tq_bits=16,
+        pq_bits=16,
+        bmp_paths=1,
+        ddtree_budget=0,
+        temperature=0.0,
+        top_p=1.0,
+        top_k=0,
+    )
+    engine = MioEngine(tier_config=tier_config)
+    engine._loaded = True
+    engine._target_model = object()
+    engine._tokenizer = object()
+    engine._target_meta = {"resolved_model_ref": str(model)}
+    manager = ModelManager(MioConfig(tiers={tier_name: tier_config}, active_tiers=[]))
+    manager._engines[tier_name] = engine
+    return runner.NativeMioArmExecutor(
+        engine=engine,
+        manager=manager,
+        config=manager.config,
+        tier=tier_name,
+    )
+
+
+def _duck_typed_native_executor_for_model(
+    model: Path,
+    *,
+    tier_name: str = "large",
+) -> runner.NativeMioArmExecutor:
+    tier_config = _tier()
+    tier_config.target_model = str(model)
+    engine = SimpleNamespace(
+        tier_config=tier_config,
+        is_loaded=True,
+        _target_model=object(),
+        _tokenizer=object(),
+        _target_meta={"resolved_model_ref": str(model)},
+    )
+
+    class Manager:
+        def loaded_tiers(self):
+            return [tier_name]
+
+        def get_engine(self, requested_tier):
+            assert requested_tier == tier_name
+            return engine
+
+    return runner.NativeMioArmExecutor(
+        engine=engine,
+        manager=Manager(),
+        config=object(),
+        tier=tier_name,
+    )
+
+
 def _instances(base_commit: str) -> tuple[protocol.PublicInstance, ...]:
     return tuple(
         protocol.PublicInstance(
@@ -89,7 +216,7 @@ def _agent_module():
 
 
 def _binding() -> runner.GenerationBinding:
-    return runner.GenerationBinding(
+    return runner.GenerationBinding.for_non_evidence_smoke(
         mio_commit="b" * 40,
         model_identity=protocol.EXPECTED_MODEL_IDENTITY,
         runtime_digest="d" * 64,
@@ -349,7 +476,7 @@ def test_generation_receipt_recomputes_factor_ledger_and_canonical_hashes(tmp_pa
         runner.seal_generation_receipt(
             schedule=schedule,
             layout=layout,
-            binding=runner.GenerationBinding(
+            binding=runner.GenerationBinding.for_non_evidence_smoke(
                 mio_commit="c" * 40,
                 model_identity=protocol.EXPECTED_MODEL_IDENTITY,
                 runtime_digest="e" * 64,
@@ -493,16 +620,280 @@ def test_receipt_verification_rejects_hardlinked_receipt_and_run_header(tmp_path
         )
 
 
+def test_automatic_binding_attests_exact_git_model_and_runtime_without_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binding, repository, model = _automatic_binding(tmp_path, monkeypatch)
+
+    binding.validate_for_run(evidence_run=True)
+    attestation = binding.attestation_dict()
+    serialized = json.dumps(attestation, sort_keys=True)
+    assert binding.binding_source == runner.AUTOMATIC_BINDING_SOURCE
+    assert binding.mio_commit == _git(repository, "rev-parse", "HEAD")
+    assert binding.model_identity == protocol.EXPECTED_MODEL_IDENTITY
+    assert attestation["git"]["worktree_clean"] is True
+    assert attestation["model"]["complete_file_bytes_hashed"] is True
+    assert attestation["model"]["manifest_sha256"] == binding.model_identity.removeprefix("local-sha256-v1:")
+    assert attestation["runtime"]["digest"] == binding.runtime_digest
+    assert attestation["runtime"]["critical_versions"] == [{"name": "mlx", "version": "test"}]
+    assert "manifest" not in attestation["runtime"]
+    assert "installed_distributions" not in serialized
+    assert "value_sha256" not in serialized
+    assert "content_sha256" not in serialized
+    assert attestation["privacy"] == {
+        "absolute_local_paths_serialized": False,
+        "environment_values_serialized": False,
+        "environment_value_hashes_serialized": False,
+        "full_package_inventory_serialized": False,
+        "private_runtime_manifest_retained_in_memory": True,
+    }
+    assert attestation["end_to_end_confirmatory_chain_of_custody_proven"] is False
+    assert any("chain_of_custody" in blocker for blocker in runner.CONFIRMATORY_BLOCKERS)
+    assert str(repository) not in serialized
+    assert str(model) not in serialized
+
+    executor = _native_executor_for_model(model)
+    header = runner.build_run_header(
+        schedule_document={
+            "evidence_class": "non_evidence_smoke",
+            "dataset_public_snapshot_sha256": "a" * 64,
+        },
+        schedule=(),
+        binding=binding,
+        tool_surface_sha256="b" * 64,
+        executor=executor,
+        workspace_factory=lambda **_kwargs: pytest.fail("header construction must not create a workspace"),
+        tier_config=executor.engine.tier_config,
+    )
+    header_serialized = json.dumps(header, sort_keys=True)
+    assert "installed_distributions" not in header_serialized
+    assert "value_sha256" not in header_serialized
+    assert "content_sha256" not in header_serialized
+
+
+@pytest.mark.parametrize("change", ["tracked", "untracked"])
+def test_automatic_binding_rejects_dirty_or_untracked_mio_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    from experimental.effort.model_identity import fingerprint_local_model
+
+    repository = _attested_mio_repo(tmp_path)
+    model = _local_model_bundle(tmp_path)
+    monkeypatch.setattr(protocol, "EXPECTED_MODEL_IDENTITY", fingerprint_local_model(model).revision)
+    monkeypatch.setattr(runner, "_collect_runtime_document", _runtime_document)
+    monkeypatch.setattr(runner, "_assert_executing_mio_tree", lambda _repository: None)
+    if change == "tracked":
+        (repository / "mio" / "__init__.py").write_text("changed = True\n", encoding="utf-8")
+    else:
+        (repository / "untracked.py").write_text("changed = True\n", encoding="utf-8")
+
+    with pytest.raises(protocol.ProtocolError, match="clean Mio worktree"):
+        runner.GenerationBinding.automatic_local(
+            repository_root=repository,
+            model_root=model,
+        )
+
+
+def test_automatic_binding_detects_git_model_and_runtime_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binding, repository, model = _automatic_binding(tmp_path, monkeypatch)
+    (repository / "untracked.py").write_text("drift = True\n", encoding="utf-8")
+    with pytest.raises(protocol.ProtocolError, match="clean Mio worktree"):
+        binding.validate_for_run(evidence_run=False)
+    (repository / "untracked.py").unlink()
+
+    (model / "model-00001-of-00001.safetensors").write_bytes(b"mutated-weight-bytes")
+    with pytest.raises(protocol.ProtocolError, match="does not match the frozen"):
+        binding.validate_for_run(evidence_run=False)
+    (model / "model-00001-of-00001.safetensors").write_bytes(b"complete-test-weight-bytes")
+
+    monkeypatch.setattr(runner, "_collect_runtime_document", lambda: _runtime_document("drifted"))
+    with pytest.raises(protocol.ProtocolError, match="runtime/dependency environment.*drifted"):
+        binding.validate_for_run(evidence_run=False)
+
+
+def test_automatic_binding_rejects_model_path_alias_and_hardlinked_weights(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from experimental.effort.model_identity import fingerprint_local_model
+
+    repository = _attested_mio_repo(tmp_path)
+    model = _local_model_bundle(tmp_path)
+    monkeypatch.setattr(protocol, "EXPECTED_MODEL_IDENTITY", fingerprint_local_model(model).revision)
+    monkeypatch.setattr(runner, "_collect_runtime_document", _runtime_document)
+    monkeypatch.setattr(runner, "_assert_executing_mio_tree", lambda _repository: None)
+    alias = tmp_path / "model-alias"
+    alias.symlink_to(model, target_is_directory=True)
+
+    with pytest.raises(protocol.ProtocolError, match="symlink component"):
+        runner.GenerationBinding.automatic_local(
+            repository_root=repository,
+            model_root=alias,
+        )
+
+    alias.unlink()
+    os.link(model / "model-00001-of-00001.safetensors", tmp_path / "weight-alias")
+    with pytest.raises(protocol.ProtocolError, match="single-link"):
+        runner.GenerationBinding.automatic_local(
+            repository_root=repository,
+            model_root=model,
+        )
+
+
+def test_automatic_binding_rejects_wrong_full_model_hash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _attested_mio_repo(tmp_path)
+    model = _local_model_bundle(tmp_path)
+    monkeypatch.setattr(protocol, "EXPECTED_MODEL_IDENTITY", "local-sha256-v1:" + "0" * 64)
+    monkeypatch.setattr(runner, "_collect_runtime_document", _runtime_document)
+    monkeypatch.setattr(runner, "_assert_executing_mio_tree", lambda _repository: None)
+
+    with pytest.raises(protocol.ProtocolError, match="does not match the frozen"):
+        runner.GenerationBinding.automatic_local(
+            repository_root=repository,
+            model_root=model,
+        )
+
+
+def test_automatic_binding_rejects_clean_clone_other_than_executing_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from experimental.effort.model_identity import fingerprint_local_model
+
+    repository = _attested_mio_repo(tmp_path)
+    model = _local_model_bundle(tmp_path)
+    monkeypatch.setattr(protocol, "EXPECTED_MODEL_IDENTITY", fingerprint_local_model(model).revision)
+    monkeypatch.setattr(runner, "_collect_runtime_document", _runtime_document)
+
+    with pytest.raises(protocol.ProtocolError, match="differs from the executing runner"):
+        runner.GenerationBinding.automatic_local(
+            repository_root=repository,
+            model_root=model,
+        )
+
+
+def test_automatic_binding_rejects_ignored_runtime_source_shadow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from experimental.effort.model_identity import fingerprint_local_model
+
+    repository = _attested_mio_repo(tmp_path)
+    model = _local_model_bundle(tmp_path)
+    (repository / ".gitignore").write_text("mio/shadow.py\n", encoding="utf-8")
+    _git(repository, "add", ".gitignore")
+    _git(repository, "commit", "--quiet", "-m", "ignore shadow")
+    (repository / "mio" / "shadow.py").write_text("SHADOW = True\n", encoding="utf-8")
+    monkeypatch.setattr(protocol, "EXPECTED_MODEL_IDENTITY", fingerprint_local_model(model).revision)
+    monkeypatch.setattr(runner, "_collect_runtime_document", _runtime_document)
+    monkeypatch.setattr(runner, "_assert_executing_mio_tree", lambda _repository: None)
+
+    with pytest.raises(protocol.ProtocolError, match="ignored runtime-relevant"):
+        runner.GenerationBinding.automatic_local(
+            repository_root=repository,
+            model_root=model,
+        )
+
+
+def test_automatic_binding_requires_loaded_native_engine_for_same_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binding, _repository, model = _automatic_binding(tmp_path, monkeypatch)
+
+    with pytest.raises(protocol.ProtocolError, match="native Mio executor"):
+        binding.validate_for_run(
+            evidence_run=False,
+            executor=RecordingExecutor(),
+            tier_config=_tier(),
+            require_executor_binding=True,
+        )
+
+    duck_typed = _duck_typed_native_executor_for_model(model)
+    with pytest.raises(protocol.ProtocolError, match="exact production engine and manager"):
+        binding.validate_for_run(
+            evidence_run=False,
+            executor=duck_typed,
+            tier_config=duck_typed.engine.tier_config,
+            require_executor_binding=True,
+        )
+
+    other_model = _local_model_bundle(tmp_path, "other-loaded-model")
+    other_executor = _native_executor_for_model(other_model)
+    with pytest.raises(protocol.ProtocolError, match="differs from the automatically fingerprinted model"):
+        binding.validate_for_run(
+            evidence_run=False,
+            executor=other_executor,
+            tier_config=other_executor.engine.tier_config,
+            require_executor_binding=True,
+        )
+
+    executor = _native_executor_for_model(model)
+    with pytest.raises(protocol.ProtocolError, match="not the exact loaded engine tier config"):
+        binding.validate_for_run(
+            evidence_run=False,
+            executor=executor,
+            tier_config=_tier(),
+            require_executor_binding=True,
+        )
+
+    executor.engine.tier_config.temperature = 0.5
+    with pytest.raises(protocol.ProtocolError, match="differs from frozen controls"):
+        binding.validate_for_run(
+            evidence_run=False,
+            executor=executor,
+            tier_config=executor.engine.tier_config,
+            require_executor_binding=True,
+        )
+    executor.engine.tier_config.temperature = 0.0
+
+    observed = binding.validate_for_run(
+        evidence_run=False,
+        executor=executor,
+        tier_config=executor.engine.tier_config,
+        require_executor_binding=True,
+    )
+    assert observed["automatic"] is True
+    assert observed["model_identity"] == binding.model_identity
+
+
 def test_target_only_tier_and_exact_model_identity_are_mandatory() -> None:
     runner.validate_target_only_tier(_tier())
     with pytest.raises(protocol.ProtocolError, match="target-only"):
         runner.validate_target_only_tier(_tier(drafter_backend="dflash"))
     with pytest.raises(protocol.ProtocolError, match="Qwen 3.6 27B"):
-        runner.GenerationBinding(
+        runner.GenerationBinding.for_non_evidence_smoke(
             mio_commit="b" * 40,
             model_identity="local-sha256-v1:" + "a" * 64,
             runtime_digest="d" * 64,
         )
+    with pytest.raises(TypeError):
+        runner.GenerationBinding(  # type: ignore[call-arg]
+            mio_commit="b" * 40,
+            model_identity=protocol.EXPECTED_MODEL_IDENTITY,
+            runtime_digest="d" * 64,
+        )
+
+
+def test_generation_runner_script_entrypoint_is_importable() -> None:
+    completed = subprocess.run(
+        ["python3", str(runner.ROOT / "scripts" / "run_swebench_quality_generation.py")],
+        cwd=runner.ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "confirmatory evidence remains hard-blocked" in completed.stdout
 
 
 def test_recomputed_schedule_summary_cannot_hide_reordered_pairs(tmp_path: Path) -> None:
@@ -525,7 +916,7 @@ def test_recomputed_schedule_summary_cannot_hide_reordered_pairs(tmp_path: Path)
         )
 
 
-def test_confirmatory_schedule_is_hard_blocked_before_workspace_or_model(
+def test_confirmatory_schedule_rejects_manual_binding_before_workspace_or_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -541,7 +932,7 @@ def test_confirmatory_schedule_is_hard_blocked_before_workspace_or_model(
     layout = runner.GenerationLayout.create(tmp_path / "generation")
     executor = RecordingExecutor()
 
-    with pytest.raises(protocol.ProtocolError, match="confirmatory SWE-bench is blocked"):
+    with pytest.raises(protocol.ProtocolError, match="automatic preflight fingerprints"):
         runner.run_generation_pairs(
             schedule_document=document,
             schedule=schedule,
@@ -553,6 +944,37 @@ def test_confirmatory_schedule_is_hard_blocked_before_workspace_or_model(
             agent_module=_agent_module(),
         )
     assert executor.requests == []
+    assert not layout.ledger.exists()
+
+
+def test_automatically_attested_confirmatory_schedule_remains_hard_blocked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binding, _repository, model = _automatic_binding(tmp_path, monkeypatch, name="confirmatory")
+    source, base_commit = _source_repo(tmp_path)
+    instances = _instances(base_commit)
+    document, schedule = _schedule_document(instances)
+    document["evidence_class"] = "confirmatory"
+    monkeypatch.setattr(
+        protocol,
+        "PUBLIC_SNAPSHOT_SHA256",
+        document["dataset_public_snapshot_sha256"],
+    )
+    layout = runner.GenerationLayout.create(tmp_path / "generation")
+    executor = _native_executor_for_model(model)
+
+    with pytest.raises(protocol.ProtocolError, match="confirmatory SWE-bench is blocked"):
+        runner.run_generation_pairs(
+            schedule_document=document,
+            schedule=schedule,
+            layout=layout,
+            workspace_factory=runner.ExternalGitWorkspaceFactory(lambda _instance: source),
+            executor=executor,
+            binding=binding,
+            tier_config=executor.engine.tier_config,
+            agent_module=_agent_module(),
+        )
     assert not layout.ledger.exists()
 
 

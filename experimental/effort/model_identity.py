@@ -88,11 +88,7 @@ def _is_model_file(path: Path) -> bool:
 def _candidate_model_files(root: Path) -> tuple[Path, ...]:
     candidates: list[Path] = []
     for directory, directory_names, file_names in os.walk(root, followlinks=False):
-        directory_names[:] = sorted(
-            name
-            for name in directory_names
-            if name not in _IGNORED_DIRECTORY_NAMES
-        )
+        directory_names[:] = sorted(name for name in directory_names if name not in _IGNORED_DIRECTORY_NAMES)
         directory_path = Path(directory)
         for name in directory_names:
             candidate_directory = directory_path / name
@@ -116,13 +112,13 @@ def _hash_regular_file(path: Path) -> tuple[int, str]:
     try:
         descriptor = os.open(path, flags)
         before = os.fstat(descriptor)
-        if not stat.S_ISREG(before.st_mode):
-            raise ModelIdentityError("local model identity input is not a regular file")
-        with os.fdopen(descriptor, "rb") as stream:
-            descriptor = -1
-            while chunk := stream.read(8 * 1024 * 1024):
-                digest.update(chunk)
-            after = os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise ModelIdentityError("local model identity input must be a regular single-link file")
+        while chunk := os.read(descriptor, 8 * 1024 * 1024):
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+        named_lstat = os.lstat(path)
+        named_stat = os.stat(path, follow_symlinks=True)
     except ModelIdentityError:
         raise
     except OSError as exc:
@@ -130,9 +126,25 @@ def _hash_regular_file(path: Path) -> tuple[int, str]:
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-    before_identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-    after_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
-    if before_identity != after_identity:
+
+    def identity(metadata: os.stat_result) -> tuple[int, ...]:
+        return (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_mode,
+            metadata.st_nlink,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        )
+
+    before_identity = identity(before)
+    if (
+        before_identity != identity(after)
+        or before_identity != identity(named_lstat)
+        or before_identity != identity(named_stat)
+        or before.st_nlink != 1
+    ):
         raise ModelIdentityError("local model file changed while it was fingerprinted")
     return before.st_size, digest.hexdigest()
 
@@ -204,17 +216,11 @@ def resolve_model_reference(
         raise ModelIdentityError("model revision must be a non-empty string")
 
     expanded = Path(model).expanduser()
-    looks_local = (
-        expanded.exists()
-        or expanded.is_absolute()
-        or model.startswith(("./", "../", "~"))
-    )
+    looks_local = expanded.exists() or expanded.is_absolute() or model.startswith(("./", "../", "~"))
     if looks_local:
         fingerprint = fingerprint_local_model(expanded)
         if not revision.startswith(LOCAL_MODEL_REVISION_PREFIX):
-            raise ModelIdentityError(
-                "local model revision must use local-sha256-v1:<digest>"
-            )
+            raise ModelIdentityError("local model revision must use local-sha256-v1:<digest>")
         requested_digest = revision.removeprefix(LOCAL_MODEL_REVISION_PREFIX)
         if not _is_sha256(requested_digest):
             raise ModelIdentityError("local model revision digest is malformed")
@@ -231,9 +237,7 @@ def resolve_model_reference(
         )
 
     if not _is_huggingface_commit(revision):
-        raise ModelIdentityError(
-            "remote model revision must be an immutable 40-character Hugging Face commit"
-        )
+        raise ModelIdentityError("remote model revision must be an immutable 40-character Hugging Face commit")
     if model.count("/") != 1 or any(part in {"", ".", ".."} for part in model.split("/")):
         raise ModelIdentityError("remote model must use the Hugging Face org/repository form")
     return ResolvedModelReference(
