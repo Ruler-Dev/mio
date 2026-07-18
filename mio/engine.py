@@ -24,6 +24,15 @@ class GenerationMetrics:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    prefill_ns: int = 0
+    decode_ns: int = 0
+    model_total_ns: int = 0
+    logical_prompt_tokens: int = 0
+    physical_prefill_tokens: int = 0
+    physical_decode_tokens: int = 0
+    timing_source: str = "unavailable"
+    phase_censored: bool = False
+    deadline_hit: bool = False
     prompt_tps: float = 0.0
     generation_tps: float = 0.0
     end_to_end_tps: float = 0.0
@@ -38,6 +47,7 @@ class GenerationMetrics:
     drafter_requested: str = "auto"
     drafter_detected: str = "unknown"
     drafter_selected: str = "baseline"
+    drafter_ref: str | None = None
     drafter_reason: str = "not_loaded"
     drafter_fallback_used: bool = False
     drafter_policy: tuple[str, ...] = ()
@@ -861,6 +871,7 @@ class MioEngine:
             "drafter_requested": self._drafter_requested,
             "drafter_detected": self._drafter_detected,
             "drafter_selected": self._drafter_selected,
+            "drafter_ref": self._drafter_ref,
             "drafter_reason": self._drafter_reason,
             "drafter_fallback_used": self._drafter_fallback_used,
             "drafter_policy": tuple(self._drafter_policy),
@@ -868,24 +879,88 @@ class MioEngine:
 
     def _metrics_from_result(self, result: dict[str, Any]) -> GenerationMetrics:
         gen_ids = result.get("generated_token_ids", [])
-        elapsed_us = result.get("elapsed_us", 0)
+        elapsed_us = float(result.get("elapsed_us", 0) or 0)
         prefill_us = result.get("prefill_us")
         if prefill_us is None:
             phase = result.get("phase_timings_us") or {}
             prefill_us = phase.get("prefill", 0)
-        gen_tokens = result.get("generation_tokens", len(gen_ids))
-        prompt_tok_count = result.get("prompt_token_count", 0)
-        decode_us = max(0, elapsed_us - prefill_us)
+        prefill_us = float(prefill_us or 0)
+        if not math.isfinite(elapsed_us) or elapsed_us < 0:
+            raise ValueError("elapsed_us must be finite and non-negative")
+        if not math.isfinite(prefill_us) or prefill_us < 0 or prefill_us > elapsed_us:
+            raise ValueError("prefill_us must be finite and within elapsed_us")
+        wall_elapsed_ns = max(0, int(math.ceil(elapsed_us * 1_000.0)))
+        gen_tokens = int(result.get("generation_tokens", len(gen_ids)) or 0)
+        physical_decode_tokens = int(result.get("physical_decode_tokens", gen_tokens) or 0)
+        if gen_tokens < 0 or physical_decode_tokens < gen_tokens:
+            raise ValueError("physical_decode_tokens must be at least generation_tokens")
+        prompt_tok_count = int(result.get("prompt_token_count", 0) or 0)
+        logical_prompt_tokens = int(result.get("logical_prompt_tokens", prompt_tok_count) or 0)
+        warm_offset = int(result.get("warm_offset", 0) or 0)
+        if logical_prompt_tokens < 0:
+            raise ValueError("logical_prompt_tokens must be non-negative")
+        if logical_prompt_tokens != prompt_tok_count:
+            raise ValueError("logical_prompt_tokens must equal prompt_token_count")
+        if warm_offset < 0 or warm_offset > logical_prompt_tokens:
+            raise ValueError("warm_offset must be within logical_prompt_tokens")
+        expected_physical_tokens = logical_prompt_tokens - warm_offset
+        physical_prefill_tokens = int(result.get("physical_prefill_tokens", expected_physical_tokens) or 0)
+        if physical_prefill_tokens != expected_physical_tokens:
+            raise ValueError("physical_prefill_tokens must equal logical_prompt_tokens - warm_offset")
+
+        raw_timing_names = ("prefill_ns", "decode_ns", "model_total_ns")
+        raw_timing_presence = tuple(name in result and result[name] is not None for name in raw_timing_names)
+        if any(raw_timing_presence) and not all(raw_timing_presence):
+            raise ValueError("raw timing requires prefill_ns, decode_ns, and model_total_ns")
+        if all(raw_timing_presence):
+            raw_timing: dict[str, int] = {}
+            for name in raw_timing_names:
+                value = result[name]
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise ValueError(f"{name} must be a non-negative integer")
+                raw_timing[name] = value
+            if raw_timing["model_total_ns"] != raw_timing["prefill_ns"] + raw_timing["decode_ns"]:
+                raise ValueError("model_total_ns must equal prefill_ns + decode_ns")
+            prefill_ns = raw_timing["prefill_ns"]
+            decode_ns = raw_timing["decode_ns"]
+            model_total_ns = raw_timing["model_total_ns"]
+            if model_total_ns > wall_elapsed_ns:
+                raise ValueError("raw model_total_ns must not exceed elapsed_us")
+            timing_source = "runtime_raw_ns"
+        else:
+            # Legacy/third-party runtimes expose only wall-clock microseconds.
+            # Keep them observable, but explicitly mark the conversion as
+            # non-confirmatory so benchmark protocols cannot mistake it for the
+            # target-AR runtime's yield-free model timing.
+            model_total_ns = max(0, int(round(elapsed_us * 1_000.0)))
+            prefill_ns = min(model_total_ns, max(0, int(round(prefill_us * 1_000.0))))
+            decode_ns = model_total_ns - prefill_ns
+            timing_source = "derived_legacy_us"
+
+        phase_censored = result.get("phase_censored", result.get("stopped_early", False))
+        deadline_hit = result.get("deadline_hit", False)
+        if not isinstance(phase_censored, bool) or not isinstance(deadline_hit, bool):
+            raise ValueError("phase_censored and deadline_hit must be boolean")
+
         raw_acceptance = result.get("acceptance_ratio", 0)
         acceptance_available = bool(result.get("acceptance_ratio_available", raw_acceptance is not None))
         acceptance_ratio = float(raw_acceptance or 0.0)
 
         return GenerationMetrics(
-            prompt_tokens=prompt_tok_count,
+            prompt_tokens=logical_prompt_tokens,
             completion_tokens=gen_tokens,
-            total_tokens=prompt_tok_count + gen_tokens,
-            prompt_tps=prompt_tok_count / max(prefill_us / 1e6, 1e-9) if prefill_us > 0 else 0,
-            generation_tps=gen_tokens / max(decode_us / 1e6, 1e-9) if decode_us > 0 else 0,
+            total_tokens=logical_prompt_tokens + gen_tokens,
+            prefill_ns=prefill_ns,
+            decode_ns=decode_ns,
+            model_total_ns=model_total_ns,
+            logical_prompt_tokens=logical_prompt_tokens,
+            physical_prefill_tokens=physical_prefill_tokens,
+            physical_decode_tokens=physical_decode_tokens,
+            timing_source=timing_source,
+            phase_censored=phase_censored,
+            deadline_hit=deadline_hit,
+            prompt_tps=(logical_prompt_tokens / max(prefill_ns / 1e9, 1e-9) if prefill_ns > 0 else 0),
+            generation_tps=(physical_decode_tokens / max(decode_ns / 1e9, 1e-9) if decode_ns > 0 else 0),
             end_to_end_tps=gen_tokens / max(elapsed_us / 1e6, 1e-9) if elapsed_us > 0 else 0,
             acceptance_ratio=acceptance_ratio,
             acceptance_ratio_available=acceptance_available,
@@ -903,7 +978,7 @@ class MioEngine:
             generation_backend=str(
                 result.get("backend") or ("dflash" if self._draft_model is not None else "baseline")
             ),
-            warm_offset=int(result.get("warm_offset", 0) or 0),
+            warm_offset=warm_offset,
             cache_entries=int(result.get("cache_entries", len(self._prefix_cache)) or 0),
         )
 
@@ -1216,14 +1291,24 @@ class MioEngine:
             prefill_step_size=max(1, int(prefill_step_size)),
         )
         stats = response.stats
+        batch_prefill_ns = max(0, int(round(float(stats.prompt_time) * 1e9)))
+        batch_decode_ns = max(0, int(round(float(stats.generation_time) * 1e9)))
         results: list[tuple[str, GenerationMetrics]] = []
         for prompt, text, request_stop in zip(prompts, response.texts, stops, strict=True):
             text, _ = self._truncate_at_stop(text, request_stop)
             completion_tokens = len(self._tokenizer.encode(text, add_special_tokens=False))
+            logical_prompt_tokens = len(prompt)
             metrics = GenerationMetrics(
-                prompt_tokens=len(prompt),
+                prompt_tokens=logical_prompt_tokens,
                 completion_tokens=completion_tokens,
-                total_tokens=len(prompt) + completion_tokens,
+                total_tokens=logical_prompt_tokens + completion_tokens,
+                prefill_ns=batch_prefill_ns,
+                decode_ns=batch_decode_ns,
+                model_total_ns=batch_prefill_ns + batch_decode_ns,
+                logical_prompt_tokens=logical_prompt_tokens,
+                physical_prefill_tokens=logical_prompt_tokens,
+                physical_decode_tokens=completion_tokens,
+                timing_source="derived_batch_stats",
                 prompt_tps=float(stats.prompt_tps),
                 generation_tps=float(stats.generation_tps),
                 end_to_end_tps=(
@@ -1289,6 +1374,7 @@ class MioEngine:
             seed=seed,
             stop_signal=stop_signal,
             decode_chunk_tokens=1 if stops else 8,
+            deadline_monotonic=deadline_monotonic,
         )
         try:
             if not stops:
@@ -1422,6 +1508,7 @@ class MioEngine:
         seed: int | None = None,
         stop_signal: threading.Event | None = None,
         decode_chunk_tokens: int = 8,
+        deadline_monotonic: float | None = None,
     ) -> Generator[tuple[str, GenerationMetrics | None], None, None]:
         if not self._loaded:
             raise RuntimeError("Engine not loaded.")
@@ -1565,8 +1652,14 @@ class MioEngine:
             return str(detokenizer.last_segment)
 
         prefill_us = 0
+        raw_prefill_ns: int | None = None
+        raw_decode_ns: int | None = None
+        raw_model_total_ns: int | None = None
+        logical_prompt_tokens = len(prompt_tokens)
+        physical_prefill_tokens = len(prompt_tokens)
         prefill_emitted = False
         generation_tokens = 0
+        physical_decode_tokens = 0
         acceptance_ratio = 0.0
         cycles_completed = 0
         warm_offset = 0
@@ -1575,13 +1668,57 @@ class MioEngine:
 
         try:
             for event in stream:
-                if stop_signal is not None and stop_signal.is_set():
-                    break
                 ev_type = event.get("event")
+                if all(
+                    isinstance(event.get(name), int) and not isinstance(event.get(name), bool)
+                    for name in ("prefill_ns", "decode_ns", "model_total_ns")
+                ):
+                    raw_prefill_ns = int(event["prefill_ns"])
+                    raw_decode_ns = int(event["decode_ns"])
+                    raw_model_total_ns = int(event["model_total_ns"])
+                logical_prompt_tokens = int(
+                    event.get("logical_prompt_tokens", logical_prompt_tokens) or logical_prompt_tokens
+                )
+                warm_offset = int(event.get("warm_offset", warm_offset) or 0)
+                physical_prefill_tokens = int(
+                    event.get(
+                        "physical_prefill_tokens",
+                        logical_prompt_tokens - warm_offset,
+                    )
+                    or 0
+                )
 
                 if ev_type == "prefill":
                     prefill_us = event.get("prefill_us", 0)
-                    warm_offset = int(event.get("warm_offset", 0) or 0)
+
+                elif ev_type == "token":
+                    physical_decode_tokens = int(
+                        event.get(
+                            "physical_decode_tokens",
+                            event.get("generated_tokens", physical_decode_tokens + 1),
+                        )
+                    )
+                    acceptance_ratio = float(event.get("acceptance_ratio", acceptance_ratio) or 0.0)
+                    cycles_completed = int(event.get("cycles_completed", cycles_completed) or 0)
+
+                elif ev_type == "summary":
+                    physical_decode_tokens = int(
+                        event.get(
+                            "physical_decode_tokens",
+                            event.get("generation_tokens", physical_decode_tokens),
+                        )
+                        or physical_decode_tokens
+                    )
+                    acceptance_ratio = float(event.get("acceptance_ratio", acceptance_ratio) or 0.0)
+                    cycles_completed = int(event.get("cycles_completed", cycles_completed) or 0)
+
+                # Pulling the event may itself finish an MLX step after the
+                # deadline fired. Preserve that completed work in telemetry,
+                # but do not detokenize or expose the corresponding token.
+                if stop_signal is not None and stop_signal.is_set():
+                    break
+
+                if ev_type == "prefill":
                     if self._pending_assistant_prefill and not prefill_emitted:
                         yield self._pending_assistant_prefill, None
                         prefill_emitted = True
@@ -1590,8 +1727,6 @@ class MioEngine:
 
                 elif ev_type == "token":
                     generation_tokens = int(event.get("generated_tokens", generation_tokens + 1))
-                    acceptance_ratio = float(event.get("acceptance_ratio", acceptance_ratio) or 0.0)
-                    cycles_completed = int(event.get("cycles_completed", cycles_completed) or 0)
                     decode_pending.append(event["token_id"])
                     if len(decode_pending) >= decode_chunk_tokens:
                         chunk = flush_decode()
@@ -1602,8 +1737,6 @@ class MioEngine:
 
                 elif ev_type == "summary":
                     generation_tokens = int(event.get("generation_tokens", generation_tokens) or generation_tokens)
-                    acceptance_ratio = float(event.get("acceptance_ratio", acceptance_ratio) or 0.0)
-                    cycles_completed = int(event.get("cycles_completed", cycles_completed) or 0)
                     chunk = flush_decode(final=True)
                     if chunk:
                         yield chunk, None
@@ -1627,10 +1760,17 @@ class MioEngine:
 
         if stop_signal is not None and stop_signal.is_set() and not summary_emitted:
             self._pending_assistant_prefill = ""
-            elapsed_us = (time.perf_counter() - started) * 1e6
+            elapsed_us = max(
+                (time.perf_counter() - started) * 1e6,
+                float(prefill_us or 0),
+                (raw_model_total_ns or 0) / 1_000.0,
+            )
             stopped_result = {
                 "prompt_token_count": len(prompt_tokens),
+                "logical_prompt_tokens": logical_prompt_tokens,
+                "physical_prefill_tokens": physical_prefill_tokens,
                 "generation_tokens": generation_tokens,
+                "physical_decode_tokens": physical_decode_tokens,
                 "prefill_us": prefill_us,
                 "elapsed_us": elapsed_us,
                 "acceptance_ratio": acceptance_ratio,
@@ -1642,7 +1782,17 @@ class MioEngine:
                 ),
                 "backend": stream_backend,
                 "stopped_early": True,
+                "phase_censored": True,
+                "deadline_hit": bool(
+                    deadline_monotonic is not None and time.perf_counter() >= float(deadline_monotonic)
+                ),
             }
+            if raw_prefill_ns is not None and raw_decode_ns is not None and raw_model_total_ns is not None:
+                stopped_result.update(
+                    prefill_ns=raw_prefill_ns,
+                    decode_ns=raw_decode_ns,
+                    model_total_ns=raw_model_total_ns,
+                )
             metrics = self._metrics_from_result(stopped_result)
             self._last_metrics = metrics
             yield "", metrics

@@ -152,6 +152,79 @@ def test_target_ar_load_skips_every_draft_loader_and_reports_baseline(monkeypatc
     assert metrics.drafter_fallback_used is False
     assert metrics.fallback_ar is False
     assert metrics.generation_backend == "baseline"
+    assert metrics.prefill_ns == 10_000
+    assert metrics.decode_ns == 10_000
+    assert metrics.model_total_ns == 20_000
+    assert metrics.logical_prompt_tokens == 2
+    assert metrics.physical_prefill_tokens == 2
+    assert metrics.timing_source == "derived_legacy_us"
+
+
+def test_engine_metrics_prefer_coherent_raw_runtime_timing():
+    engine = MioEngine(_tier())
+
+    metrics = engine._metrics_from_result(
+        {
+            "generation_tokens": 2,
+            "prompt_token_count": 10,
+            "logical_prompt_tokens": 10,
+            "physical_prefill_tokens": 6,
+            "warm_offset": 4,
+            # Legacy wall values deliberately include unrelated overhead.
+            "elapsed_us": 50_000,
+            "prefill_us": 20_000,
+            "prefill_ns": 100,
+            "decode_ns": 300,
+            "model_total_ns": 400,
+            "backend": "baseline",
+        }
+    )
+
+    assert metrics.prefill_ns == 100
+    assert metrics.decode_ns == 300
+    assert metrics.model_total_ns == 400
+    assert metrics.logical_prompt_tokens == 10
+    assert metrics.physical_prefill_tokens == 6
+    assert metrics.physical_decode_tokens == 2
+    assert metrics.warm_offset == 4
+    assert metrics.timing_source == "runtime_raw_ns"
+    assert metrics.generation_tps == pytest.approx(2 / 300e-9)
+    assert metrics.total_time_s == pytest.approx(0.05)
+
+
+def test_engine_metrics_reject_incoherent_raw_telemetry():
+    engine = MioEngine(_tier())
+
+    with pytest.raises(ValueError, match="model_total_ns"):
+        engine._metrics_from_result(
+            {
+                "prompt_token_count": 2,
+                "elapsed_us": 1,
+                "prefill_ns": 10,
+                "decode_ns": 20,
+                "model_total_ns": 31,
+            }
+        )
+    with pytest.raises(ValueError, match="physical_prefill_tokens"):
+        engine._metrics_from_result(
+            {
+                "prompt_token_count": 4,
+                "warm_offset": 1,
+                "physical_prefill_tokens": 4,
+                "elapsed_us": 1,
+            }
+        )
+    with pytest.raises(ValueError, match="must not exceed elapsed_us"):
+        engine._metrics_from_result(
+            {
+                "prompt_token_count": 2,
+                "elapsed_us": 1,
+                "prefill_us": 0.5,
+                "prefill_ns": 600,
+                "decode_ns": 500,
+                "model_total_ns": 1_100,
+            }
+        )
 
 
 def test_dspark_load_failure_uses_distinct_dflash_with_telemetry(monkeypatch):

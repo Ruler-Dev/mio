@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 
 import pytest
@@ -275,7 +276,17 @@ def test_expired_stream_deadline_stops_before_decode(monkeypatch):
     def dflash_stream(**_kwargs):
         nonlocal requested_events
         requested_events += 1
-        yield {"event": "prefill", "prefill_us": 10, "prompt_token_count": 3}
+        yield {
+            "event": "prefill",
+            "prefill_us": 0.001,
+            "prefill_ns": 1,
+            "decode_ns": 0,
+            "model_total_ns": 1,
+            "prompt_token_count": 3,
+            "logical_prompt_tokens": 3,
+            "physical_prefill_tokens": 3,
+            "warm_offset": 0,
+        }
         requested_events += 1
         yield {
             "event": "token",
@@ -297,6 +308,79 @@ def test_expired_stream_deadline_stops_before_decode(monkeypatch):
     assert [chunk for chunk, metrics in output if chunk] == []
     assert output[-1][1] is not None
     assert output[-1][1].completion_tokens == 0
+    assert output[-1][1].prefill_ns == 1
+    assert output[-1][1].decode_ns == 0
+    assert output[-1][1].timing_source == "runtime_raw_ns"
+    assert output[-1][1].phase_censored is True
+    assert output[-1][1].deadline_hit is True
+
+
+def test_deadline_after_decode_keeps_physical_token_cost_without_emitting_token(
+    monkeypatch,
+):
+    engine = _engine()
+    stop_signal = threading.Event()
+
+    class Detokenizer:
+        last_segment = ""
+
+        def add_token(self, _token):
+            raise AssertionError("deadline-censored token must not be detokenized")
+
+        def finalize(self):
+            pass
+
+        def reset(self):
+            pass
+
+    def baseline_stream(**_kwargs):
+        yield {
+            "event": "prefill",
+            "prefill_us": 0.001,
+            "prefill_ns": 1,
+            "decode_ns": 0,
+            "model_total_ns": 1,
+            "prompt_token_count": 3,
+            "logical_prompt_tokens": 3,
+            "physical_prefill_tokens": 3,
+            "physical_decode_tokens": 0,
+            "warm_offset": 0,
+        }
+        stop_signal.set()
+        yield {
+            "event": "token",
+            "token_id": 7,
+            "generated_tokens": 1,
+            "physical_decode_tokens": 1,
+            "prefill_ns": 1,
+            "decode_ns": 2,
+            "model_total_ns": 3,
+            "logical_prompt_tokens": 3,
+            "physical_prefill_tokens": 3,
+            "warm_offset": 0,
+        }
+
+    engine._new_streaming_detokenizer = Detokenizer
+    monkeypatch.setattr("mio.dflash.runtime.stream_baseline_generate", baseline_stream)
+
+    output = list(
+        engine._generate_stream_raw(
+            [{"role": "user", "content": "x"}],
+            temperature=0.5,
+            stop_signal=stop_signal,
+            decode_chunk_tokens=1,
+            deadline_monotonic=0.0,
+        )
+    )
+
+    assert [chunk for chunk, metrics in output if chunk] == []
+    metrics = output[-1][1]
+    assert metrics is not None
+    assert metrics.completion_tokens == 0
+    assert metrics.physical_decode_tokens == 1
+    assert metrics.decode_ns == 2
+    assert metrics.phase_censored is True
+    assert metrics.deadline_hit is True
 
 
 def test_raw_stream_detokenizes_split_utf8_without_replacement(monkeypatch):

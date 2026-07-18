@@ -1820,22 +1820,33 @@ def generate_baseline_once(
     mx.eval(logits)
     prefill_ns = time.perf_counter_ns() - prefill_start_ns
     suppress_token_mask = build_suppress_token_mask(int(logits.shape[-1]), suppress_token_ids)
+    decode_start_ns = time.perf_counter_ns()
     next_token = int(sample_tokens_with_mask(logits[:, -1, :], sampler, suppress_token_mask).item())
+    decode_ns = time.perf_counter_ns() - decode_start_ns
     generated_tokens = [next_token]
 
     while len(generated_tokens) < max_new_tokens:
         if next_token in stop_token_ids:
             break
+        decode_start_ns = time.perf_counter_ns()
         token_array = mx.array([[next_token]], dtype=mx.uint32)
         logits = target_model(token_array, cache=cache)
         next_token = int(sample_tokens_with_mask(logits[:, -1, :], sampler, suppress_token_mask).item())
+        decode_ns += time.perf_counter_ns() - decode_start_ns
         generated_tokens.append(next_token)
 
     elapsed_us = (time.perf_counter_ns() - start_ns) / 1_000.0
     return {
         "elapsed_us": elapsed_us,
         "prefill_us": prefill_ns / 1_000.0,
+        "prefill_ns": prefill_ns,
+        "decode_ns": decode_ns,
+        "model_total_ns": prefill_ns + decode_ns,
         "prompt_token_count": len(prompt_tokens),
+        "logical_prompt_tokens": len(prompt_tokens),
+        "physical_prefill_tokens": len(prompt_tokens),
+        "physical_decode_tokens": len(generated_tokens),
+        "warm_offset": 0,
         "generated_token_ids": generated_tokens,
         "generation_tokens": len(generated_tokens),
         "peak_memory_gb": float(mx.get_peak_memory()) / 1e9 if hasattr(mx, "get_peak_memory") else None,
@@ -1896,21 +1907,43 @@ def stream_baseline_generate(
     else:
         relaxed_mask = initial_mask
     suppress_token_mask = initial_mask
-    next_token = int(sample_tokens_with_mask(logits[:, -1, :], sampler, suppress_token_mask).item())
-    generated_tokens = [next_token]
+    decode_ns = 0
+    generated_tokens: list[int] = []
 
     yield {
         "event": "prefill",
         "prefill_us": prefill_ns / 1_000.0,
+        "prefill_ns": prefill_ns,
+        "decode_ns": 0,
+        "model_total_ns": prefill_ns,
         "prompt_token_count": prompt_len,
+        "logical_prompt_tokens": prompt_len,
+        "physical_prefill_tokens": prompt_len,
+        "physical_decode_tokens": 0,
+        "warm_offset": 0,
         "fallback_ar": True,
         "fallback_reason": fallback_reason,
     }
+
+    # Sampling is deliberately resumed only after the consumer observes the
+    # prefill event. A deadline that fires during prefill can therefore stop
+    # before any decode work, keeping zero-token timing exact.
+    decode_start_ns = time.perf_counter_ns()
+    next_token = int(sample_tokens_with_mask(logits[:, -1, :], sampler, suppress_token_mask).item())
+    decode_ns = time.perf_counter_ns() - decode_start_ns
+    generated_tokens.append(next_token)
 
     yield {
         "event": "token",
         "token_id": next_token,
         "generated_tokens": 1,
+        "physical_decode_tokens": 1,
+        "prefill_ns": prefill_ns,
+        "decode_ns": decode_ns,
+        "model_total_ns": prefill_ns + decode_ns,
+        "logical_prompt_tokens": prompt_len,
+        "physical_prefill_tokens": prompt_len,
+        "warm_offset": 0,
         "acceptance_ratio": 0.0,
         "cycles_completed": 0,
         "fallback_ar": True,
@@ -1931,14 +1964,23 @@ def stream_baseline_generate(
     while len(generated_tokens) < max_new_tokens:
         if next_token in stop_token_ids:
             break
+        decode_start_ns = time.perf_counter_ns()
         token_array = mx.array([[next_token]], dtype=mx.uint32)
         logits = target_model(token_array, cache=cache)
         next_token = int(sample_tokens_with_mask(logits[:, -1, :], sampler, suppress_token_mask).item())
+        decode_ns += time.perf_counter_ns() - decode_start_ns
         generated_tokens.append(next_token)
         yield {
             "event": "token",
             "token_id": next_token,
             "generated_tokens": len(generated_tokens),
+            "physical_decode_tokens": len(generated_tokens),
+            "prefill_ns": prefill_ns,
+            "decode_ns": decode_ns,
+            "model_total_ns": prefill_ns + decode_ns,
+            "logical_prompt_tokens": prompt_len,
+            "physical_prefill_tokens": prompt_len,
+            "warm_offset": 0,
             "acceptance_ratio": 0.0,
             "cycles_completed": 0,
             "fallback_ar": True,
@@ -1959,7 +2001,14 @@ def stream_baseline_generate(
     yield {
         "event": "summary",
         "elapsed_us": elapsed_us,
+        "prefill_ns": prefill_ns,
+        "decode_ns": decode_ns,
+        "model_total_ns": prefill_ns + decode_ns,
         "prompt_token_count": prompt_len,
+        "logical_prompt_tokens": prompt_len,
+        "physical_prefill_tokens": prompt_len,
+        "physical_decode_tokens": len(generated_tokens),
+        "warm_offset": 0,
         "generated_token_ids": generated_tokens,
         "generation_tokens": len(generated_tokens),
         "accepted_from_draft": 0,
