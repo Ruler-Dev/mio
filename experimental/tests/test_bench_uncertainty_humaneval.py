@@ -27,6 +27,13 @@ class _Audit:
     max_output_tokens: int
     deterministic_sampler: bool
     output_text_sha256: str
+    output_token_ids_sha256: str
+    output_tokens: int
+    prompt_tokens: int
+    prefill_seconds: float
+    decode_seconds: float
+    other_seconds: float
+    finish_reason: str
     prompt_source_sha256: str
     prompt_token_ids_sha256: str
     uncertainty_logprob_stride: int
@@ -37,7 +44,13 @@ class _Audit:
 
 
 class _FakeGenerator:
-    def __init__(self, *, candidate: bool, events: list[tuple[str, str, str]]) -> None:
+    def __init__(
+        self,
+        *,
+        candidate: bool,
+        events: list[tuple[str, str, str]],
+        token_mismatch: bool = False,
+    ) -> None:
         digest = "a" * 64
         self.model_id = f"local-mlx@local-sha256-v1:{digest}"
         self.settings = MLXSamplerSettings(
@@ -45,6 +58,7 @@ class _FakeGenerator:
             renormalize_uncertainty_logprobs=candidate,
         )
         self._candidate = candidate
+        self._token_mismatch = token_mismatch
         self._events = events
         self._audit_records: list[_Audit] = []
 
@@ -66,6 +80,9 @@ class _FakeGenerator:
         output_sha256 = hashlib.sha256(completion.encode()).hexdigest()
         prompt_sha256 = hashlib.sha256(f"same-prompt:{case.task_id}".encode()).hexdigest()
         token_sha256 = hashlib.sha256(f"same-tokens:{case.task_id}".encode()).hexdigest()
+        output_token_ids_sha256 = hashlib.sha256(
+            f"output-tokens:{case.task_id}:{self._token_mismatch}".encode()
+        ).hexdigest()
         self._audit_records.append(
             _Audit(
                 task_id=case.task_id,
@@ -75,6 +92,13 @@ class _FakeGenerator:
                 max_output_tokens=feedback.max_output_tokens,
                 deterministic_sampler=True,
                 output_text_sha256=output_sha256,
+                output_token_ids_sha256=output_token_ids_sha256,
+                output_tokens=5,
+                prompt_tokens=40,
+                prefill_seconds=0.04,
+                decode_seconds=0.02,
+                other_seconds=0.001,
+                finish_reason="stop",
                 prompt_source_sha256=prompt_sha256,
                 prompt_token_ids_sha256=token_sha256,
                 uncertainty_logprob_stride=8 if self._candidate else 1,
@@ -136,6 +160,15 @@ def _parity_fixture() -> dict[str, object]:
     }
 
 
+def _integrity(*, dirty: bool = False, source_digest: str = "d") -> benchmark.IntegritySnapshot:
+    return benchmark.IntegritySnapshot(
+        git_revision="c" * 40,
+        git_dirty=dirty,
+        source_sha256={"test-fixture": source_digest * 64},
+        model_identity=_resolved_model().canonical_model_id,
+    )
+
+
 def test_paired_ablation_keeps_hidden_channel_closed_and_report_source_free(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -154,8 +187,11 @@ def test_paired_ablation_keeps_hidden_channel_closed_and_report_source_free(
     events: list[tuple[str, str, str]] = []
     native = _FakeGenerator(candidate=False, events=events)
     renormalized = _FakeGenerator(candidate=True, events=events)
+    seen_hidden: set[str] = set()
 
     def hidden(case: HumanEvalCase, completion: str, /) -> HiddenEvaluationResult:
+        assert case.task_id not in seen_hidden, "identical output must be verified only once"
+        seen_hidden.add(case.task_id)
         assert completion == f"completion-secret-{case.task_id}"
         events.append(("verify", case.task_id, hashlib.sha256(completion.encode()).hexdigest()))
         passed = int(case.task_id.split("/")[-1]) % 4 != 0
@@ -173,21 +209,27 @@ def test_paired_ablation_keeps_hidden_channel_closed_and_report_source_free(
         native_generator=native,
         renormalized_generator=renormalized,
         hidden_evaluator=hidden,
-        git_revision="c" * 40,
-        git_dirty=False,
+        expected_integrity=_integrity(),
+        integrity_probe=lambda: _integrity(),
     )
 
-    assert len(events) == 128
+    assert len(events) == 96
     assert all(event[0] == "generate" for event in events[:64])
     assert all(event[0] == "verify" for event in events[64:])
-    assert len([event for event in events if event[0] == "verify"]) == 64
+    assert len([event for event in events if event[0] == "verify"]) == 32
+    assert len(seen_hidden) == 32
     assert report["pairing"]["native_first_tasks"] == 16
     assert report["pairing"]["renormalized_first_tasks"] == 16
     assert report["pairing"]["identical_outputs"] == 32
     assert report["pairing"]["all_outputs_identical"] is True
-    assert report["timing"][benchmark.NATIVE_SIGNAL]["verification"]["calls"] == 32
-    assert report["timing"][benchmark.RENORMALIZED_SIGNAL]["verification"]["calls"] == 32
+    assert report["timing"]["shared_verification"]["calls"] == 32
+    assert report["pairing"]["shared_hidden_labels"] == 32
+    assert report["row_commitment"]["rows"] == 32
+    assert report["statistics"][benchmark.NATIVE_SIGNAL]["error_count"] == report[
+        "statistics"
+    ][benchmark.RENORMALIZED_SIGNAL]["error_count"]
     assert report["statistics"]["paired"]["bootstrap"]["samples"] == 10_000
+    assert report["statistics"]["paired"]["shared_outcome_per_task"] is True
     assert report["statistics"]["paired"]["bootstrap"]["method"].startswith(
         "ordinary-task-cluster"
     )
@@ -199,6 +241,9 @@ def test_paired_ablation_keeps_hidden_channel_closed_and_report_source_free(
     assert '"tasks": [' not in encoded
     assert '"is_error"' not in encoded
     assert '"completion"' not in encoded
+    assert '"brier"' not in encoded
+    assert '"reliability_bins"' not in encoded
+    assert '"raw_score_is_calibrated_probability": false' in encoded
 
 
 def test_ablation_fails_before_generation_for_dirty_git(
@@ -213,8 +258,8 @@ def test_ablation_fails_before_generation_for_dirty_git(
             native_generator=_FakeGenerator(candidate=False, events=events),
             renormalized_generator=_FakeGenerator(candidate=True, events=events),
             hidden_evaluator=lambda *_: pytest.fail("hidden verifier was opened"),
-            git_revision="c" * 40,
-            git_dirty=True,
+            expected_integrity=_integrity(dirty=True),
+            integrity_probe=lambda: pytest.fail("probe should not run for dirty snapshot"),
         )
     assert events == []
 
@@ -248,7 +293,89 @@ def test_condition_drift_fails_before_generation(monkeypatch: pytest.MonkeyPatch
             native_generator=native,
             renormalized_generator=renormalized,
             hidden_evaluator=lambda *_: pytest.fail("hidden verifier was opened"),
-            git_revision="c" * 40,
-            git_dirty=False,
+            expected_integrity=_integrity(),
+            integrity_probe=lambda: _integrity(),
         )
     assert events == []
+
+
+def test_output_token_identity_mismatch_fails_before_hidden_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    corpus = _fixture_corpus()
+    cases = split_humaneval(corpus, "calibration")
+    monkeypatch.setattr(
+        benchmark,
+        "OFFICIAL_CALIBRATION_MANIFEST_SHA256",
+        corpus_manifest(cases)["manifest_sha256"],
+    )
+    monkeypatch.setattr(
+        benchmark,
+        "verifier_parity_certificate_identity",
+        _parity_fixture,
+    )
+    events: list[tuple[str, str, str]] = []
+    with pytest.raises(benchmark.BenchmarkProtocolError, match="decode identity mismatch"):
+        benchmark.run_paired_uncertainty_ablation(
+            cases=cases,
+            pinned_corpus=corpus,
+            resolved_model=_resolved_model(),
+            native_generator=_FakeGenerator(candidate=False, events=events),
+            renormalized_generator=_FakeGenerator(
+                candidate=True,
+                events=events,
+                token_mismatch=True,
+            ),
+            hidden_evaluator=lambda *_: pytest.fail("hidden verifier was opened"),
+            expected_integrity=_integrity(),
+            integrity_probe=lambda: _integrity(),
+        )
+    assert all(event[0] == "generate" for event in events)
+
+
+def test_integrity_drift_after_hidden_scoring_blocks_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    corpus = _fixture_corpus()
+    cases = split_humaneval(corpus, "calibration")
+    monkeypatch.setattr(
+        benchmark,
+        "OFFICIAL_CALIBRATION_MANIFEST_SHA256",
+        corpus_manifest(cases)["manifest_sha256"],
+    )
+    monkeypatch.setattr(
+        benchmark,
+        "verifier_parity_certificate_identity",
+        _parity_fixture,
+    )
+    events: list[tuple[str, str, str]] = []
+    probes = 0
+
+    def integrity_probe() -> benchmark.IntegritySnapshot:
+        nonlocal probes
+        probes += 1
+        return _integrity() if probes < 3 else _integrity(source_digest="e")
+
+    def hidden(case: HumanEvalCase, completion: str, /) -> HiddenEvaluationResult:
+        events.append(("verify", case.task_id, hashlib.sha256(completion.encode()).hexdigest()))
+        passed = int(case.task_id.split("/")[-1]) % 4 != 0
+        return HiddenEvaluationResult(
+            score=float(passed),
+            passed=passed,
+            status="passed" if passed else "failed",
+            elapsed_seconds=0.005,
+        )
+
+    with pytest.raises(benchmark.BenchmarkProtocolError, match="post_analysis"):
+        benchmark.run_paired_uncertainty_ablation(
+            cases=cases,
+            pinned_corpus=corpus,
+            resolved_model=_resolved_model(),
+            native_generator=_FakeGenerator(candidate=False, events=events),
+            renormalized_generator=_FakeGenerator(candidate=True, events=events),
+            hidden_evaluator=hidden,
+            expected_integrity=_integrity(),
+            integrity_probe=integrity_probe,
+        )
+    assert probes == 3
+    assert len([event for event in events if event[0] == "verify"]) == 32

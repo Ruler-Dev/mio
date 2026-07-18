@@ -5,8 +5,8 @@ This benchmark changes only the uncertainty-scoring path: native selected-token
 log probabilities at stride 1 are compared with FP32-renormalized log
 probabilities at stride 8.  Both conditions receive the exact same public case,
 greedy sampler, direct prompt, seed, and output-token budget.  All 64 candidates
-are generated before the hidden verifier is opened, then each condition is
-verified exactly once per task.
+are generated, their text/token/count/finish decode identity is confirmed, and
+only then is the identical output verified once per task (32 hidden calls).
 
 The JSON report contains aggregate statistics, timing, and hash commitments.
 It never serializes prompts, completions, hidden tests, or per-task outcomes.
@@ -22,8 +22,9 @@ import importlib.metadata
 import json
 import math
 from pathlib import Path
+import random
 import statistics
-from typing import Any, Protocol, Sequence
+from typing import Any, Mapping, Protocol, Sequence
 
 from experimental.effort.bench_markov_humaneval import (
     BenchmarkProtocolError,
@@ -64,9 +65,8 @@ from experimental.effort.model_identity import (
     resolve_model_reference,
 )
 from experimental.effort.uncertainty_statistics import (
-    UncertaintyObservation,
-    analyze_paired_uncertainty,
-    analyze_uncertainty,
+    area_under_risk_coverage_curve,
+    tie_corrected_auroc,
 )
 from experimental.markov_effort_controller import (
     ControllerAction,
@@ -74,8 +74,8 @@ from experimental.markov_effort_controller import (
 )
 
 
-REPORT_SCHEMA = "mio.paired-uncertainty-humaneval.v1"
-PROTOCOL_REVISION = "mio-paired-uncertainty-humaneval-v1"
+REPORT_SCHEMA = "mio.paired-uncertainty-humaneval.v2"
+PROTOCOL_REVISION = "mio-paired-uncertainty-humaneval-v2"
 OFFICIAL_CALIBRATION_MANIFEST_SHA256 = (
     "a3e588c4f625d4a7f911ce108eca03d886cd5cafd86f9452ae2f13ba8243fefb"
 )
@@ -108,6 +108,42 @@ class HiddenEvaluator(Protocol):
         completion: str,
         /,
     ) -> HiddenEvaluationResult: ...
+
+
+class IntegrityProbe(Protocol):
+    def __call__(self) -> IntegritySnapshot: ...
+
+
+@dataclass(frozen=True)
+class IntegritySnapshot:
+    """Content identity that must remain stable across model load and scoring."""
+
+    git_revision: str
+    git_dirty: bool
+    source_sha256: Mapping[str, str]
+    model_identity: str
+
+    def __post_init__(self) -> None:
+        if (
+            len(self.git_revision) != 40
+            or any(character not in "0123456789abcdef" for character in self.git_revision)
+        ):
+            raise BenchmarkProtocolError("Git revision must be a full commit digest")
+        if type(self.git_dirty) is not bool:
+            raise BenchmarkProtocolError("Git dirty state must be boolean")
+        if not isinstance(self.source_sha256, Mapping) or not self.source_sha256:
+            raise BenchmarkProtocolError("source identity must be a non-empty mapping")
+        if any(
+            not isinstance(name, str)
+            or not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+            for name, digest in self.source_sha256.items()
+        ):
+            raise BenchmarkProtocolError("source identity contains an invalid digest")
+        if not isinstance(self.model_identity, str) or not self.model_identity:
+            raise BenchmarkProtocolError("model identity must be non-empty")
+        object.__setattr__(self, "source_sha256", dict(self.source_sha256))
 
 
 @dataclass(frozen=True)
@@ -173,6 +209,7 @@ def _source_hashes() -> dict[str, str]:
     here = Path(__file__)
     files = {
         "harness": here,
+        "benchmark_protocol": here.with_name("bench_markov_humaneval.py"),
         "controller": here.parents[1] / "markov_effort_controller.py",
         "humaneval": here.with_name("humaneval.py"),
         "markov_runner": here.with_name("markov_runner.py"),
@@ -182,6 +219,38 @@ def _source_hashes() -> dict[str, str]:
         "verifier_parity_certificate": VERIFIER_PARITY_CERTIFICATE_PATH,
     }
     return {name: _file_sha256(path) for name, path in files.items()}
+
+
+def _capture_integrity_snapshot(model: str, revision: str) -> IntegritySnapshot:
+    """Re-resolve every mutable input instead of trusting a prior label."""
+
+    try:
+        resolved = resolve_model_reference(model, revision)
+    except ModelIdentityError as exc:
+        raise BenchmarkProtocolError("model identity drift detected") from exc
+    return IntegritySnapshot(
+        git_revision=_git_revision(),
+        git_dirty=_git_dirty(),
+        source_sha256=_source_hashes(),
+        model_identity=resolved.canonical_model_id,
+    )
+
+
+def _require_integrity(
+    expected: IntegritySnapshot,
+    probe: IntegrityProbe,
+    *,
+    phase: str,
+) -> None:
+    if not isinstance(expected, IntegritySnapshot):
+        raise BenchmarkProtocolError("expected integrity snapshot is missing")
+    observed = probe()
+    if not isinstance(observed, IntegritySnapshot):
+        raise BenchmarkProtocolError(f"integrity probe returned an invalid value at {phase}")
+    if observed.git_dirty:
+        raise BenchmarkProtocolError(f"Git tree became dirty at {phase}")
+    if observed != expected:
+        raise BenchmarkProtocolError(f"experiment integrity drift detected at {phase}")
 
 
 def _validate_model_identity(resolved: ResolvedModelReference) -> None:
@@ -296,6 +365,11 @@ def _call_generator(
         "max_output_tokens": feedback.max_output_tokens,
         "deterministic_sampler": True,
         "output_text_sha256": output_sha256,
+        "output_tokens": generated.metrics.output_tokens,
+        "prompt_tokens": generated.metrics.prompt_tokens,
+        "prefill_seconds": generated.metrics.prefill_seconds,
+        "decode_seconds": generated.metrics.decode_seconds,
+        "other_seconds": generated.metrics.other_seconds,
         "uncertainty_logprob_stride": expected_stride,
         "uncertainty_logprobs_renormalized": expected_renormalized,
         "uncertainty_method": expected_method,
@@ -305,10 +379,21 @@ def _call_generator(
             raise BenchmarkProtocolError(f"generator audit mismatch: {field}")
     if getattr(audit, "raw_uncertainty", None) != generated.raw_uncertainty:
         raise BenchmarkProtocolError("generator audit uncertainty mismatch")
-    for field in ("prompt_source_sha256", "prompt_token_ids_sha256"):
+    for field in (
+        "prompt_source_sha256",
+        "prompt_token_ids_sha256",
+        "output_token_ids_sha256",
+    ):
         digest = getattr(audit, field, None)
-        if not isinstance(digest, str) or len(digest) != 64:
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
             raise BenchmarkProtocolError(f"generator audit lacks {field}")
+    finish_reason = getattr(audit, "finish_reason", None)
+    if not isinstance(finish_reason, str) or not finish_reason:
+        raise BenchmarkProtocolError("generator audit lacks finish_reason")
     return _GeneratedCondition(
         generated=generated,
         audit=audit,
@@ -359,6 +444,173 @@ def _aggregate_verification(rows: Sequence[HiddenEvaluationResult]) -> dict[str,
     }
 
 
+def _percentile(values: Sequence[float], probability: float) -> float:
+    ordered = sorted(values)
+    if not ordered:
+        raise BenchmarkProtocolError("cannot summarize an empty bootstrap sample")
+    position = (len(ordered) - 1) * probability
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[lower]
+    weight = position - lower
+    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+
+def _interval(point: float, values: Sequence[float]) -> dict[str, float]:
+    tail = (1.0 - BOOTSTRAP_CONFIDENCE) / 2.0
+    return {
+        "point": point,
+        "lower": _percentile(values, tail),
+        "upper": _percentile(values, 1.0 - tail),
+    }
+
+
+def _ordered_rank_rows(
+    rows: Sequence[tuple[str, float, bool]],
+) -> tuple[tuple[str, float, bool], ...]:
+    indexed: dict[str, tuple[str, float, bool]] = {}
+    for task_id, score, is_error in rows:
+        if task_id in indexed:
+            raise BenchmarkProtocolError("duplicate task in raw-rank observations")
+        if (
+            isinstance(score, bool)
+            or not isinstance(score, (int, float))
+            or not math.isfinite(float(score))
+            or not 0.0 <= float(score) <= 1.0
+        ):
+            raise BenchmarkProtocolError("raw rank score must be finite and in [0, 1]")
+        if type(is_error) is not bool:
+            raise BenchmarkProtocolError("hidden outcome must be boolean")
+        indexed[task_id] = (task_id, float(score), is_error)
+    ordered = tuple(indexed[task_id] for task_id in sorted(indexed))
+    errors = sum(row[2] for row in ordered)
+    if not ordered or errors in {0, len(ordered)}:
+        raise BenchmarkProtocolError(
+            "ranking analysis requires at least one error and one correct task"
+        )
+    return ordered
+
+
+def _analyze_rank_signal(
+    rows: Sequence[tuple[str, float, bool]],
+    *,
+    signal_name: str,
+    seed: int,
+) -> dict[str, Any]:
+    ordered = _ordered_rank_rows(rows)
+    scores = tuple(row[1] for row in ordered)
+    outcomes = tuple(row[2] for row in ordered)
+    count = len(ordered)
+    point_auroc = tie_corrected_auroc(scores, outcomes)
+    point_aurc = area_under_risk_coverage_curve(scores, outcomes)
+    rng = random.Random(seed)
+    auroc_samples: list[float] = []
+    aurc_samples: list[float] = []
+    invalid_auroc = 0
+    for _ in range(BOOTSTRAP_SAMPLES):
+        indices = tuple(rng.randrange(count) for _ in range(count))
+        sample_scores = tuple(scores[index] for index in indices)
+        sample_outcomes = tuple(outcomes[index] for index in indices)
+        aurc_samples.append(
+            area_under_risk_coverage_curve(sample_scores, sample_outcomes)
+        )
+        errors = sum(sample_outcomes)
+        if errors in {0, count}:
+            invalid_auroc += 1
+        else:
+            auroc_samples.append(tie_corrected_auroc(sample_scores, sample_outcomes))
+    if not auroc_samples:
+        raise BenchmarkProtocolError("bootstrap produced no class-valid AUROC sample")
+    errors = sum(outcomes)
+    return {
+        "schema": "mio.raw-rank-uncertainty-statistics.v1",
+        "signal_name": signal_name,
+        "score_semantics": "raw_rank_score_not_calibrated_probability",
+        "task_count": count,
+        "error_count": errors,
+        "correct_count": count - errors,
+        "auroc": _interval(point_auroc, auroc_samples),
+        "aurc": _interval(point_aurc, aurc_samples),
+        "bootstrap": {
+            "method": "ordinary-task-cluster-percentile-v1",
+            "samples": BOOTSTRAP_SAMPLES,
+            "valid_auroc_samples": len(auroc_samples),
+            "invalid_auroc_samples": invalid_auroc,
+            "seed": seed,
+            "confidence": BOOTSTRAP_CONFIDENCE,
+        },
+    }
+
+
+def _analyze_paired_rank(
+    reference_rows: Sequence[tuple[str, float, bool]],
+    candidate_rows: Sequence[tuple[str, float, bool]],
+    *,
+    seed: int,
+) -> dict[str, Any]:
+    reference = _ordered_rank_rows(reference_rows)
+    candidate = _ordered_rank_rows(candidate_rows)
+    if tuple(row[0] for row in reference) != tuple(row[0] for row in candidate):
+        raise BenchmarkProtocolError("paired rank task manifests differ")
+    if tuple(row[2] for row in reference) != tuple(row[2] for row in candidate):
+        raise BenchmarkProtocolError("paired rank labels diverged despite shared verification")
+    reference_scores = tuple(row[1] for row in reference)
+    candidate_scores = tuple(row[1] for row in candidate)
+    outcomes = tuple(row[2] for row in reference)
+    count = len(outcomes)
+    reference_auroc = tie_corrected_auroc(reference_scores, outcomes)
+    candidate_auroc = tie_corrected_auroc(candidate_scores, outcomes)
+    reference_aurc = area_under_risk_coverage_curve(reference_scores, outcomes)
+    candidate_aurc = area_under_risk_coverage_curve(candidate_scores, outcomes)
+    rng = random.Random(seed)
+    auroc_deltas: list[float] = []
+    aurc_deltas: list[float] = []
+    invalid_auroc = 0
+    for _ in range(BOOTSTRAP_SAMPLES):
+        indices = tuple(rng.randrange(count) for _ in range(count))
+        sample_reference = tuple(reference_scores[index] for index in indices)
+        sample_candidate = tuple(candidate_scores[index] for index in indices)
+        sample_outcomes = tuple(outcomes[index] for index in indices)
+        aurc_deltas.append(
+            area_under_risk_coverage_curve(sample_candidate, sample_outcomes)
+            - area_under_risk_coverage_curve(sample_reference, sample_outcomes)
+        )
+        errors = sum(sample_outcomes)
+        if errors in {0, count}:
+            invalid_auroc += 1
+        else:
+            auroc_deltas.append(
+                tie_corrected_auroc(sample_candidate, sample_outcomes)
+                - tie_corrected_auroc(sample_reference, sample_outcomes)
+            )
+    if not auroc_deltas:
+        raise BenchmarkProtocolError("paired bootstrap produced no class-valid AUROC sample")
+    return {
+        "schema": "mio.paired-raw-rank-uncertainty-statistics.v1",
+        "reference_signal": NATIVE_SIGNAL,
+        "candidate_signal": RENORMALIZED_SIGNAL,
+        "score_semantics": "raw_rank_score_not_calibrated_probability",
+        "task_count": count,
+        "shared_outcome_per_task": True,
+        "reference": {"auroc": reference_auroc, "aurc": reference_aurc},
+        "candidate": {"auroc": candidate_auroc, "aurc": candidate_aurc},
+        "deltas": {
+            "direction": "candidate_minus_reference",
+            "auroc": _interval(candidate_auroc - reference_auroc, auroc_deltas),
+            "aurc": _interval(candidate_aurc - reference_aurc, aurc_deltas),
+        },
+        "bootstrap": {
+            "method": "ordinary-task-cluster-percentile-paired-v1",
+            "samples": BOOTSTRAP_SAMPLES,
+            "valid_auroc_samples": len(auroc_deltas),
+            "invalid_auroc_samples": invalid_auroc,
+            "seed": seed,
+            "confidence": BOOTSTRAP_CONFIDENCE,
+        },
+    }
+
+
 def run_paired_uncertainty_ablation(
     *,
     cases: Sequence[HumanEvalCase],
@@ -367,18 +619,19 @@ def run_paired_uncertainty_ablation(
     native_generator: AuditedGenerator,
     renormalized_generator: AuditedGenerator,
     hidden_evaluator: HiddenEvaluator,
-    git_revision: str,
-    git_dirty: bool,
+    expected_integrity: IntegritySnapshot,
+    integrity_probe: IntegrityProbe,
     config: PairedUncertaintyConfig | None = None,
 ) -> dict[str, Any]:
     """Run the pre-registered 32-task ablation and return a source-free report."""
 
     settings = config or PairedUncertaintyConfig()
     _validate_model_identity(resolved_model)
-    if git_dirty:
+    if expected_integrity.git_dirty:
         raise BenchmarkProtocolError("paired uncertainty benchmark requires a clean Git tree")
-    if len(git_revision) != 40 or any(character not in "0123456789abcdef" for character in git_revision):
-        raise BenchmarkProtocolError("Git revision must be a full commit digest")
+    if expected_integrity.model_identity != resolved_model.canonical_model_id:
+        raise BenchmarkProtocolError("integrity snapshot/model identity mismatch")
+    _require_integrity(expected_integrity, integrity_probe, phase="pre_generation")
     parity = verifier_parity_certificate_identity()
     if settings.verifier_timeout_seconds != parity["timeout_seconds_per_task"]:
         raise BenchmarkProtocolError("verifier timeout must match the parity certificate")
@@ -449,6 +702,22 @@ def run_paired_uncertainty_ablation(
             != getattr(renormalized.audit, "prompt_token_ids_sha256")
         ):
             raise BenchmarkProtocolError("paired conditions did not receive the same prompt")
+        native_decode_identity = (
+            native.output_sha256,
+            getattr(native.audit, "output_token_ids_sha256"),
+            native.generated.metrics.output_tokens,
+            getattr(native.audit, "finish_reason"),
+        )
+        renormalized_decode_identity = (
+            renormalized.output_sha256,
+            getattr(renormalized.audit, "output_token_ids_sha256"),
+            renormalized.generated.metrics.output_tokens,
+            getattr(renormalized.audit, "finish_reason"),
+        )
+        if native_decode_identity != renormalized_decode_identity:
+            raise BenchmarkProtocolError(
+                "focused ablation decode identity mismatch before hidden evaluation"
+            )
         generated_pairs.append(
             _GeneratedPair(
                 case=case,
@@ -458,79 +727,86 @@ def run_paired_uncertainty_ablation(
             )
         )
 
-    # Hard phase boundary: no hidden call appears above this line.
-    native_hidden: list[HiddenEvaluationResult] = []
-    renormalized_hidden: list[HiddenEvaluationResult] = []
-    for pair in generated_pairs:
-        native_result = hidden_evaluator(pair.case, pair.native.generated.completion)
-        renormalized_result = hidden_evaluator(
-            pair.case,
-            pair.renormalized.generated.completion,
-        )
-        if not isinstance(native_result, HiddenEvaluationResult) or not isinstance(
-            renormalized_result, HiddenEvaluationResult
-        ):
-            raise TypeError("hidden evaluator must return HiddenEvaluationResult")
-        native_hidden.append(native_result)
-        renormalized_hidden.append(renormalized_result)
+    _require_integrity(expected_integrity, integrity_probe, phase="pre_hidden")
 
-    native_observations = tuple(
-        UncertaintyObservation(
-            task_cluster_id=pair.case.task_id,
-            predicted_error_probability=float(pair.native.generated.raw_uncertainty),
-            is_error=not result.passed,
+    # Hard phase boundary: identical outputs are verified once, then that one
+    # immutable task label is reused by both ranking signals.
+    shared_hidden: list[HiddenEvaluationResult] = []
+    for pair in generated_pairs:
+        result = hidden_evaluator(pair.case, pair.native.generated.completion)
+        if not isinstance(result, HiddenEvaluationResult):
+            raise TypeError("hidden evaluator must return HiddenEvaluationResult")
+        shared_hidden.append(result)
+
+    native_rank_rows = tuple(
+        (
+            pair.case.task_id,
+            float(pair.native.generated.raw_uncertainty),
+            not result.passed,
         )
-        for pair, result in zip(generated_pairs, native_hidden, strict=True)
+        for pair, result in zip(generated_pairs, shared_hidden, strict=True)
     )
-    renormalized_observations = tuple(
-        UncertaintyObservation(
-            task_cluster_id=pair.case.task_id,
-            predicted_error_probability=float(pair.renormalized.generated.raw_uncertainty),
-            is_error=not result.passed,
+    renormalized_rank_rows = tuple(
+        (
+            pair.case.task_id,
+            float(pair.renormalized.generated.raw_uncertainty),
+            not result.passed,
         )
-        for pair, result in zip(generated_pairs, renormalized_hidden, strict=True)
+        for pair, result in zip(generated_pairs, shared_hidden, strict=True)
     )
-    native_statistics = analyze_uncertainty(
-        native_observations,
+    native_statistics = _analyze_rank_signal(
+        native_rank_rows,
         signal_name=NATIVE_SIGNAL,
-        bootstrap_samples=BOOTSTRAP_SAMPLES,
         seed=settings.seed,
-        confidence=BOOTSTRAP_CONFIDENCE,
     )
-    renormalized_statistics = analyze_uncertainty(
-        renormalized_observations,
+    renormalized_statistics = _analyze_rank_signal(
+        renormalized_rank_rows,
         signal_name=RENORMALIZED_SIGNAL,
-        bootstrap_samples=BOOTSTRAP_SAMPLES,
         seed=settings.seed,
-        confidence=BOOTSTRAP_CONFIDENCE,
     )
-    paired_statistics = analyze_paired_uncertainty(
-        native_observations,
-        renormalized_observations,
-        reference_signal=NATIVE_SIGNAL,
-        candidate_signal=RENORMALIZED_SIGNAL,
-        bootstrap_samples=BOOTSTRAP_SAMPLES,
+    paired_statistics = _analyze_paired_rank(
+        native_rank_rows,
+        renormalized_rank_rows,
         seed=settings.seed,
-        confidence=BOOTSTRAP_CONFIDENCE,
     )
 
     native_outputs = [
-        {"task_id": pair.case.task_id, "output_sha256": pair.native.output_sha256}
+        {
+            "task_id": pair.case.task_id,
+            "output_text_sha256": pair.native.output_sha256,
+            "output_token_ids_sha256": getattr(
+                pair.native.audit,
+                "output_token_ids_sha256",
+            ),
+            "output_tokens": pair.native.generated.metrics.output_tokens,
+            "finish_reason": getattr(pair.native.audit, "finish_reason"),
+        }
         for pair in generated_pairs
     ]
     renormalized_outputs = [
         {
             "task_id": pair.case.task_id,
-            "output_sha256": pair.renormalized.output_sha256,
+            "output_text_sha256": pair.renormalized.output_sha256,
+            "output_token_ids_sha256": getattr(
+                pair.renormalized.audit,
+                "output_token_ids_sha256",
+            ),
+            "output_tokens": pair.renormalized.generated.metrics.output_tokens,
+            "finish_reason": getattr(pair.renormalized.audit, "finish_reason"),
         }
         for pair in generated_pairs
     ]
     paired_outputs = [
         {
             "task_id": pair.case.task_id,
-            "native_output_sha256": pair.native.output_sha256,
-            "renormalized_output_sha256": pair.renormalized.output_sha256,
-            "equal": pair.native.output_sha256 == pair.renormalized.output_sha256,
+            "output_text_sha256": pair.native.output_sha256,
+            "output_token_ids_sha256": getattr(
+                pair.native.audit,
+                "output_token_ids_sha256",
+            ),
+            "output_tokens": pair.native.generated.metrics.output_tokens,
+            "finish_reason": getattr(pair.native.audit, "finish_reason"),
+            "conditions_equal": True,
         }
         for pair in generated_pairs
     ]
@@ -544,14 +820,59 @@ def run_paired_uncertainty_ablation(
         }
         for pair in generated_pairs
     ]
-    identical = sum(row["equal"] for row in paired_outputs)
+    paired_label_rows = [
+        {
+            "task_id": pair.case.task_id,
+            "native_is_error": not result.passed,
+            "renormalized_is_error": not result.passed,
+            "shared_verification": True,
+        }
+        for pair, result in zip(generated_pairs, shared_hidden, strict=True)
+    ]
+    private_result_rows = [
+        {
+            "task_id": pair.case.task_id,
+            "native": {
+                "raw_rank_score": pair.native.generated.raw_uncertainty,
+                "generation_metrics": asdict(pair.native.generated.metrics),
+                "uncertainty_scoring_seconds": getattr(
+                    pair.native.audit,
+                    "uncertainty_scoring_seconds",
+                ),
+            },
+            "renormalized": {
+                "raw_rank_score": pair.renormalized.generated.raw_uncertainty,
+                "generation_metrics": asdict(pair.renormalized.generated.metrics),
+                "uncertainty_scoring_seconds": getattr(
+                    pair.renormalized.audit,
+                    "uncertainty_scoring_seconds",
+                ),
+            },
+            "shared_hidden": {
+                "score": result.score,
+                "passed": result.passed,
+                "status": result.status,
+                "elapsed_seconds": result.elapsed_seconds,
+            },
+            "decode_identity": paired_output,
+        }
+        for pair, result, paired_output in zip(
+            generated_pairs,
+            shared_hidden,
+            paired_outputs,
+            strict=True,
+        )
+    ]
     native_rows = tuple(pair.native for pair in generated_pairs)
     renormalized_rows = tuple(pair.renormalized for pair in generated_pairs)
+    _require_integrity(expected_integrity, integrity_probe, phase="post_analysis")
     return {
         "schema": REPORT_SCHEMA,
         "protocol": {
             "revision": PROTOCOL_REVISION,
-            "phase_order": "generate-all-then-verify-each-condition-once",
+            "phase_order": "generate-all-confirm-identical-then-verify-once-per-task",
+            "score_semantics": "raw_rank_score_not_calibrated_probability",
+            "probability_calibration_metrics_included": False,
             "conditions": {
                 NATIVE_SIGNAL: asdict(native_generator.settings),
                 RENORMALIZED_SIGNAL: asdict(renormalized_generator.settings),
@@ -565,7 +886,7 @@ def run_paired_uncertainty_ablation(
             },
         },
         "provenance": {
-            "git_revision": git_revision,
+            "git_revision": expected_integrity.git_revision,
             "git_dirty": False,
             "model": resolved_model.canonical_model_id,
             "corpus_revision": HUMANEVAL_REVISION,
@@ -577,7 +898,7 @@ def run_paired_uncertainty_ablation(
                 "mlx": _package_version("mlx"),
                 "mlx-lm": _package_version("mlx-lm"),
             },
-            "source_sha256": _source_hashes(),
+            "source_sha256": dict(expected_integrity.source_sha256),
             "verifier_parity_certificate": parity,
         },
         "corpus": manifest,
@@ -591,27 +912,49 @@ def run_paired_uncertainty_ablation(
                 renormalized_outputs
             ),
             "paired_output_manifest_sha256": _canonical_sha256(paired_outputs),
-            "identical_outputs": identical,
-            "mismatched_outputs": len(generated_pairs) - identical,
-            "all_outputs_identical": identical == len(generated_pairs),
+            "identical_outputs": len(generated_pairs),
+            "mismatched_outputs": 0,
+            "all_outputs_identical": True,
+            "decode_identity_fields": [
+                "output_text_sha256",
+                "output_token_ids_sha256",
+                "output_tokens",
+                "finish_reason",
+            ],
+            "shared_hidden_labels": len(generated_pairs),
+            "paired_label_manifest_sha256": _canonical_sha256(paired_label_rows),
+        },
+        "row_commitment": {
+            "schema": "mio.paired-uncertainty-private-row-commitment.v1",
+            "rows": len(private_result_rows),
+            "manifest_sha256": _canonical_sha256(private_result_rows),
+            "preimage_serialized": False,
+            "committed_fields": [
+                "raw_rank_scores",
+                "generation_timing",
+                "uncertainty_scoring_timing",
+                "shared_hidden_score_outcome_status_timing",
+                "decode_identity",
+            ],
         },
         "timing": {
             NATIVE_SIGNAL: {
                 "generation": _aggregate_generation(native_rows),
-                "verification": _aggregate_verification(native_hidden),
             },
             RENORMALIZED_SIGNAL: {
                 "generation": _aggregate_generation(renormalized_rows),
-                "verification": _aggregate_verification(renormalized_hidden),
             },
+            "shared_verification": _aggregate_verification(shared_hidden),
         },
         "statistics": {
-            NATIVE_SIGNAL: native_statistics.to_mapping(),
-            RENORMALIZED_SIGNAL: renormalized_statistics.to_mapping(),
-            "paired": paired_statistics.to_mapping(),
+            NATIVE_SIGNAL: native_statistics,
+            RENORMALIZED_SIGNAL: renormalized_statistics,
+            "paired": paired_statistics,
         },
         "claim": {
-            "eligible_as_focused_scoring_ablation": identical == len(generated_pairs),
+            "eligible_as_focused_scoring_ablation": True,
+            "raw_score_is_calibrated_probability": False,
+            "probability_calibration_claim": False,
             "quality_claim": "descriptive-calibration-split-only",
             "heldout_opened": False,
         },
@@ -679,13 +1022,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     output = args.output.expanduser().resolve()
     if output == repository_root or repository_root in output.parents:
         raise SystemExit("--output must be outside the Git worktree")
-    revision = _git_revision()
-    if _git_dirty():
-        raise SystemExit("paired uncertainty benchmark requires a clean Git tree")
     try:
         resolved = resolve_model_reference(args.model, args.model_revision)
     except ModelIdentityError as exc:
         raise SystemExit(f"model identity error: {exc}") from exc
+    initial_integrity = IntegritySnapshot(
+        git_revision=_git_revision(),
+        git_dirty=_git_dirty(),
+        source_sha256=_source_hashes(),
+        model_identity=resolved.canonical_model_id,
+    )
+    if initial_integrity.git_dirty:
+        raise SystemExit("paired uncertainty benchmark requires a clean Git tree")
+    integrity_probe = lambda: _capture_integrity_snapshot(  # noqa: E731
+        args.model,
+        args.model_revision,
+    )
     corpus_path = args.corpus or fetch_humaneval()
     pinned = load_humaneval(corpus_path)
     cases = split_humaneval(pinned, "calibration")
@@ -694,6 +1046,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         seed=args.seed,
     )
     native, renormalized = _load_generators(resolved)
+    _require_integrity(initial_integrity, integrity_probe, phase="post_model_load")
+    started_at_utc = datetime.now(timezone.utc).isoformat()
     report = run_paired_uncertainty_ablation(
         cases=cases,
         pinned_corpus=pinned,
@@ -701,11 +1055,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         native_generator=native,
         renormalized_generator=renormalized,
         hidden_evaluator=_verification_evaluator(config.verifier_timeout_seconds),
-        git_revision=revision,
-        git_dirty=False,
+        expected_integrity=initial_integrity,
+        integrity_probe=integrity_probe,
         config=config,
     )
-    report["launched_at_utc"] = datetime.now(timezone.utc).isoformat()
+    completed_at_utc = datetime.now(timezone.utc).isoformat()
+    _require_integrity(
+        initial_integrity,
+        integrity_probe,
+        phase="post_run_before_write",
+    )
+    report["started_at_utc"] = started_at_utc
+    report["completed_at_utc"] = completed_at_utc
     _write_json(output, report)
     print(
         f"[paired-uncertainty] output={output} tasks={report['pairing']['tasks']} "
