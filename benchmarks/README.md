@@ -4,6 +4,19 @@ This directory contains published historical measurements and preliminary R&D
 artifacts. The canonical methods, formulas, result status, and claim boundary are in
 [`docs/16-benchmarks.md`](../docs/16-benchmarks.md).
 
+## Coding quality gate
+
+[`coding-quality-preregistration-v1.json`](coding-quality-preregistration-v1.json)
+freezes the gate-off/gate-on MioCodeBench v1 comparison before execution. It
+uses one implementation commit and one target/DFlash stack for both arms, 4
+smoke tasks, 8 development tasks and 16 held-out pairs, generate-then-evaluate
+leakage isolation, paired statistics, explicit claim gates, and content-free
+evidence. The readable protocol is
+[`docs/19-coding-quality-gate.md`](../docs/19-coding-quality-gate.md).
+
+This is a preregistration, not a result. No coding-quality or speed claim is
+currently supported by it.
+
 ## Qwen 3.6 matrix harness
 
 `scripts/bench_qwen36_matrix.py` compares:

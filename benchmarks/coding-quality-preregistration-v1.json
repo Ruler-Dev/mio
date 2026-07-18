@@ -1,0 +1,402 @@
+{
+  "schema": "mio.coding-quality-preregistration.v1",
+  "status": "preregistered_no_results",
+  "preregistered_at_utc": "2026-07-18T14:23:55Z",
+  "protocol_revision": "mio-codebench-v1",
+  "documentation": "docs/19-coding-quality-gate.md",
+  "amendment_policy": "Any implementation, prompt, threshold, task, evaluator, model, schedule, or analysis change creates a new protocol version before scored execution.",
+  "hypothesis": {
+    "primary_outcome": "hidden_task_success",
+    "estimand": "mean(gate_on - gate_off) over paired heldout tasks",
+    "null": "paired_difference_le_0",
+    "alternative": "paired_difference_gt_0",
+    "direction_preregistered": true
+  },
+  "conditions": {
+    "experimental_factor_only": "coding_quality_gate",
+    "same_clean_implementation_commit_required": true,
+    "arms": [
+      {
+        "id": "gate_off",
+        "quality_gate_enabled": false,
+        "availability": "benchmark_control_only"
+      },
+      {
+        "id": "gate_on",
+        "quality_gate_enabled": true,
+        "availability": "production_default"
+      }
+    ],
+    "must_match_between_arms": [
+      "agent_loop",
+      "base_system_prompt",
+      "prompt_policy",
+      "target_model",
+      "drafter_model",
+      "sampling",
+      "tool_policy",
+      "allowed_roots",
+      "round_budget",
+      "token_budget",
+      "task_timeout",
+      "package_lock",
+      "hardware"
+    ],
+    "permitted_arm_differences": [
+      "gate_instructions",
+      "gate_state",
+      "gate_feedback",
+      "gate_evidence_collection"
+    ]
+  },
+  "models": {
+    "identity_verification": {
+      "method": "local-sha256-v1",
+      "fail_closed_before_run": true,
+      "verify_after_run": true,
+      "serialize_absolute_paths": false
+    },
+    "target": {
+      "repository_label": "mlx-community/Qwen3.5-4B-4bit",
+      "content_identity": "local-sha256-v1:7d7ea69d09ada4f1d2f49f6ca651441ac279b95b6d280f259da04fbde504376f"
+    },
+    "drafter": {
+      "backend": "dflash",
+      "repository_label": "z-lab/Qwen3.5-4B-DFlash",
+      "content_identity": "local-sha256-v1:4b60bced36f602da85a6447d3648e7ac37a0c5cce68d505a49664252c0586b98"
+    },
+    "comparison_scope": "Both arms use the same target and DFlash stack; this protocol cannot support a DFlash-versus-target speed or parity claim."
+  },
+  "implementation_lock": {
+    "git_revision": "bind_full_clean_revision_at_run",
+    "git_dirty_allowed": false,
+    "source_digest_required": true,
+    "source_digest_scope": [
+      "agent_loop",
+      "quality_gate",
+      "prompt_policy",
+      "tool_policy",
+      "benchmark_runner",
+      "evaluator_adapter",
+      "statistics"
+    ],
+    "one_revision_for_both_arms": true
+  },
+  "gate_contract": {
+    "activation": "successful_write_or_edit",
+    "mutation_starts_new_epoch": true,
+    "later_mutation_invalidates_prior_validation": true,
+    "authoritative_source": "allowed_successful_tool_audit_event",
+    "assistant_prose_is_evidence": false,
+    "unknown_command_is_evidence": false,
+    "unsuccessful_validation_satisfies_gate": false,
+    "missing_evidence_terminal_state": "incomplete",
+    "unsupported_effort_terminal_state": "incomplete",
+    "silent_effort_aliasing_forbidden": true,
+    "validation_categories": [
+      "test",
+      "build",
+      "static",
+      "diff",
+      "review"
+    ]
+  },
+  "effort": {
+    "primary_profile": "medium",
+    "production_cli_config_default": "medium",
+    "standalone_gate_constructor_default": "high",
+    "profile_digest_required": true,
+    "names": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "ultra"
+    ],
+    "monotonic_distinctness_required": true,
+    "unknown_bash_or_mcp_mutation_classification": "code_fail_closed",
+    "upper_tier_policy": "A tier that cannot satisfy its distinct requirement is unavailable or incomplete; it is never silently mapped or downgraded to a lower tier.",
+    "profiles": {
+      "low": {
+        "requires": ["any_successful_trusted_validation"]
+      },
+      "medium": {
+        "code_or_unknown_requires_any": ["test", "build"],
+        "documentation_only_requires": ["diff"]
+      },
+      "high": {
+        "requires": ["test"],
+        "requires_any_additional": ["static", "diff"]
+      },
+      "xhigh": {
+        "requires": ["test", "static", "diff"]
+      },
+      "ultra": {
+        "requires": ["test", "static", "diff"],
+        "requires_any_additional": [
+          "trusted_review",
+          "second_successful_test_with_distinct_command_digest"
+        ]
+      }
+    }
+  },
+  "corpus": {
+    "name": "MioCodeBench",
+    "version": 1,
+    "total_tasks": 28,
+    "splits": {
+      "smoke": {
+        "count": 4,
+        "use": "runner_workspace_and_evaluator_plumbing_only",
+        "included_in_confirmatory_analysis": false
+      },
+      "development": {
+        "count": 8,
+        "use": "implementation_debugging_and_documented_default_selection",
+        "included_in_confirmatory_analysis": false
+      },
+      "heldout": {
+        "count": 16,
+        "use": "single_sealed_confirmatory_comparison",
+        "included_in_confirmatory_analysis": true
+      }
+    },
+    "stable_opaque_ids": {
+      "smoke": ["s01", "s02", "s03", "s04"],
+      "development": ["d01", "d02", "d03", "d04", "d05", "d06", "d07", "d08"],
+      "heldout": ["h01", "h02", "h03", "h04", "h05", "h06", "h07", "h08", "h09", "h10", "h11", "h12", "h13", "h14", "h15", "h16"]
+    },
+    "manifest_fields": [
+      "opaque_task_id",
+      "split",
+      "initial_public_tree_digest",
+      "prompt_digest",
+      "hidden_evaluator_digest",
+      "language",
+      "task_family",
+      "timeout_seconds",
+      "allowed_edit_scope"
+    ],
+    "manifest_digest": "publish_seal_before_any_heldout_generation",
+    "separate_workspace_per_arm": true,
+    "hidden_evaluator_outside_agent_roots": true,
+    "peer_arm_outside_agent_roots": true
+  },
+  "leakage_firewall": {
+    "phase_order": [
+      "verify_identities_and_seals",
+      "generate_all_32_heldout_arms_without_hidden_evaluation",
+      "seal_final_trees_and_content_free_trajectories",
+      "reverify_identities_and_seals",
+      "evaluate_all_valid_arms_once",
+      "aggregate_once"
+    ],
+    "hidden_labels_available_during_generation": false,
+    "hidden_output_returned_to_agent": false,
+    "remediation_after_hidden_evaluation": false,
+    "candidate_selection_using_hidden_evaluation": false,
+    "allowed_infrastructure_retry_reasons": [
+      "process_crash",
+      "host_sleep_or_restart",
+      "model_identity_mismatch",
+      "fixture_copy_failure",
+      "evaluator_infrastructure_failure",
+      "telemetry_loss"
+    ],
+    "pair_rerun_required_for_infrastructure_retry": true,
+    "same_seed_required_for_infrastructure_retry": true,
+    "all_attempts_preserved": true,
+    "outcomes_not_retryable": [
+      "model_error",
+      "tool_error",
+      "task_timeout",
+      "gate_incomplete",
+      "bad_patch",
+      "public_test_failure",
+      "hidden_test_failure"
+    ]
+  },
+  "schedule": {
+    "design": "paired_seeded_counterbalanced_ab_ba",
+    "seed": 20260718,
+    "heldout_pairs": 16,
+    "heldout_gate_off_first": 8,
+    "heldout_gate_on_first": 8,
+    "derive_order_from": "sha256(seed || opaque_task_id)",
+    "serialize_before_generation": true,
+    "reset_between_arms": [
+      "agent_history",
+      "workspace",
+      "prefix_cache",
+      "mutable_runtime_state"
+    ],
+    "warmups_fixed": true,
+    "warmups_excluded": true,
+    "warmups_may_use_hidden_fixtures": false
+  },
+  "sampling": {
+    "temperature": 0.0,
+    "top_p": 1.0,
+    "top_k": 0,
+    "seed": 20260718,
+    "chat_template": true,
+    "exact_runtime_parameters": "serialize_in_run_artifact_and_require_arm_identity"
+  },
+  "outcomes": {
+    "primary": {
+      "name": "hidden_task_success",
+      "type": "binary",
+      "requires_all": [
+        "hidden_evaluator_pass",
+        "public_regression_checks_pass",
+        "valid_patch",
+        "edit_scope_pass",
+        "no_isolation_violation",
+        "not_infrastructure_invalid"
+      ]
+    },
+    "secondary_quality": [
+      "hidden_evaluator_pass",
+      "public_test_pass",
+      "regression_free",
+      "valid_patch",
+      "edit_scope_pass",
+      "latest_epoch_validation_pass",
+      "incomplete_terminal_state",
+      "baseline_pass_gate_fail_discordance"
+    ],
+    "efficiency": [
+      "model_rounds",
+      "input_tokens",
+      "output_tokens",
+      "tool_calls",
+      "mutation_count",
+      "validation_attempts_by_category",
+      "ttft_seconds",
+      "decode_tokens_per_second",
+      "model_active_seconds",
+      "tool_seconds",
+      "end_to_end_task_seconds",
+      "evaluator_seconds_separate",
+      "peak_unified_memory_bytes",
+      "successful_tasks_per_host_hour"
+    ]
+  },
+  "statistics": {
+    "confirmatory_split_only": "heldout",
+    "paired_binary": {
+      "report": [
+        "arm_counts",
+        "arm_rates",
+        "paired_percentage_point_difference",
+        "paired_2x2_cells",
+        "two_sided_exact_mcnemar_p",
+        "paired_bootstrap_95_percent_interval"
+      ]
+    },
+    "positive_continuous": {
+      "report": [
+        "per_task_paired_ratios",
+        "median_paired_ratio",
+        "paired_bootstrap_95_percent_interval",
+        "arm_p50",
+        "arm_p95"
+      ]
+    },
+    "bootstrap": {
+      "unit": "task_pair",
+      "samples": 10000,
+      "confidence": 0.95,
+      "seed": 20260718
+    },
+    "primary_comparisons": 1,
+    "secondary_p_values": "descriptive_holm_within_quality_and_efficiency_families",
+    "zero_denominator_policy": "explicit_not_favorable_imputation",
+    "missing_pair_policy": "report_exclude_and_mark_non_promotable"
+  },
+  "claim_gates": {
+    "mandatory_gate_correctness": {
+      "requires": [
+        "mutation_invalidates_old_evidence_test_pass",
+        "failed_validation_does_not_satisfy_test_pass",
+        "final_rejected_when_evidence_missing_test_pass",
+        "unsupported_upper_tier_fails_closed_test_pass"
+      ]
+    },
+    "heldout_quality_improvement": {
+      "requires": [
+        "primary_point_difference_gt_0",
+        "primary_paired_bootstrap_lower_bound_gt_0",
+        "exact_mcnemar_p_lt_0.05",
+        "all_16_pairs_present",
+        "zero_security_or_evaluator_isolation_violations"
+      ]
+    },
+    "no_material_raw_throughput_regression": {
+      "ratio": "gate_on_decode_tokens_per_second / gate_off_decode_tokens_per_second",
+      "paired_bootstrap_lower_bound_gte": 0.95
+    },
+    "no_material_task_efficiency_regression": {
+      "ratio": "gate_off_end_to_end_task_seconds / gate_on_end_to_end_task_seconds",
+      "paired_bootstrap_lower_bound_gte": 0.8
+    },
+    "coding_quality_breakthrough": {
+      "requires": [
+        "heldout_quality_improvement",
+        "primary_point_difference_gte_0.125",
+        "no_material_raw_throughput_regression",
+        "no_material_task_efficiency_regression",
+        "zero_baseline_pass_gate_fail_discordances",
+        "independent_clean_replication_same_direction_and_safety_gates"
+      ]
+    }
+  },
+  "content_free_evidence": {
+    "hmac": {
+      "required_for_low_entropy_identifiers": true,
+      "key_scope": "run",
+      "key_committed_to_repository": false,
+      "unsalted_path_or_command_hashes_forbidden": true
+    },
+    "allowed": [
+      "schema_and_identity_metadata",
+      "split",
+      "opaque_hmac_task_and_arm_ids",
+      "hmac_request_tree_path_and_command_ids",
+      "path_extensions",
+      "aggregate_file_and_byte_counts",
+      "tool_category_permission_and_outcome_enums",
+      "mutation_epoch",
+      "validation_category_outcome_and_epoch",
+      "gate_profile_digest_decision_and_incomplete_reason_enum",
+      "token_round_tool_mutation_and_validation_counts",
+      "synchronized_timing_and_memory",
+      "boolean_evaluator_outcomes",
+      "aggregate_paired_statistics_and_claim_gate_decisions"
+    ],
+    "forbidden": [
+      "raw_prompt",
+      "fixture_source",
+      "generated_source",
+      "diff",
+      "assistant_prose",
+      "shell_command_text",
+      "stdout",
+      "stderr",
+      "test_names",
+      "plaintext_paths",
+      "expected_patch",
+      "hidden_test_output",
+      "credentials",
+      "access_tokens",
+      "usernames",
+      "absolute_home_paths"
+    ],
+    "published_artifacts_append_only": true
+  },
+  "result_status": {
+    "benchmark_executed": false,
+    "results_present": false,
+    "claims_permitted_before_execution": []
+  }
+}
