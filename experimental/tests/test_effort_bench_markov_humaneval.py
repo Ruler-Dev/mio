@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 import json
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from experimental.effort.bench_markov_humaneval import (
     CALIBRATION_ARTIFACT_SCHEMA,
     EVALUATION_SCHEMA,
     PROTOCOL_REVISION,
+    VERIFIER_PARITY_CERTIFICATE_PATH,
     BenchmarkProtocolError,
     CalibrationArtifact,
     CalibrationConfig,
@@ -23,6 +25,7 @@ from experimental.effort.bench_markov_humaneval import (
     filter_underpowered_transition_observations,
     load_calibration_artifact,
     save_calibration_artifact,
+    verifier_parity_certificate_identity,
 )
 from experimental.effort.calibration import TransitionCalibrationObservation
 from experimental.effort.humaneval import (
@@ -260,6 +263,9 @@ def test_calibration_defers_hidden_evaluation_and_discards_task_labels(
     assert artifact.protocol["hidden_evaluation_after_all_generation"] is True
     assert artifact.protocol["hidden_labels_serialized"] is False
     assert artifact.protocol["published_transition_depths"] == [1]
+    assert artifact.protocol["verifier_parity_certificate"] == (
+        verifier_parity_certificate_identity()
+    )
 
 
 def test_artifact_round_trip_and_exact_identity_rejection(
@@ -282,6 +288,101 @@ def test_artifact_round_trip_and_exact_identity_rejection(
     tampered["uncertainty_calibrator"]["identity"]["backend"] = "other-backend"
     with pytest.raises(BenchmarkProtocolError, match="identity mismatch"):
         CalibrationArtifact.from_mapping(tampered)
+
+    stale_certificate = artifact.to_mapping()
+    stale_certificate["protocol"]["verifier_parity_certificate"][
+        "certificate_sha256"
+    ] = ZERO_SHA
+    with pytest.raises(BenchmarkProtocolError, match="parity certificate mismatch"):
+        CalibrationArtifact.from_mapping(stale_certificate)
+
+
+def test_verifier_parity_certificate_fails_closed_on_missing_tampered_or_stale_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    missing = tmp_path / "missing.json"
+    with pytest.raises(BenchmarkProtocolError, match="missing"):
+        verifier_parity_certificate_identity(missing)
+
+    tampered = tmp_path / "tampered.json"
+    tampered.write_bytes(VERIFIER_PARITY_CERTIFICATE_PATH.read_bytes() + b"\n")
+    with pytest.raises(BenchmarkProtocolError, match="digest mismatch"):
+        verifier_parity_certificate_identity(tampered)
+
+    semantic_tamper = json.loads(
+        VERIFIER_PARITY_CERTIFICATE_PATH.read_text(encoding="utf-8")
+    )
+    semantic_tamper["schema_version"] = 999
+    semantic_path = tmp_path / "semantic-tamper.json"
+    semantic_payload = (
+        json.dumps(semantic_tamper, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    semantic_path.write_bytes(semantic_payload)
+    monkeypatch.setattr(
+        benchmark_module,
+        "VERIFIER_PARITY_CERTIFICATE_SHA256",
+        hashlib.sha256(semantic_payload).hexdigest(),
+    )
+    with pytest.raises(BenchmarkProtocolError, match="schema mismatch"):
+        verifier_parity_certificate_identity(semantic_path)
+
+    symlink = tmp_path / "certificate-link.json"
+    symlink.symlink_to(VERIFIER_PARITY_CERTIFICATE_PATH)
+    with pytest.raises(BenchmarkProtocolError, match="cannot read"):
+        verifier_parity_certificate_identity(symlink)
+
+    monkeypatch.setattr(
+        benchmark_module,
+        "VERIFIER_PARITY_CERTIFICATE_SHA256",
+        benchmark_module._file_sha256(VERIFIER_PARITY_CERTIFICATE_PATH),
+    )
+
+    original_file_sha256 = benchmark_module._file_sha256
+
+    def stale_source(path: Path) -> str:
+        if path.name == "agent.py":
+            return ZERO_SHA
+        return original_file_sha256(path)
+
+    monkeypatch.setattr(benchmark_module, "_file_sha256", stale_source)
+    with pytest.raises(BenchmarkProtocolError, match="source bundle is stale"):
+        verifier_parity_certificate_identity()
+
+
+def test_calibration_and_evaluation_require_the_certified_verifier_timeout(
+    calibration_bundle,
+) -> None:
+    artifact, _, _, _, _ = calibration_bundle
+    wrong_timeout = 5.0
+
+    with pytest.raises(BenchmarkProtocolError, match="calibration timeout"):
+        calibrate_markov_humaneval(
+            cases=(),
+            pinned_corpus=(),
+            identity=IDENTITY,
+            provenance=_provenance(()),
+            generator=_FakeGenerator(),
+            hidden_evaluator=_FakeHiddenEvaluator(),
+            config=CalibrationConfig(
+                hidden_evaluator_timeout_seconds=wrong_timeout,
+            ),
+        )
+
+    with pytest.raises(BenchmarkProtocolError, match="evaluation timeout"):
+        evaluate_markov_humaneval(
+            cases=(),
+            pinned_corpus=(),
+            split="heldout",
+            limited=True,
+            artifact=artifact,
+            expected_identity=IDENTITY,
+            provenance=_provenance((), split="heldout"),
+            generator=_FakeGenerator(),
+            hidden_evaluator=_FakeHiddenEvaluator(),
+            generator_deterministic=True,
+            hidden_evaluator_timeout_seconds=wrong_timeout,
+        )
 
 
 def _transition_row(
@@ -440,10 +541,12 @@ def test_evaluation_schema_metrics_provenance_and_claims_fail_closed(
             "limited_run",
             "git_dirty",
             "leakage_detected",
-            "verifier_canonical_parity_unverified",
         ],
         "requires_full_heldout_tasks": 132,
     }
+    assert result["verifier_parity_certificate"] == (
+        verifier_parity_certificate_identity()
+    )
     assert result["provenance"]["git_dirty"] is True
     assert result["provenance"]["leakage_detected"] is True
     assert all(

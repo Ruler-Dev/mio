@@ -27,7 +27,9 @@ import hashlib
 import importlib.metadata
 import json
 import math
+import os
 from pathlib import Path
+import stat
 import subprocess
 import time
 from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
@@ -87,16 +89,38 @@ from experimental.markov_effort_controller import (
 
 CALIBRATION_ARTIFACT_SCHEMA = "mio.markov-effort-calibration.v1"
 EVALUATION_SCHEMA = "mio.markov-effort-humaneval-evaluation.v1"
-PROTOCOL_REVISION = "mio-markov-humaneval-two-phase-v1"
+PROTOCOL_REVISION = "mio-markov-humaneval-two-phase-v2"
 EXPECTED_HUMANEVAL_TASKS = 164
 EXPECTED_HELDOUT_TASKS = EXPECTED_HUMANEVAL_TASKS - CALIBRATION_TASKS
 OFFICIAL_FULL_MANIFEST_SHA256 = "8a99055becc53543c0553b340b5dc1c3a964f37e4b7c2f8d581dca73de92d79d"
 OFFICIAL_CALIBRATION_MANIFEST_SHA256 = "a3e588c4f625d4a7f911ce108eca03d886cd5cafd86f9452ae2f13ba8243fefb"
 OFFICIAL_HELDOUT_MANIFEST_SHA256 = "cfbcdb420dd9d269b184dbb8f2c97d9c0994270c6828757fc0d30270e8b2c3ef"
-# Must be flipped only by the canonical-solution 164/164 parity test.  The
-# current verifier has known helper-definition and timeout parity failures, so
-# this harness can run exploratory pilots but cannot emit a heldout claim.
-VERIFIER_CANONICAL_PARITY_VALIDATED = False
+VERIFIER_PARITY_CERTIFICATE_SCHEMA = "mio.humaneval-verifier-parity.v3"
+VERIFIER_PARITY_CERTIFICATE_RELATIVE_PATH = (
+    "benchmarks/results/humaneval-verifier-parity-2e0182d.json"
+)
+VERIFIER_PARITY_CERTIFICATE_PATH = (
+    Path(__file__).resolve().parents[2] / VERIFIER_PARITY_CERTIFICATE_RELATIVE_PATH
+)
+VERIFIER_PARITY_CERTIFICATE_SHA256 = (
+    "1cae53e036fb5f6bffb25d02ef8f9bbdd23c77cdc4d87b2cbf38b8967beed8ea"
+)
+VERIFIER_PARITY_TIMEOUT_SECONDS = 10.0
+VERIFIER_PARITY_CORPUS_MANIFEST_SHA256 = (
+    "8a99055becc53543c0553b340b5dc1c3a964f37e4b7c2f8d581dca73de92d79d"
+)
+VERIFIER_PARITY_REFERENCE_MANIFEST_SHA256 = (
+    "f88802dcce08968c3e76fa214334b9f08b8226144dd5dc50b5dbc4b321234664"
+)
+VERIFIER_PARITY_SOURCE_PATHS = frozenset(
+    {
+        "experimental/effort/humaneval.py",
+        "experimental/effort/verify_humaneval_parity.py",
+        "experimental/markov_effort_controller.py",
+        "mio/agent.py",
+        "mio/agent_policy.py",
+    }
+)
 DEFAULT_MODEL = "models/Qwen3.6-27B-UD-Q4_K_XL-mlx"
 DEFAULT_CONTEXT_BUCKET = "coding"
 TIERS = (
@@ -128,6 +152,7 @@ PREREGISTRATION = {
         "frozen_transition_bounds",
     ],
     "evaluation_only": ["hidden_tests", "hidden_pass_fail", "aggregate_accuracy"],
+    "verifier_parity_certificate_required": True,
 }
 
 _IDENTITY_FIELDS = {
@@ -167,6 +192,208 @@ def _file_sha256(path: Path) -> str:
         while chunk := stream.read(8 * 1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _is_sha256(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _read_regular_file_bounded(path: Path, *, max_bytes: int) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    descriptor = -1
+    try:
+        descriptor = os.open(path, flags)
+        file_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise BenchmarkProtocolError("verifier parity certificate is not a regular file")
+        if file_stat.st_size > max_bytes:
+            raise BenchmarkProtocolError("verifier parity certificate exceeds the size limit")
+        with os.fdopen(descriptor, "rb") as stream:
+            descriptor = -1
+            payload = stream.read(max_bytes + 1)
+    except BenchmarkProtocolError:
+        raise
+    except FileNotFoundError as exc:
+        raise BenchmarkProtocolError("verifier parity certificate is missing") from exc
+    except OSError as exc:
+        raise BenchmarkProtocolError("cannot read verifier parity certificate") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if len(payload) > max_bytes:
+        raise BenchmarkProtocolError("verifier parity certificate exceeds the size limit")
+    return payload
+
+
+def verifier_parity_certificate_identity(
+    path: Path | None = None,
+) -> dict[str, Any]:
+    """Validate the committed 164/164 certificate against current sources.
+
+    The exact report bytes are pinned, then its semantic claims and every
+    transitive verifier source hash are checked again.  Missing, stale, or
+    tampered evidence raises before calibration or evaluation can proceed.
+    """
+
+    certificate = path or VERIFIER_PARITY_CERTIFICATE_PATH
+    try:
+        payload = _read_regular_file_bounded(certificate, max_bytes=1_000_000)
+        certificate_sha256 = hashlib.sha256(payload).hexdigest()
+        if certificate_sha256 != VERIFIER_PARITY_CERTIFICATE_SHA256:
+            raise BenchmarkProtocolError("verifier parity certificate digest mismatch")
+        report = json.loads(payload)
+    except BenchmarkProtocolError:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise BenchmarkProtocolError("cannot read verifier parity certificate") from exc
+    if not isinstance(report, Mapping):
+        raise BenchmarkProtocolError("verifier parity certificate must be a mapping")
+    if (
+        set(report) != {"schema", "schema_version", "claim", "corpus", "verifier", "git", "tasks"}
+        or report.get("schema") != VERIFIER_PARITY_CERTIFICATE_SCHEMA
+        or report.get("schema_version") != 2
+    ):
+        raise BenchmarkProtocolError("verifier parity certificate schema mismatch")
+
+    claim = report.get("claim")
+    expected_claim = {
+        "eligible": True,
+        "parity": True,
+        "passed": EXPECTED_HUMANEVAL_TASKS,
+        "total": EXPECTED_HUMANEVAL_TASKS,
+        "expected": EXPECTED_HUMANEVAL_TASKS,
+        "ineligibility_reasons": [],
+    }
+    if claim != expected_claim:
+        raise BenchmarkProtocolError("verifier parity certificate claim is not eligible 164/164")
+
+    expected_task_ids = [f"HumanEval/{index}" for index in range(EXPECTED_HUMANEVAL_TASKS)]
+    corpus = report.get("corpus")
+    if not isinstance(corpus, Mapping):
+        raise BenchmarkProtocolError("verifier parity certificate corpus is missing")
+    manifest = corpus.get("manifest")
+    reference_manifest = corpus.get("reference_manifest")
+    if (
+        corpus.get("revision") != HUMANEVAL_REVISION
+        or corpus.get("archive_sha256") != HUMANEVAL_SHA256
+        or not isinstance(manifest, Mapping)
+        or manifest.get("tasks") != EXPECTED_HUMANEVAL_TASKS
+        or manifest.get("task_ids") != expected_task_ids
+        or manifest.get("manifest_sha256")
+        != VERIFIER_PARITY_CORPUS_MANIFEST_SHA256
+        or not isinstance(reference_manifest, Mapping)
+        or reference_manifest.get("tasks") != EXPECTED_HUMANEVAL_TASKS
+        or reference_manifest.get("task_ids") != expected_task_ids
+        or reference_manifest.get("manifest_sha256")
+        != VERIFIER_PARITY_REFERENCE_MANIFEST_SHA256
+    ):
+        raise BenchmarkProtocolError("verifier parity certificate corpus identity mismatch")
+
+    verifier = report.get("verifier")
+    if not isinstance(verifier, Mapping):
+        raise BenchmarkProtocolError("verifier parity certificate source identity is missing")
+    source_files = verifier.get("source_files")
+    if (
+        verifier.get("callable") != "experimental.effort.humaneval.verify_candidate"
+        or verifier.get("source_path") != "experimental/effort/humaneval.py"
+        or verifier.get("source_hash_scope") != "complete_module_files"
+        or verifier.get("timeout_seconds_per_task")
+        != VERIFIER_PARITY_TIMEOUT_SECONDS
+        or not isinstance(source_files, Mapping)
+        or set(source_files) != VERIFIER_PARITY_SOURCE_PATHS
+        or any(not _is_sha256(digest) for digest in source_files.values())
+        or verifier.get("source_sha256") != source_files.get("experimental/effort/humaneval.py")
+        or verifier.get("source_bundle_sha256") != _canonical_sha256(dict(source_files))
+    ):
+        raise BenchmarkProtocolError("verifier parity certificate source bundle is malformed")
+    repository_root = Path(__file__).resolve().parents[2]
+    try:
+        for relative_path, certified_digest in source_files.items():
+            source_path = (repository_root / str(relative_path)).resolve(strict=True)
+            if (
+                repository_root not in source_path.parents
+                or _file_sha256(source_path) != certified_digest
+            ):
+                raise BenchmarkProtocolError(
+                    "verifier parity certificate source bundle is stale"
+                )
+    except BenchmarkProtocolError:
+        raise
+    except (OSError, RuntimeError) as exc:
+        raise BenchmarkProtocolError(
+            "verifier parity certificate source bundle cannot be verified"
+        ) from exc
+
+    git = report.get("git")
+    if not isinstance(git, Mapping):
+        raise BenchmarkProtocolError("verifier parity certificate Git identity is missing")
+    certified_revision = git.get("revision")
+    if (
+        not isinstance(certified_revision, str)
+        or len(certified_revision) != 40
+        or any(character not in "0123456789abcdef" for character in certified_revision)
+        or git.get("revision_after_verification") != certified_revision
+        or git.get("dirty_before_verification") is not False
+        or git.get("dirty_after_verification") is not False
+        or git.get("revision_stable") is not True
+    ):
+        raise BenchmarkProtocolError("verifier parity certificate Git attestation is invalid")
+
+    tasks = report.get("tasks")
+    if not isinstance(tasks, list) or len(tasks) != EXPECTED_HUMANEVAL_TASKS:
+        raise BenchmarkProtocolError("verifier parity certificate task rows are incomplete")
+    reference_rows: list[dict[str, str]] = []
+    expected_task_row_fields = {
+        "task_id",
+        "status",
+        "passed",
+        "prepared_source_match",
+        "elapsed_seconds",
+        "canonical_solution_sha256",
+        "verified_source_sha256",
+    }
+    for expected_task_id, row in zip(expected_task_ids, tasks, strict=True):
+        if (
+            not isinstance(row, Mapping)
+            or set(row) != expected_task_row_fields
+            or row.get("task_id") != expected_task_id
+            or row.get("status") != "passed"
+            or row.get("passed") is not True
+            or row.get("prepared_source_match") is not True
+            or not _is_sha256(row.get("canonical_solution_sha256"))
+            or not _is_sha256(row.get("verified_source_sha256"))
+            or not isinstance(row.get("elapsed_seconds"), (int, float))
+            or isinstance(row.get("elapsed_seconds"), bool)
+            or not math.isfinite(float(row["elapsed_seconds"]))
+            or float(row["elapsed_seconds"]) < 0.0
+        ):
+            raise BenchmarkProtocolError("verifier parity certificate contains an invalid task row")
+        reference_rows.append(
+            {
+                "task_id": expected_task_id,
+                "canonical_solution_sha256": str(row["canonical_solution_sha256"]),
+            }
+        )
+    if _canonical_sha256(reference_rows) != VERIFIER_PARITY_REFERENCE_MANIFEST_SHA256:
+        raise BenchmarkProtocolError("verifier parity reference manifest does not match task rows")
+
+    return {
+        "validated": True,
+        "schema": VERIFIER_PARITY_CERTIFICATE_SCHEMA,
+        "path": VERIFIER_PARITY_CERTIFICATE_RELATIVE_PATH,
+        "certificate_sha256": certificate_sha256,
+        "certified_git_revision": certified_revision,
+        "corpus_manifest_sha256": VERIFIER_PARITY_CORPUS_MANIFEST_SHA256,
+        "reference_manifest_sha256": VERIFIER_PARITY_REFERENCE_MANIFEST_SHA256,
+        "source_bundle_sha256": verifier["source_bundle_sha256"],
+        "timeout_seconds_per_task": VERIFIER_PARITY_TIMEOUT_SECONDS,
+        "passed": EXPECTED_HUMANEVAL_TASKS,
+        "total": EXPECTED_HUMANEVAL_TASKS,
+    }
 
 
 def _identity_to_mapping(identity: CalibrationIdentity) -> dict[str, str]:
@@ -286,11 +513,9 @@ class CalibrationArtifact:
             raise BenchmarkProtocolError("calibration protocol revision mismatch")
         if self.protocol.get("phase") != "calibrate":
             raise BenchmarkProtocolError("calibration artifact has the wrong phase")
-        if (
-            self.protocol.get("verifier_canonical_parity_validated")
-            is not VERIFIER_CANONICAL_PARITY_VALIDATED
-        ):
-            raise BenchmarkProtocolError("calibration verifier parity status mismatch")
+        parity_identity = verifier_parity_certificate_identity()
+        if self.protocol.get("verifier_parity_certificate") != parity_identity:
+            raise BenchmarkProtocolError("calibration verifier parity certificate mismatch")
         split_proof = self.protocol.get("pinned_split_proof")
         if not isinstance(split_proof, Mapping) or split_proof.get("verified") is not True:
             raise BenchmarkProtocolError("calibration artifact lacks a verified pinned split")
@@ -308,6 +533,13 @@ class CalibrationArtifact:
             settings = CalibrationConfig(**dict(config))
         except (TypeError, ValueError) as exc:
             raise BenchmarkProtocolError("calibration artifact config is invalid") from exc
+        if (
+            settings.hidden_evaluator_timeout_seconds
+            != parity_identity["timeout_seconds_per_task"]
+        ):
+            raise BenchmarkProtocolError(
+                "calibration timeout does not match verifier parity certificate"
+            )
         if self.provenance.policy_sha256 != calibration_policy_sha256(settings):
             raise BenchmarkProtocolError("calibration policy provenance mismatch")
         static_hashes = expected_static_provenance_hashes()
@@ -763,8 +995,16 @@ def calibrate_markov_humaneval(
     A hidden result is never available while any model prompt is being built.
     """
 
+    parity_identity = verifier_parity_certificate_identity()
     selected = tuple(cases)
     settings = config or CalibrationConfig()
+    if (
+        settings.hidden_evaluator_timeout_seconds
+        != parity_identity["timeout_seconds_per_task"]
+    ):
+        raise BenchmarkProtocolError(
+            "calibration timeout does not match verifier parity certificate"
+        )
     split_proof = _pinned_split_proof(pinned_corpus)
     expected_calibration = split_humaneval(tuple(pinned_corpus), "calibration")
     if selected != expected_calibration:
@@ -986,7 +1226,7 @@ def calibrate_markov_humaneval(
         "public_generation_only": True,
         "hidden_evaluation_after_all_generation": True,
         "hidden_labels_serialized": False,
-        "verifier_canonical_parity_validated": VERIFIER_CANONICAL_PARITY_VALIDATED,
+        "verifier_parity_certificate": parity_identity,
         "quality_delta": "+1 rescue, -1 regression, 0 unchanged",
         "behavior_policy": "tier-specific_depth1_counterfactuals",
         "parent_rules": {
@@ -1298,8 +1538,6 @@ def _claim_failures(
         failures.append("calibration_git_dirty")
     if provenance.leakage_detected:
         failures.append("leakage_detected")
-    if not VERIFIER_CANONICAL_PARITY_VALIDATED:
-        failures.append("verifier_canonical_parity_unverified")
     return tuple(failures)
 
 
@@ -1326,6 +1564,16 @@ def evaluate_markov_humaneval(
 ) -> dict[str, Any]:
     """Run five paired effort strategies against a frozen calibration artifact."""
 
+    parity_identity = verifier_parity_certificate_identity()
+    if artifact.protocol.get("verifier_parity_certificate") != parity_identity:
+        raise BenchmarkProtocolError("evaluation verifier parity certificate mismatch")
+    if (
+        hidden_evaluator_timeout_seconds
+        != parity_identity["timeout_seconds_per_task"]
+    ):
+        raise BenchmarkProtocolError(
+            "evaluation timeout does not match verifier parity certificate"
+        )
     selected = tuple(cases)
     pinned = tuple(pinned_corpus)
     split_proof = _pinned_split_proof(pinned)
@@ -1515,6 +1763,7 @@ def evaluate_markov_humaneval(
         ),
         "evaluation_manifest": manifest,
         "pinned_split_proof": split_proof,
+        "verifier_parity_certificate": parity_identity,
         "provenance": _provenance_to_mapping(provenance),
         "claim": {
             "eligible": not claim_failures,
@@ -1650,6 +1899,7 @@ def _source_hashes() -> dict[str, str]:
         "humaneval": Path(__file__).with_name("humaneval.py"),
         "mlx_backend": Path(__file__).with_name("mlx_backend.py"),
         "statistics": Path(__file__).with_name("statistics_v2.py"),
+        "verifier_parity_certificate": VERIFIER_PARITY_CERTIFICATE_PATH,
     }
     return {name: _file_sha256(path) for name, path in files.items()}
 
