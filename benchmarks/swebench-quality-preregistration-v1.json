@@ -1,0 +1,353 @@
+{
+  "schema": "mio.swebench-verified-quality-preregistration.v1",
+  "status": "preregistered_adapter_hardened_confirmatory_hard_blocked_pending_generation_attestation",
+  "preregistered_at_utc": "2026-07-18T15:00:02Z",
+  "study_id": "mio-qwen36-27b-quality-gate-swebench-verified-v1",
+  "confirmatory_scope": {
+    "dataset": "princeton-nlp/SWE-bench_Verified",
+    "split": "test",
+    "dataset_revision": "c104f840cc67f8b6eec6f759ebc8b2693d585d4a",
+    "required_unique_instances": 500,
+    "required_pairs": 500,
+    "required_generation_arms": 1000,
+    "partial_runs_are_evidence": false,
+    "smoke_runs_are_evidence": false
+  },
+  "dataset_artifacts": {
+    "official_parquet_path": "data/test-00000-of-00001.parquet",
+    "parquet_sha256": "a45b1fe4e2f0c8390b2b2938ac83e92ed5979000856808f3679c07812e9e6dcd",
+    "canonicalization": "rows_sorted_by_instance_id_then_compact_sort_keys_utf8_json_one_lf_per_row",
+    "full_snapshot_filename": "swebench-verified-full-v1.jsonl",
+    "full_snapshot_sha256": "52ccbc6ec0e03085f95191b261e0ed881cd6a0752a3c5247c1aba258ec2993da",
+    "public_snapshot_filename": "swebench-verified-public-v1.jsonl",
+    "public_snapshot_sha256": "9116deb4b3b24346a278373cf1551bd8cee4e0677776105f62b4474ca50dfaba",
+    "confirmatory_plan_requires_exact_public_snapshot_hash": true,
+    "official_evaluation_requires_exact_local_full_snapshot_hash": true,
+    "remote_dataset_resolution_during_evaluation": false
+  },
+  "primary_question": {
+    "estimand": "mean(resolved_gate_on - resolved_gate_off) over all 500 paired Verified instances",
+    "null": "paired_resolution_difference_le_0",
+    "alternative": "paired_resolution_difference_gt_0",
+    "direction_preregistered": true,
+    "primary_metric": "official_swebench_resolved"
+  },
+  "official_references": {
+    "repository": "https://github.com/SWE-bench/SWE-bench",
+    "dataset_card": "https://huggingface.co/datasets/princeton-nlp/SWE-bench_Verified",
+    "evaluation_guide": "https://www.swebench.com/SWE-bench/guides/evaluation/",
+    "harness_reference": "https://www.swebench.com/SWE-bench/reference/harness/",
+    "docker_guide": "https://www.swebench.com/SWE-bench/guides/docker_setup/",
+    "paper": "https://arxiv.org/abs/2310.06770"
+  },
+  "official_harness": {
+    "package": "swebench",
+    "version": "4.1.0",
+    "git_tag": "v4.1.0",
+    "git_commit": "726c5461e2ef52d83cf1ea2107870a8bb3328d57",
+    "entrypoint": "python -m swebench.harness.run_evaluation",
+    "dataset_name": "exact_verified_local_full_snapshot_jsonl",
+    "split": "test",
+    "prediction_keys": [
+      "instance_id",
+      "model_name_or_path",
+      "model_patch"
+    ],
+    "cache_level": "env",
+    "clean": true,
+    "timeout_seconds_per_instance": 1800,
+    "confirmatory_timeout_is_frozen": true,
+    "evaluation_architecture": "x86_64",
+    "macos_arm64_confirmatory_evaluation_allowed": false,
+    "reason": "official documentation labels arm64 support experimental"
+  },
+  "model": {
+    "repository": "Brooooooklyn/Qwen3.6-27B-UD-Q4_K_XL-mlx",
+    "role": "target_only_autoregressive_control",
+    "config_sha256_observed_before_preregistration": "78a717772ccc416418b200af6e6165c39a5850a838a5d3c4810f8095c7b163bc",
+    "content_identity": "local-sha256-v1:ba3975accc6b6398f47f82ff7640b39f5541abb49f1d3c6f34113aa7fb040c87",
+    "identity_implementation": "experimental.effort.model_identity.fingerprint_local_model",
+    "identity_checks": [
+      "before_first_generation",
+      "after_last_generation_before_evaluation",
+      "after_evaluation_receipt"
+    ],
+    "draft_model": null,
+    "dspark": false,
+    "dflash": false,
+    "bmp": false,
+    "turboquant": false,
+    "temperature": 0.0,
+    "sampling": "greedy",
+    "context_tokens": 32768,
+    "max_output_tokens_per_round": 4096,
+    "max_output_tokens_per_arm": 24576,
+    "maximum_tool_calls_per_arm": 32,
+    "maximum_agent_rounds": 12,
+    "maximum_agent_wall_seconds": 1800
+  },
+  "conditions": {
+    "gate_off": {
+      "quality_gate_enabled": false,
+      "coding_effort": "not_applicable",
+      "model_label": "mio-qwen36-27b-gate-off"
+    },
+    "gate_on": {
+      "quality_gate_enabled": true,
+      "coding_effort": "medium",
+      "model_label": "mio-qwen36-27b-gate-on"
+    }
+  },
+  "controlled_equalities": [
+    "clean_mio_commit",
+    "model_full_content_identity",
+    "mlx_and_mlx_lm_versions",
+    "target_only_runtime",
+    "sampler_and_seed_policy",
+    "system_prompt_except_preregistered_gate_control_text",
+    "problem_statement",
+    "context_and_token_budgets",
+    "round_and_wall_budgets",
+    "tool_names_and_schemas",
+    "tool_permissions_and_network_denial",
+    "fresh_base_commit_checkout",
+    "host_hardware_and_power_mode"
+  ],
+  "tool_surface_both_arms": [
+    "bash",
+    "read",
+    "write",
+    "edit",
+    "validate"
+  ],
+  "experimental_factor": "mandatory coding-quality gate state, feedback, and latest-mutation evidence enforcement",
+  "input_firewall": {
+    "required_public_snapshot_sha256": "9116deb4b3b24346a278373cf1551bd8cee4e0677776105f62b4474ca50dfaba",
+    "agent_visible_fields": [
+      "repo",
+      "base_commit",
+      "problem_statement"
+    ],
+    "forbidden_agent_fields": [
+      "patch",
+      "test_patch",
+      "FAIL_TO_PASS",
+      "PASS_TO_PASS",
+      "hints_text",
+      "difficulty",
+      "official_reports",
+      "peer_arm_patch",
+      "peer_arm_trajectory"
+    ],
+    "network_during_generation": false,
+    "hidden_evaluation_before_all_generation_is_sealed": false
+  },
+  "workspace_isolation": {
+    "fresh_checkout_per_arm": true,
+    "checkout_commit": "dataset.base_commit",
+    "separate_workspace_per_condition": true,
+    "other_arm_not_mounted": true,
+    "git_worktree_reuse": false,
+    "evaluation": "one official SWE-bench Docker instance environment per prediction",
+    "patch_capture": "git_diff_binary_from_workspace_only",
+    "assistant_text_as_patch": false,
+    "git_capture_environment": "secret_free_whitelist",
+    "git_capture_disables": [
+      "inherited_GIT_redirects",
+      "global_and_system_config",
+      "core.fsmonitor",
+      "core.hooksPath",
+      "external_diff",
+      "textconv"
+    ],
+    "agent_git_metadata_access": "fully_unmounted_no_dot_git_or_equivalent_metadata_visible_to_model_or_model_tools",
+    "trusted_git_metadata_capture": "separate_non_model_visible_capture_namespace_only"
+  },
+  "private_artifact_policy": {
+    "location": "outside_mio_repository_root",
+    "symlink_path_components": "forbidden",
+    "private_directories_mode": "0700",
+    "private_files_mode": "0600_where_practical",
+    "evaluation_directory": "new_exclusive_and_empty_for_each_evaluation_attempt",
+    "public_source_free_aggregate_may_be_repository_tracked": true
+  },
+  "schedule": {
+    "seed": 20260718,
+    "unit": "instance_pair",
+    "pair_arms_are_adjacent": true,
+    "instance_order": "sha256(seed,instance_id) ascending",
+    "within_pair_order": "alternating by ranked pair index",
+    "gate_off_first_pairs": 250,
+    "gate_on_first_pairs": 250,
+    "schedule_sealed_before_generation": true,
+    "post_hoc_reordering": false
+  },
+  "resume_and_retry": {
+    "checkpoint_unit": "one generation arm",
+    "checkpoint_write": "fsync_temp_then_atomic_exclusive_publish",
+    "existing_checkpoint": "immutable_and_idempotent_only_if_canonical_bytes_match",
+    "resume": "skip only byte-verified terminal checkpoints bound to protocol_and_schedule_digests",
+    "model_or_tool_failure_is_retryable": false,
+    "infrastructure_retry_requires_blinded_reason": true,
+    "infrastructure_retry_unit": "entire_pair_same_order_and_seed",
+    "all_attempts_retained": true,
+    "attempt_ledger": "hash_chained_append_only_pair_event_jsonl",
+    "attempt_checkpoint_layout": "separate_pair_and_attempt_directories",
+    "retry_reason_enum": [
+      "infrastructure_process_crash",
+      "infrastructure_host_loss",
+      "infrastructure_telemetry_corruption",
+      "infrastructure_evaluator_failure"
+    ],
+    "retry_after_completed_attempt": false,
+    "generation_runner_ledger_integration": "pending_blocks_confirmatory"
+  },
+  "generation_then_evaluation": [
+    "seal preregistration, clean Mio commit, dependency lock, model identity, dataset revision, and schedule",
+    "generate and atomically checkpoint all 1000 arms without official evaluator output",
+    "verify every arm checkpoint, integrated retry-ledger event, and generation receipt; then recheck code/model/runtime identities",
+    "export exactly two official patch-only JSONL files with 500 predictions each",
+    "evaluate both files with the pinned official Docker harness on x86_64",
+    "write an immutable pre-evaluation seal binding schedule, exact dataset snapshot, checkpoint identities, prediction hashes, commands, run IDs, and harness distribution",
+    "aggregate only after the generation receipt and both official reports are complete, infrastructure-clean, and bound by an immutable evaluation receipt",
+    "publish only source-free aggregate results; retain patches, instance labels, trajectories, and logs privately"
+  ],
+  "patch_adapter": {
+    "source": "isolated_workspace_git_diff",
+    "include_binary": true,
+    "include_untracked": true,
+    "prose_extraction": false,
+    "code_fence_extraction": false,
+    "required_official_schema_only": true,
+    "empty_patch": "valid_model_outcome_scored_unresolved",
+    "maximum_patch_bytes": 33554432,
+    "valid_nontext_git_sections": [
+      "GIT_binary_patch",
+      "rename_only",
+      "mode_only"
+    ]
+  },
+  "analysis": {
+    "paired_contingency_cells": [
+      "both_resolved",
+      "gate_off_only",
+      "gate_on_only",
+      "neither_resolved"
+    ],
+    "primary_point_estimate": "(gate_on_only - gate_off_only) / 500",
+    "exact_test": "one_sided_exact_mcnemar_binomial",
+    "alpha": 0.05,
+    "paired_bootstrap_samples": 10000,
+    "paired_bootstrap_seed": 20260718,
+    "confidence_interval": 0.95,
+    "missing_pair_policy": "no_confirmatory_result",
+    "official_error_policy": "no_confirmatory_result_until_blinded_infrastructure_adjudication_and_declared_pair_rerun",
+    "quality_improvement_claim": "lower_95_percent_paired_bootstrap_bound_gt_0_and_exact_one_sided_p_lt_0_05",
+    "practical_promotion_threshold": "point_estimate_at_least_0_02_and_no_preregistered_efficiency_guardrail_failure"
+  },
+  "confirmatory_evaluation_identity": {
+    "run_id_binds": [
+      "condition",
+      "prediction_sha256",
+      "preregistration_sha256",
+      "schedule_sha256",
+      "timeout_seconds",
+      "full_snapshot_sha256",
+      "harness_commit",
+      "harness_distribution_sha256"
+    ],
+    "stale_logs_or_reports": "rejected_by_exclusive_evaluation_directory_and_receipt_hash_bindings"
+  },
+  "secondary_metrics": [
+    "official_resolved_rate_by_arm",
+    "paired_discordance",
+    "terminal_completion_rate",
+    "latest_epoch_gate_satisfaction_rate",
+    "empty_patch_rate",
+    "agent_wall_seconds",
+    "model_active_seconds",
+    "output_tokens",
+    "tool_calls",
+    "validation_attempts",
+    "successful_resolutions_per_generation_host_hour"
+  ],
+  "publication": {
+    "public_artifact": "source_free_aggregate_only",
+    "forbidden_public_fields": [
+      "instance_id",
+      "repo",
+      "base_commit",
+      "problem_statement",
+      "model_patch",
+      "assistant_text",
+      "tool_stdout",
+      "tool_stderr",
+      "test_name",
+      "per_instance_outcome",
+      "absolute_path",
+      "credential"
+    ],
+    "private_required_artifacts": [
+      "sealed_raw_schedule",
+      "arm_checkpoints",
+      "official_prediction_jsonl",
+      "official_harness_logs",
+      "official_reports",
+      "blinded_retry_ledger",
+      "generation_attestation_and_generation_receipt",
+      "pre_evaluation_seal",
+      "evaluation_receipt_binding_dataset_predictions_commands_harness_and_reports"
+    ]
+  },
+  "smoke_policy": {
+    "maximum_instances": 10,
+    "purpose": "plumbing, patch application, checkpoint resume, and official harness compatibility only",
+    "must_be_labeled": "non_evidence_smoke",
+    "may_change_frozen_protocol": false,
+    "may_support_quality_or_speed_claim": false
+  },
+  "resource_plan": {
+    "generation_arms": 1000,
+    "worst_case_generated_tokens": 24576000,
+    "observed_target_only_decode_tokens_per_second_for_short_local_workloads": 18.9,
+    "decode_only_worst_case_hours_at_observed_rate": 361.2,
+    "expected_generation_host_hours_range": [
+      50,
+      180
+    ],
+    "hard_generation_wall_cap_hours": 500,
+    "official_evaluation_wall_hours_planning_range": [
+      2,
+      12
+    ],
+    "official_minimum_free_storage_gb": 120,
+    "official_recommended_memory_gb": 16,
+    "official_recommended_cpu_cores": 8,
+    "notes": "planning bounds, not results; run a non-evidence smoke to estimate cost but do not alter the confirmatory design"
+  },
+  "current_host_observation": {
+    "observed_at_utc": "2026-07-18T15:00:02Z",
+    "machine": "arm64",
+    "memory_bytes": 51539607552,
+    "free_filesystem_gib_observed": 590,
+    "docker_cli": "missing",
+    "swebench_package": "missing",
+    "confirmatory_evaluation_status": "blocked",
+    "required_resolution": "implement and attest the isolated generation runner, generation receipt, retry-ledger integration, efficiency guardrail, and Docker image-digest capture; then use a pinned x86_64 Docker evaluation host or approved official cloud harness"
+  },
+  "implementation_readiness": {
+    "trusted_snapshot_preparer": "implemented",
+    "balanced_schedule_and_exact_manifest_gate": "implemented",
+    "immutable_checkpoints_and_resume": "implemented",
+    "attempt_ledger_primitive": "implemented",
+    "generation_runner_retry_ledger_integration": "pending_blocks_confirmatory",
+    "sanitized_patch_capture": "implemented",
+    "official_harness_evaluation_seal_and_receipt_adapter": "implemented_but_confirmatory_entrypoints_hard_blocked",
+    "model_facing_isolated_generation_runner": "pending_blocks_confirmatory",
+    "generation_attestation_and_receipt": "pending_blocks_confirmatory",
+    "efficiency_guardrail_definition_and_enforcement": "pending_blocks_confirmatory",
+    "official_docker_image_digest_capture": "pending_blocks_confirmatory",
+    "confirmatory_evaluate_and_aggregate": "hard_blocked_until_all_pending_attestations_are_implemented"
+  },
+  "change_control": "Any change to dataset revision, harness commit, model identity, runtime, prompts, gate behavior, effort, budgets, schedule, retry rules, primary outcome, or analysis creates v2 before unblinding."
+}
