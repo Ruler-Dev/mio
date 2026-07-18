@@ -453,12 +453,15 @@ def test_dirty_attestation_failure_creates_no_layout_or_manager(tmp_path: Path) 
 
 def test_offline_environment_is_forced_and_restored(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HF_HUB_OFFLINE", "previous")
+    monkeypatch.delenv("TRANSFORMERS_NO_ADVISORY_WARNINGS", raising=False)
     with smoke._offline_environment():
         assert os.environ["HF_HUB_OFFLINE"] == "1"
         assert os.environ["TRANSFORMERS_OFFLINE"] == "1"
+        assert os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] == "1"
         assert os.environ["GIT_NO_LAZY_FETCH"] == "1"
     assert os.environ["HF_HUB_OFFLINE"] == "previous"
     assert "TRANSFORMERS_OFFLINE" not in os.environ
+    assert "TRANSFORMERS_NO_ADVISORY_WARNINGS" not in os.environ
 
 
 def test_raw_metrics_keep_decode_work_separate_from_delivered_budget() -> None:

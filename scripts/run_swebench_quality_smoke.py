@@ -46,6 +46,10 @@ _OFFLINE_ENVIRONMENT = MappingProxyType(
         "MIO_DDTREE_BUDGET": "0",
         "MIO_DRAFTER_STRICT": "1",
         "TOKENIZERS_PARALLELISM": "false",
+        # mlx-lm sets this during its first import. Freeze the same value
+        # before collecting the runtime fingerprint so model loading cannot
+        # create a deterministic, one-time attestation drift.
+        "TRANSFORMERS_NO_ADVISORY_WARNINGS": "1",
         "TRANSFORMERS_OFFLINE": "1",
     }
 )
