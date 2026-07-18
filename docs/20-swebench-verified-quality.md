@@ -353,8 +353,11 @@ that tree except `.git` and the one selected venv. It fingerprints both the
 complete venv and the external Python base prefix recursively (package code,
 metadata, standard library, `.pth`, `sitecustomize`, binaries and symlink
 targets), then verifies all manifests again after evaluation. Probe and harness
-execution use Python `-I -S` with an explicit attested path, so `.pth` files and
-user-site customizations are recorded but never executed.
+execution use Python `-I -B -S` with an explicit attested path. `-B` is set
+before the first import and propagates to CPython multiprocessing children, so
+neither the launcher nor `spawn`/`resource_tracker` can mutate the attested
+base prefix with bytecode caches. `.pth` files and user-site customizations are
+recorded but never executed.
 
 The wrapper also checks local image tag-to-digest bindings and requires the
 output directory to be disjoint from every immutable input, using canonical

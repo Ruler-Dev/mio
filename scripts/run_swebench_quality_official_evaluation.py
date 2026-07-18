@@ -80,7 +80,8 @@ _ISOLATED_PROBE_CODE = (
     "d=sorted([{'name':(x.metadata.get('Name') or '').lower().replace('_','-'),'version':x.version} "
     "for x in m.distributions(path=[site])],key=lambda x:(x['name'],x['version']));"
     "print(json.dumps({'base_prefix':str(pathlib.Path(sys.base_prefix).resolve()),'distributions':d,"
-    "'executable':str(pathlib.Path(sys.executable).resolve()),'flags':{'ignore_environment':sys.flags.ignore_environment,"
+    "'executable':str(pathlib.Path(sys.executable).resolve()),'flags':{'dont_write_bytecode':sys.flags.dont_write_bytecode,"
+    "'ignore_environment':sys.flags.ignore_environment,"
     "'isolated':sys.flags.isolated,'no_site':sys.flags.no_site,'no_user_site':sys.flags.no_user_site},"
     "'module':str(pathlib.Path(swebench.__file__).resolve()),'platstdlib':sysconfig.get_path('platstdlib'),"
     "'python':platform.python_version(),'site_packages':site,'stdlib':sysconfig.get_path('stdlib'),"
@@ -987,6 +988,7 @@ def _verify_harness_checkout(
         (
             str(python_path),
             "-I",
+            "-B",
             "-S",
             "-c",
             _ISOLATED_PROBE_CODE,
@@ -1035,7 +1037,13 @@ def _verify_harness_checkout(
         or len(sys_path) < 4
     ):
         raise protocol.ProtocolError("harness Python import probe is malformed")
-    if flags != {"ignore_environment": 1, "isolated": 1, "no_site": 1, "no_user_site": 1}:
+    if flags != {
+        "dont_write_bytecode": 1,
+        "ignore_environment": 1,
+        "isolated": 1,
+        "no_site": 1,
+        "no_user_site": 1,
+    }:
         raise protocol.ProtocolError("harness Python probe was not isolated with site disabled")
     if Path(executable).resolve(strict=True) != target:
         raise protocol.ProtocolError("harness Python probe executed another interpreter")
@@ -1120,6 +1128,7 @@ def _verify_harness_checkout(
         "pth_policy": pth_policy,
         "filesystem_manifest": filesystem_manifest,
         "isolated_no_site_execution": True,
+        "python_bytecode_writes_disabled": True,
         "tracked_worktree_clean": True,
         "untracked_and_ignored_entries_absent": True,
     }
@@ -1498,6 +1507,10 @@ def _harness_command(
     return (
         str(python_executable),
         "-I",
+        # This must be an interpreter flag, not only an in-code assignment:
+        # CPython propagates -B to multiprocessing children before they import
+        # resource_tracker/spawn, keeping the attested base prefix immutable.
+        "-B",
         "-S",
         "-c",
         _ISOLATED_LAUNCHER_CODE,

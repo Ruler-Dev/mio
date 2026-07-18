@@ -240,7 +240,13 @@ class FakeProcessRunner:
                     {"name": "swebench", "version": "4.1.0"},
                 ],
                 "executable": str(Path(command[0]).resolve()),
-                "flags": {"ignore_environment": 1, "isolated": 1, "no_site": 1, "no_user_site": 1},
+                "flags": {
+                    "dont_write_bytecode": 1,
+                    "ignore_environment": 1,
+                    "isolated": 1,
+                    "no_site": 1,
+                    "no_user_site": 1,
+                },
                 "module": str((self.harness_root / "swebench" / "__init__.py").resolve()),
                 "platstdlib": str(base / "lib" / "python3.11"),
                 "python": "3.11.15",
@@ -456,8 +462,8 @@ def test_official_evaluation_seals_exact_commands_reports_and_private_receipt(co
     assert {Path(kwargs["cwd"]).name for _command, kwargs in calls} == {"plain", "quality"}
     assert len({Path(kwargs["cwd"]) for _command, kwargs in calls}) == 2
     for command, kwargs in calls:
-        assert command[1:5] == ("-I", "-S", "-c", evaluator._ISOLATED_LAUNCHER_CODE)
-        assert command[8] == "swebench.harness.run_evaluation"
+        assert command[1:6] == ("-I", "-B", "-S", "-c", evaluator._ISOLATED_LAUNCHER_CODE)
+        assert command[9] == "swebench.harness.run_evaluation"
         assert command[command.index("--dataset_name") + 1] == str(context.dataset)
         assert command[command.index("--max_workers") + 1] == "1"
         assert command[command.index("--open_file_limit") + 1] == "4096"
@@ -481,6 +487,7 @@ def test_official_evaluation_seals_exact_commands_reports_and_private_receipt(co
     assert receipt["harness"]["git_commit"] == evaluator.OFFICIAL_HARNESS_COMMIT
     assert receipt["harness"]["git_tree"] == evaluator.OFFICIAL_HARNESS_TREE
     assert receipt["harness"]["isolated_no_site_execution"] is True
+    assert receipt["harness"]["python_bytecode_writes_disabled"] is True
     assert receipt["harness"]["pth_policy"]["executed_or_added_to_sys_path"] is False
     assert receipt["harness"]["filesystem_manifest"]["unexpected_entry_count"] == 0
     assert receipt["dataset"]["parquet_sha256"] == evaluator.DATASET_PARQUET_SHA256
@@ -786,6 +793,7 @@ def test_isolated_no_site_probe_ignores_external_pth_target_bytes(tmp_path: Path
     command = (
         sys.executable,
         "-I",
+        "-B",
         "-S",
         "-c",
         evaluator._ISOLATED_PROBE_CODE,
@@ -806,7 +814,57 @@ def test_isolated_no_site_probe_ignores_external_pth_target_bytes(tmp_path: Path
     assert policy_after["disabled_by_python_isolated_no_site"] is True
     assert not marker.exists()
     assert str(external) not in probe["sys_path"]
-    assert probe["flags"] == {"ignore_environment": 1, "isolated": 1, "no_site": 1, "no_user_site": 1}
+    assert probe["flags"] == {
+        "dont_write_bytecode": 1,
+        "ignore_environment": 1,
+        "isolated": 1,
+        "no_site": 1,
+        "no_user_site": 1,
+    }
+
+
+@pytest.mark.skipif(sys.implementation.name != "cpython", reason="official evaluator pins CPython")
+def test_bytecode_disable_flag_propagates_to_spawned_python_worker(tmp_path: Path) -> None:
+    payload = tmp_path / "payload.py"
+    payload.write_text("VALUE = 1\n", encoding="utf-8")
+    probe = tmp_path / "spawn_probe.py"
+    probe.write_text(
+        "import multiprocessing as mp\n"
+        "import pathlib\n"
+        "import sys\n"
+        "\n"
+        "def worker(root):\n"
+        "    if sys.flags.dont_write_bytecode != 1:\n"
+        "        raise RuntimeError('spawned interpreter lost -B')\n"
+        "    sys.path.insert(0, root)\n"
+        "    import payload\n"
+        "    if payload.VALUE != 1:\n"
+        "        raise RuntimeError('payload import failed')\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    process = mp.get_context('spawn').Process(target=worker, args=(sys.argv[1],))\n"
+        "    process.start()\n"
+        "    process.join(30)\n"
+        "    if process.is_alive():\n"
+        "        process.kill()\n"
+        "        process.join()\n"
+        "        raise RuntimeError('spawned interpreter timed out')\n"
+        "    raise SystemExit(process.exitcode)\n",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        (sys.executable, "-I", "-B", "-S", str(probe), str(tmp_path)),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=45,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr.decode(errors="replace")
+    assert not tuple(tmp_path.rglob("*.pyc"))
+    assert not tuple(tmp_path.rglob("__pycache__"))
 
 
 def test_venv_drift_during_evaluation_fails_without_receipt(
