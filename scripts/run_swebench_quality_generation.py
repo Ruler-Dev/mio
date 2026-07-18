@@ -27,6 +27,7 @@ from typing import Any, Protocol
 from scripts import bench_swebench_quality as protocol
 
 GENERATION_SCHEMA = f"{protocol.SCHEMA}.paired-generation-runner.v1"
+GENERATION_RUN_HEADER_SCHEMA = f"{GENERATION_SCHEMA}.run-header"
 GENERATION_RECEIPT_SCHEMA = f"{GENERATION_SCHEMA}.receipt"
 TOOL_SURFACE = ("bash", "validate", "read", "write", "edit")
 TARGET_CONTEXT_TOKENS = 32_768
@@ -328,6 +329,52 @@ def factor_digest(tool_surface_sha256: str) -> str:
     return protocol.sha256_bytes(protocol.canonical_json_bytes(factor_document(tool_surface_sha256)))
 
 
+def _implementation_identity(value: Any) -> dict[str, str]:
+    target = value if isinstance(value, type) else type(value)
+    if callable(value) and getattr(value, "__module__", None) and getattr(value, "__qualname__", None):
+        target = value
+    return {
+        "module": str(getattr(target, "__module__", "")),
+        "qualname": str(getattr(target, "__qualname__", "")),
+    }
+
+
+def build_run_header(
+    *,
+    schedule_document: Mapping[str, Any],
+    schedule: Sequence[protocol.ScheduleEntry],
+    binding: GenerationBinding,
+    tool_surface_sha256: str,
+    executor: ArmExecutor,
+    workspace_factory: WorkspaceFactory,
+) -> dict[str, Any]:
+    """Bind smoke execution inputs before the first pair is admitted.
+
+    The current runner remains non-evidence until v2 replaces caller-supplied
+    identities with automatic fingerprints.  Even for smoke, however, resume
+    and receipt creation cannot re-declare a different factor or binding.
+    """
+
+    factor = factor_document(tool_surface_sha256)
+    return {
+        "schema": GENERATION_RUN_HEADER_SCHEMA,
+        "evidence_class": str(schedule_document["evidence_class"]),
+        "confirmatory_evidence_admissible": False,
+        "confirmatory_blockers": list(CONFIRMATORY_BLOCKERS),
+        "preregistration_sha256": protocol.preregistration_digest(),
+        "schedule_sha256": protocol.schedule_digest(schedule),
+        "schedule_document_sha256": protocol.sha256_bytes(protocol.canonical_json_bytes(dict(schedule_document))),
+        "dataset_public_snapshot_sha256": str(schedule_document["dataset_public_snapshot_sha256"]),
+        "generation_binding": binding.as_dict(),
+        "tool_surface_sha256": tool_surface_sha256,
+        "factor_sha256": protocol.sha256_bytes(protocol.canonical_json_bytes(factor)),
+        "factor": factor,
+        "runner_source_sha256": protocol.sha256_file(Path(__file__)),
+        "executor": _implementation_identity(executor),
+        "workspace_factory": _implementation_identity(workspace_factory),
+    }
+
+
 def _model_instruction(instance: protocol.PublicInstance) -> str:
     return MODEL_INSTRUCTION_TEMPLATE.format(
         repo=instance.repo,
@@ -446,6 +493,7 @@ class GenerationLayout:
     attempts: Path
     canonical: Path
     ledger: Path
+    run_header: Path
     receipt: Path
 
     def validated(self) -> "GenerationLayout":
@@ -454,15 +502,29 @@ class GenerationLayout:
         canonical = protocol.require_private_directory(self.canonical)
         if attempts.parent != root or canonical.parent != root:
             raise protocol.ProtocolError("generation layout directories must be direct private children")
-        if self.ledger.absolute().parent.resolve(strict=True) != root:
-            raise protocol.ProtocolError("attempt ledger must remain separate beside canonical output")
-        if self.receipt.absolute().parent.resolve(strict=True) != root:
-            raise protocol.ProtocolError("generation receipt must remain beside canonical output")
-        if self.ledger.is_symlink() or self.receipt.is_symlink():
-            raise protocol.ProtocolError("generation ledger and receipt must not be symlinks")
-        if self.ledger.name != "pair-attempt-ledger.jsonl" or self.receipt.name != "generation-receipt.json":
+        for path, label in (
+            (self.ledger, "attempt ledger"),
+            (self.run_header, "run header"),
+            (self.receipt, "generation receipt"),
+        ):
+            if path.absolute().parent.resolve(strict=True) != root:
+                raise protocol.ProtocolError(f"{label} must remain separate beside canonical output")
+            if path.is_symlink():
+                raise protocol.ProtocolError(f"{label} must not be a symlink")
+        if (
+            self.ledger.name != "pair-attempt-ledger.jsonl"
+            or self.run_header.name != "generation-run-header.json"
+            or self.receipt.name != "generation-receipt.json"
+        ):
             raise protocol.ProtocolError("generation layout artifact names differ from the sealed design")
-        return GenerationLayout(root, attempts, canonical, self.ledger.absolute(), self.receipt.absolute())
+        return GenerationLayout(
+            root,
+            attempts,
+            canonical,
+            self.ledger.absolute(),
+            self.run_header.absolute(),
+            self.receipt.absolute(),
+        )
 
     @classmethod
     def create(cls, root: Path) -> "GenerationLayout":
@@ -474,6 +536,7 @@ class GenerationLayout:
             attempts=attempts,
             canonical=canonical,
             ledger=root / "pair-attempt-ledger.jsonl",
+            run_header=root / "generation-run-header.json",
             receipt=root / "generation-receipt.json",
         )
 
@@ -487,8 +550,39 @@ class GenerationLayout:
             attempts=attempts,
             canonical=canonical,
             ledger=root / "pair-attempt-ledger.jsonl",
+            run_header=root / "generation-run-header.json",
             receipt=root / "generation-receipt.json",
         )
+
+
+def _load_run_header(layout: GenerationLayout) -> dict[str, Any]:
+    layout = layout.validated()
+    path = protocol.require_private_path(layout.run_header, must_exist=True)
+    if path.stat().st_mode & 0o077:
+        raise protocol.ProtocolError("private generation run header must use 0600 permissions")
+    payload = path.read_bytes()
+    try:
+        import json
+
+        header = json.loads(payload)
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise protocol.ProtocolError("generation run header is not valid JSON") from exc
+    if not isinstance(header, dict) or protocol.canonical_json_bytes(header) != payload:
+        raise protocol.ProtocolError("generation run header is not canonical JSON")
+    if header.get("schema") != GENERATION_RUN_HEADER_SCHEMA:
+        raise protocol.ProtocolError("unexpected generation run header schema")
+    if header.get("runner_source_sha256") != protocol.sha256_file(Path(__file__)):
+        raise protocol.ProtocolError("current runner source differs from the immutable run header")
+    return header
+
+
+def _seal_run_header(layout: GenerationLayout, expected: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
+    payload = protocol.canonical_json_bytes(dict(expected))
+    protocol._atomic_write(layout.run_header, payload)
+    observed = _load_run_header(layout)
+    if observed != dict(expected):
+        raise protocol.ProtocolError("generation run header differs from current execution inputs")
+    return observed, protocol.sha256_bytes(payload)
 
 
 def _pairs(schedule: Sequence[protocol.ScheduleEntry]) -> tuple[tuple[protocol.ScheduleEntry, ...], ...]:
@@ -692,14 +786,26 @@ def run_generation_pairs(
         raise protocol.ProtocolError("confirmatory generation requires all 500 complete pairs")
     validate_target_only_tier(tier_config)
     registry, specs, surface_sha256 = build_identical_tool_surface(agent_module)
-    study_factor_sha256 = factor_digest(surface_sha256)
+    pending = pending_pairs(schedule, layout)
+    run_header, _run_header_sha256 = _seal_run_header(
+        layout,
+        build_run_header(
+            schedule_document=schedule_document,
+            schedule=schedule,
+            binding=binding,
+            tool_surface_sha256=surface_sha256,
+            executor=executor,
+            workspace_factory=workspace_factory,
+        ),
+    )
+    study_factor_sha256 = str(run_header["factor_sha256"])
     schedule_sha256 = protocol.schedule_digest(schedule)
     ledger = protocol.AttemptLedger(layout.ledger, schedule_sha256)
     seen_workspaces: set[Path] = set()
     seen_git_directories: set[Path] = set()
     seen_cache_directories: set[Path] = set()
 
-    for pair in pending_pairs(schedule, layout):
+    for pair in pending:
         pair_index = pair[0].pair_index
         records = _pair_records(ledger, pair_index)
         attempt_index = _attempt_index(records)
@@ -815,14 +921,28 @@ def run_generation_pairs(
 def _generation_manifest(
     schedule: Sequence[protocol.ScheduleEntry],
     layout: GenerationLayout,
+    run_header: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     layout = layout.validated()
     if pending_pairs(schedule, layout, repair_completed_promotions=False):
         raise protocol.ProtocolError("generation receipt requires every pair to be complete")
     store = protocol.CheckpointStore(layout.canonical)
     rows = []
+    expected_binding = run_header.get("generation_binding")
+    expected_schedule_sha256 = str(run_header.get("schedule_sha256", ""))
     for entry in schedule:
         checkpoint = store.load(entry)
+        checkpoint_binding = {
+            "mio_commit": checkpoint.mio_commit,
+            "model_identity": checkpoint.model_identity,
+            "runtime_digest": checkpoint.runtime_digest,
+        }
+        if (
+            checkpoint.preregistration_sha256 != run_header.get("preregistration_sha256")
+            or checkpoint.schedule_sha256 != expected_schedule_sha256
+            or checkpoint_binding != expected_binding
+        ):
+            raise protocol.ProtocolError("canonical checkpoint differs from the immutable run header")
         rows.append(
             {
                 "execution_index": entry.execution_index,
@@ -852,21 +972,34 @@ def build_generation_receipt(
         observed_model_identity_after,
     } != {protocol.EXPECTED_MODEL_IDENTITY}:
         raise protocol.ProtocolError("generation receipt target identity checks differ")
-    manifest = _generation_manifest(schedule, layout)
+    run_header = _load_run_header(layout)
+    if run_header.get("generation_binding") != binding.as_dict():
+        raise protocol.ProtocolError("receipt binding differs from the immutable run header")
+    if run_header.get("tool_surface_sha256") != tool_surface_sha256:
+        raise protocol.ProtocolError("receipt tool surface differs from the immutable run header")
+    if run_header.get("schedule_sha256") != protocol.schedule_digest(schedule):
+        raise protocol.ProtocolError("receipt schedule differs from the immutable run header")
+    if {
+        observed_model_identity_before,
+        observed_model_identity_after,
+    } != {str(run_header["generation_binding"]["model_identity"])}:
+        raise protocol.ProtocolError("receipt identity observations differ from the immutable run header")
+    manifest = _generation_manifest(schedule, layout, run_header)
     ledger = protocol.AttemptLedger(layout.ledger, protocol.schedule_digest(schedule))
     records = ledger.read()
     completed_pairs = {record["pair_index"] for record in records if record["event"] == "completed"}
     if completed_pairs != {pair[0].pair_index for pair in _pairs(schedule)}:
         raise protocol.ProtocolError("generation ledger lacks exactly one completion per pair")
     ledger_payload = layout.ledger.read_bytes()
-    factor_sha256 = factor_digest(tool_surface_sha256)
+    run_header_sha256 = protocol.sha256_file(layout.run_header)
     return {
         "schema": GENERATION_RECEIPT_SCHEMA,
-        "preregistration_sha256": protocol.preregistration_digest(),
-        "schedule_sha256": protocol.schedule_digest(schedule),
-        "factor_sha256": factor_sha256,
-        "factor": factor_document(tool_surface_sha256),
-        "generation_binding": binding.as_dict(),
+        "preregistration_sha256": run_header["preregistration_sha256"],
+        "schedule_sha256": run_header["schedule_sha256"],
+        "run_header_sha256": run_header_sha256,
+        "factor_sha256": run_header["factor_sha256"],
+        "factor": run_header["factor"],
+        "generation_binding": run_header["generation_binding"],
         "model_identity_checks": {
             "before_first_generation": observed_model_identity_before,
             "after_last_generation": observed_model_identity_after,
@@ -881,7 +1014,7 @@ def build_generation_receipt(
         "canonical_manifest_sha256": protocol.sha256_bytes(protocol.canonical_json_bytes(manifest)),
         "canonical_manifest": manifest,
         "contains_model_text_or_evaluator_output": False,
-        "evidence_class": "non_evidence_smoke",
+        "evidence_class": run_header["evidence_class"],
         "confirmatory_evidence_admissible": False,
         "confirmatory_blockers": list(CONFIRMATORY_BLOCKERS),
     }

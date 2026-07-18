@@ -200,10 +200,12 @@ def test_interrupted_arm_requires_whole_pair_abort_and_retry(tmp_path: Path) -> 
     document, schedule = _schedule_document(instances)
     layout = runner.GenerationLayout.create(tmp_path / "generation")
     calls = 0
+    requests: list[runner.ArmRunRequest] = []
 
     def interrupted(request: runner.ArmRunRequest) -> runner.ArmRunOutcome:
         nonlocal calls
         calls += 1
+        requests.append(request)
         if calls == 2:
             raise RuntimeError("simulated host loss")
         (request.workspace / "module.py").write_text("VALUE = 4\n", encoding="utf-8")
@@ -244,18 +246,18 @@ def test_interrupted_arm_requires_whole_pair_abort_and_retry(tmp_path: Path) -> 
         pair_index=schedule[0].pair_index,
         reason_code="infrastructure_host_loss",
     )
-    retry = RecordingExecutor()
+    retry_start = len(requests)
     runner.run_generation_pairs(
         schedule_document=document,
         schedule=schedule,
         layout=layout,
         workspace_factory=runner.ExternalGitWorkspaceFactory(lambda _instance: source),
-        executor=retry,
+        executor=interrupted,
         binding=_binding(),
         tier_config=_tier(),
         agent_module=_agent_module(),
     )
-    assert len(retry.requests) == len(schedule)
+    assert len(requests[retry_start:]) == len(schedule)
     records = protocol.AttemptLedger(layout.ledger, protocol.schedule_digest(schedule)).read()
     assert [record["event"] for record in records[:4]] == [
         "started",
@@ -342,6 +344,20 @@ def test_generation_receipt_recomputes_factor_ledger_and_canonical_hashes(tmp_pa
     )
     _registry, _specs, surface_digest = runner.build_identical_tool_surface(agent_module)
 
+    with pytest.raises(protocol.ProtocolError, match="immutable run header"):
+        runner.seal_generation_receipt(
+            schedule=schedule,
+            layout=layout,
+            binding=runner.GenerationBinding(
+                mio_commit="c" * 40,
+                model_identity=protocol.EXPECTED_MODEL_IDENTITY,
+                runtime_digest="e" * 64,
+            ),
+            tool_surface_sha256=surface_digest,
+            observed_model_identity_before=protocol.EXPECTED_MODEL_IDENTITY,
+            observed_model_identity_after=protocol.EXPECTED_MODEL_IDENTITY,
+        )
+
     receipt_sha256 = runner.seal_generation_receipt(
         schedule=schedule,
         layout=layout,
@@ -366,7 +382,12 @@ def test_generation_receipt_recomputes_factor_ledger_and_canonical_hashes(tmp_pa
     assert receipt["evidence_class"] == "non_evidence_smoke"
     assert receipt["confirmatory_evidence_admissible"] is False
     assert set(receipt["confirmatory_blockers"]) == set(runner.CONFIRMATORY_BLOCKERS)
+    assert receipt["run_header_sha256"] == protocol.sha256_file(layout.run_header)
+    header = json.loads(layout.run_header.read_text(encoding="utf-8"))
+    assert header["factor_sha256"] == receipt["factor_sha256"]
+    assert header["generation_binding"] == receipt["generation_binding"]
     assert layout.ledger.parent == layout.root
+    assert layout.run_header.parent == layout.root
     assert layout.canonical.parent == layout.root
     assert layout.ledger not in layout.canonical.parents
 
