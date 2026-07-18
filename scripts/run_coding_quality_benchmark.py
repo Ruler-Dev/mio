@@ -15,6 +15,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import io
+import importlib.metadata
+import json
+import os
+import platform
+import re
 import subprocess
 import sys
 import tempfile
@@ -24,7 +29,17 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
-from scripts.bench_coding_quality import (
+# ``python scripts/run_coding_quality_benchmark.py`` sets ``sys.path[0]`` to
+# ``scripts/`` rather than the repository root.  Bootstrap the checkout before
+# importing Mio-local packages so the executable form and ``python -m`` resolve
+# the exact same source tree.
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if os.fspath(_REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, os.fspath(_REPOSITORY_ROOT))
+
+from experimental.effort.model_identity import fingerprint_local_model  # noqa: E402
+
+from scripts.bench_coding_quality import (  # noqa: E402
     GATE_OFF,
     GATE_ON,
     BenchmarkExecution,
@@ -35,6 +50,7 @@ from scripts.bench_coding_quality import (
     HiddenEvaluation,
     Preregistration,
     PublicFile,
+    SourceFreeAggregate,
     fixture_suite_sha256,
     run_benchmark,
     serialize_source_free_aggregate,
@@ -43,6 +59,654 @@ from scripts.bench_coding_quality import (
 
 _PUBLIC_TOOL_NAMES = ("bash", "read", "write", "edit")
 _GATE_TOOL_NAMES = (*_PUBLIC_TOOL_NAMES, "validate")
+
+RESULT_ENVELOPE_SCHEMA = "mio.coding-quality-result-envelope.v1"
+SOURCE_LOCK_SCHEMA = "mio.coding-quality-source-lock.v1"
+TARGET_REPOSITORY_LABEL = "mlx-community/Qwen3.5-4B-4bit"
+TARGET_CONTENT_IDENTITY = (
+    "local-sha256-v1:7d7ea69d09ada4f1d2f49f6ca651441ac279b95b6d280f259da04fbde504376f"
+)
+DRAFT_REPOSITORY_LABEL = "z-lab/Qwen3.5-4B-DFlash"
+DRAFT_CONTENT_IDENTITY = (
+    "local-sha256-v1:4b60bced36f602da85a6447d3648e7ac37a0c5cce68d505a49664252c0586b98"
+)
+FROZEN_CONTEXT_WINDOW = 8192
+FROZEN_MAX_OUTPUT_TOKENS = 2048
+FROZEN_SEED = 20260718
+FROZEN_BOOTSTRAP_SAMPLES = 10_000
+FROZEN_ALPHA = 0.05
+FROZEN_MINIMUM_PAIRS_FOR_CLAIM = 16
+FROZEN_EVALUATOR_TIMEOUT_S = 5.0
+FROZEN_SOFTWARE_VERSIONS = (
+    ("dflash-mlx", "0.1.8"),
+    ("huggingface-hub", "1.24.0"),
+    ("mlx", "0.32.0"),
+    ("mlx-audio", "0.4.4"),
+    ("mlx-dspark", "0.5.0"),
+    ("mlx-lm", "0.31.3"),
+    ("mlx-vlm", "0.6.5"),
+    ("transformers", "5.14.1"),
+)
+GATE_PROFILE_SCHEMA = "mio.coding-quality-effort-profiles.v1"
+_GATE_PROFILE_MANIFEST = {
+    "schema": GATE_PROFILE_SCHEMA,
+    "profiles": {
+        "low": {"code": ["any_validation"], "docs": ["any_validation"]},
+        "medium": {"code": ["test_or_build"], "docs": ["diff"]},
+        "high": {"code": ["test", "static_or_diff"], "docs": ["test", "static_or_diff"]},
+        "xhigh": {"code": ["test", "static", "diff"], "docs": ["test", "static", "diff"]},
+        "ultra": {
+            "code": ["test", "static", "diff", "review_or_second_distinct_test"],
+            "docs": ["test", "static", "diff", "review_or_second_distinct_test"],
+        },
+    },
+}
+_COMPUTED_GATE_PROFILE_SHA256 = hashlib.sha256(
+    json.dumps(
+        _GATE_PROFILE_MANIFEST,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
+GATE_PROFILE_SHA256 = "f522ac26d7b49c55e0c048e119e42802ff4b35da7223bf12b1f5e200fbb5208b"
+
+# These are every behavior- or timing-affecting environment override consulted
+# by the native DFlash path.  A scientific run uses the checked-in defaults;
+# accepting even a seemingly equivalent override would make provenance depend
+# on unreported caller state.
+_FROZEN_ENVIRONMENT_VARIABLES = (
+    "DDTREE_EXACT_COMMIT",
+    "DFLASH_DRAFT_SINK",
+    "DFLASH_DRAFT_WINDOW",
+    "DFLASH_MAX_CTX",
+    "DFLASH_QUANTIZE_DRAFT",
+    "DFLASH_VERIFY_LEN",
+    "MIO_DDTREE_BUDGET",
+    "MIO_DEBUG_LOG",
+    "MIO_DEBUG_LOG_PATH",
+    "MIO_DFLASH_EXACT_COMMIT_ORACLE",
+    "MIO_DFLASH_EXACT_COMPONENTS",
+    "MIO_DFLASH_QMV_STAGING",
+    "MIO_DFLASH_QMV_VECTORS",
+    "MIO_PREFILL_CHUNK",
+)
+_SOURCE_LOCK_FILES = (
+    "pyproject.toml",
+    "mio/agent.py",
+    "mio/agent_policy.py",
+    "mio/coding_quality.py",
+    "mio/config.py",
+    "mio/model_manager.py",
+    "mio/prompt_policy.py",
+    "scripts/bench_coding_quality.py",
+    "scripts/run_coding_quality_benchmark.py",
+)
+_SENSITIVE_ARTIFACT_KEYS = frozenset(
+    {
+        "assistant_text",
+        "completion",
+        "content",
+        "draft_path",
+        "fixture_id",
+        "hidden_checks",
+        "hidden_labels",
+        "instruction",
+        "model_path",
+        "oracle",
+        "path",
+        "prompt",
+        "public_files",
+        "public_regression",
+        "record",
+        "records",
+        "request",
+        "response",
+        "target_path",
+        "tool_output",
+        "workspace",
+    }
+)
+_FULL_GIT_REVISION = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+_SAFE_PUBLIC_LABEL = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}\Z")
+_SAFE_VERSION = re.compile(r"[0-9A-Za-z][0-9A-Za-z._+!-]{0,127}\Z")
+_SAFE_HARDWARE_LABEL = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
+_WINDOWS_ABSOLUTE_PATH = re.compile(r"[A-Za-z]:[\\/]")
+
+
+@dataclass(frozen=True)
+class CleanSourceLock:
+    """Content-bound clean implementation state retained only in memory."""
+
+    repo_root: Path
+    git_revision: str
+    source_sha256: str
+    source_file_count: int
+
+
+@dataclass(frozen=True)
+class LocalModelLock:
+    """One exact local model snapshot; its absolute path is never public."""
+
+    role: str
+    repository_label: str
+    content_identity: str
+    resolved_path: Path
+
+
+@dataclass(frozen=True)
+class RuntimeIdentity:
+    """Source-free identity of the interpreter, MLX stack, and host class."""
+
+    python_version: str
+    software_versions: tuple[tuple[str, str], ...]
+    hardware_label: str
+
+    def __post_init__(self) -> None:
+        if not _SAFE_VERSION.fullmatch(self.python_version):
+            raise ValueError("runtime identity contains an unsafe or unavailable python_version")
+        if self.software_versions != FROZEN_SOFTWARE_VERSIONS:
+            raise ValueError("runtime identity does not match the frozen software lock")
+        if any(
+            not _SAFE_PUBLIC_LABEL.fullmatch(name) or not _SAFE_VERSION.fullmatch(version)
+            for name, version in self.software_versions
+        ):
+            raise ValueError("runtime identity contains an unsafe software version")
+        if not _SAFE_HARDWARE_LABEL.fullmatch(self.hardware_label):
+            raise ValueError("runtime identity contains an unsafe or unavailable hardware label")
+
+
+@dataclass(frozen=True)
+class BenchmarkResultEnvelope:
+    """Fixed-schema, source-free result approved for public serialization."""
+
+    source_lock: CleanSourceLock
+    model_locks: tuple[LocalModelLock, LocalModelLock]
+    runtime_identity: RuntimeIdentity
+    aggregate: SourceFreeAggregate
+    split: str
+    tier: str
+    effort: str
+    protocol_sha256: str
+    gate_profile_sha256: str = GATE_PROFILE_SHA256
+    post_run_verified: bool = True
+
+    def __post_init__(self) -> None:
+        expected_models = {
+            "target": (TARGET_REPOSITORY_LABEL, TARGET_CONTENT_IDENTITY),
+            "drafter": (DRAFT_REPOSITORY_LABEL, DRAFT_CONTENT_IDENTITY),
+        }
+        observed_models = {
+            lock.role: (lock.repository_label, lock.content_identity) for lock in self.model_locks
+        }
+        if observed_models != expected_models or len(self.model_locks) != len(expected_models):
+            raise ValueError("result envelope model identities do not match the frozen protocol")
+        if not self.post_run_verified:
+            raise ValueError("result envelope requires successful post-run verification")
+        if not _FULL_GIT_REVISION.fullmatch(self.source_lock.git_revision):
+            raise ValueError("result envelope requires a full lowercase Git revision")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.source_lock.source_sha256):
+            raise ValueError("result envelope requires a lowercase source SHA-256")
+        if self.source_lock.source_file_count != len(_SOURCE_LOCK_FILES):
+            raise ValueError("result envelope source scope does not match the frozen protocol")
+        expected_splits = {
+            "smoke": (SMOKE_SUITE_SHA256, SMOKE_PROTOCOL_SHA256, 4),
+            "development": (DEVELOPMENT_SUITE_SHA256, DEVELOPMENT_PROTOCOL_SHA256, 8),
+            "all": (ALL_SUITE_SHA256, ALL_PROTOCOL_SHA256, 12),
+        }
+        if self.split not in expected_splits:
+            raise ValueError("result envelope split is not supported by this runner")
+        expected_suite, expected_protocol, expected_pairs = expected_splits[self.split]
+        if (
+            self.aggregate.suite_sha256 != expected_suite
+            or self.protocol_sha256 != expected_protocol
+            or self.aggregate.pair_count != expected_pairs
+            or self.aggregate.seed != FROZEN_SEED
+            or self.aggregate.bootstrap_samples != FROZEN_BOOTSTRAP_SAMPLES
+            or self.aggregate.alpha != FROZEN_ALPHA
+        ):
+            raise ValueError("result envelope aggregate does not match its frozen split protocol")
+        if self.effort not in {"low", "medium", "high", "xhigh", "ultra"}:
+            raise ValueError("result envelope effort is not supported")
+        if self.gate_profile_sha256 != GATE_PROFILE_SHA256:
+            raise ValueError("result envelope gate profile does not match the frozen protocol")
+        _assert_gate_profile_seal()
+        if not _SAFE_PUBLIC_LABEL.fullmatch(self.tier):
+            raise ValueError("result envelope tier must be a source-free public label")
+        if not isinstance(self.runtime_identity, RuntimeIdentity):
+            raise ValueError("result envelope requires a verified runtime identity")
+        self.runtime_identity.__post_init__()
+
+    def to_dict(self) -> dict[str, object]:
+        models = {lock.role: lock for lock in self.model_locks}
+        return {
+            "schema_version": RESULT_ENVELOPE_SCHEMA,
+            "implementation": {
+                "source_lock_schema": SOURCE_LOCK_SCHEMA,
+                "git_revision": self.source_lock.git_revision,
+                "git_clean": True,
+                "source_sha256": self.source_lock.source_sha256,
+                "source_file_count": self.source_lock.source_file_count,
+                "post_run_source_stable": True,
+            },
+            "models": {
+                "target": {
+                    "repository_label": models["target"].repository_label,
+                    "content_identity": models["target"].content_identity,
+                },
+                "drafter": {
+                    "backend": "dflash",
+                    "repository_label": models["drafter"].repository_label,
+                    "content_identity": models["drafter"].content_identity,
+                },
+                "post_run_identities_stable": True,
+            },
+            "protocol": {
+                "protocol_sha256": self.protocol_sha256,
+                "gate_profile_schema": GATE_PROFILE_SCHEMA,
+                "gate_profile_sha256": self.gate_profile_sha256,
+            },
+            "software": {
+                "python_version": self.runtime_identity.python_version,
+                "packages": dict(self.runtime_identity.software_versions),
+            },
+            "hardware": {"label": self.runtime_identity.hardware_label},
+            "runtime": {
+                "split": self.split,
+                "tier": self.tier,
+                "effort": self.effort,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 0,
+                "context_window": FROZEN_CONTEXT_WINDOW,
+                "max_output_tokens": FROZEN_MAX_OUTPUT_TOKENS,
+                "tq_bits": 16,
+                "pq_bits": 16,
+                "bmp_paths": 1,
+                "ddtree_budget": 0,
+                "drafter_backend": "dflash",
+                "dflash_quantize_draft": False,
+                "dflash_verify_len_override": False,
+                "dflash_max_context": 131072,
+                "dflash_draft_sink": 64,
+                "dflash_draft_window": 1024,
+                "dflash_exact_commit_oracle": False,
+                "dflash_exact_components": "gdn,attention,mlp,head",
+                "dflash_qmv_vectors": "auto",
+                "dflash_qmv_staging": False,
+                "prefill_chunk": 2048,
+                "environment_overrides": False,
+                "cold_arm_state": True,
+                "network_enabled": False,
+            },
+            "aggregate": json.loads(serialize_source_free_aggregate(self.aggregate)),
+            "hidden_labels_serialized": False,
+        }
+
+
+GitProbe = Callable[[Path, tuple[str, ...]], str]
+ModelFingerprint = Callable[[Path], Any]
+
+
+def _assert_frozen_environment(environ: Mapping[str, str] | None = None) -> None:
+    """Reject caller state that can alter the frozen DFlash execution path."""
+
+    active = os.environ if environ is None else environ
+    # Presence itself is an override: for example an explicitly empty
+    # MIO_DFLASH_EXACT_COMPONENTS disables the non-empty checked-in default.
+    overridden = sorted(name for name in _FROZEN_ENVIRONMENT_VARIABLES if name in active)
+    if overridden:
+        raise RuntimeError(
+            "MioCodeBench requires frozen DFlash environment defaults; unset: "
+            + ", ".join(overridden)
+        )
+
+
+def _assert_gate_profile_seal() -> None:
+    from mio.coding_quality import CodingQualityGate, WorkspaceSnapshot
+
+    observed_profiles: dict[str, dict[str, list[str]]] = {}
+    synthetic_snapshot = WorkspaceSnapshot(
+        revision_sha256="0" * 64,
+        entries=(),
+        complete=True,
+        root_count=1,
+        method="protocol_contract",
+    )
+    for effort in ("low", "medium", "high", "xhigh", "ultra"):
+        observed_profiles[effort] = {}
+        for change_kind in ("code", "docs"):
+            gate = CodingQualityGate(
+                roots=(_REPOSITORY_ROOT,),
+                effort=effort,
+                initial_snapshot=synthetic_snapshot,
+                current_snapshot=synthetic_snapshot,
+            )
+            gate.mutation_epoch = 1
+            gate.changed_kinds = {change_kind}
+            required, _missing = gate._requirements()
+            observed_profiles[effort][change_kind] = list(required)
+    observed_manifest = {
+        "schema": GATE_PROFILE_SCHEMA,
+        "profiles": observed_profiles,
+    }
+    observed_sha256 = hashlib.sha256(
+        json.dumps(
+            observed_manifest,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if (
+        _COMPUTED_GATE_PROFILE_SHA256 != GATE_PROFILE_SHA256
+        or observed_sha256 != GATE_PROFILE_SHA256
+    ):
+        raise RuntimeError("coding-quality effort profiles no longer match their explicit seal")
+
+
+def _sysctl_value(name: str) -> str:
+    executable = Path("/usr/sbin/sysctl")
+    if not executable.is_file():
+        raise RuntimeError("hardware identity is unavailable")
+    completed = subprocess.run(
+        [os.fspath(executable), "-n", name],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    value = completed.stdout.strip()
+    if completed.returncode != 0 or not value:
+        raise RuntimeError("hardware identity is unavailable")
+    return value
+
+
+def _physical_memory_bytes() -> int:
+    if platform.system() == "Darwin":
+        try:
+            value = int(_sysctl_value("hw.memsize"))
+        except (RuntimeError, ValueError) as exc:
+            raise RuntimeError("hardware memory identity is unavailable") from exc
+    else:
+        try:
+            value = int(os.sysconf("SC_PAGE_SIZE")) * int(os.sysconf("SC_PHYS_PAGES"))
+        except (AttributeError, OSError, TypeError, ValueError) as exc:
+            raise RuntimeError("hardware memory identity is unavailable") from exc
+    if value <= 0:
+        raise RuntimeError("hardware memory identity is unavailable")
+    return value
+
+
+def _hardware_model() -> str:
+    if platform.system() == "Darwin":
+        return _sysctl_value("hw.model")
+    value = platform.processor().strip() or platform.machine().strip()
+    if not value:
+        raise RuntimeError("hardware model identity is unavailable")
+    return value
+
+
+def _label_segment(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9._-]+", "-", value.casefold()).strip("-._")
+    if not normalized:
+        raise RuntimeError("hardware identity contains no safe public label")
+    return normalized
+
+
+def collect_runtime_identity() -> RuntimeIdentity:
+    """Collect a path-free identity for the effective native MLX runtime."""
+
+    try:
+        software_versions = tuple(
+            (name, importlib.metadata.version(name))
+            for name, _expected in FROZEN_SOFTWARE_VERSIONS
+        )
+    except importlib.metadata.PackageNotFoundError as exc:
+        raise RuntimeError("the installed MLX runtime identity is unavailable") from exc
+    if software_versions != FROZEN_SOFTWARE_VERSIONS:
+        raise RuntimeError("the installed MLX stack does not match the frozen software lock")
+    cpu_count = os.cpu_count()
+    if cpu_count is None or cpu_count < 1:
+        raise RuntimeError("hardware CPU identity is unavailable")
+    hardware_label = "-".join(
+        (
+            _label_segment(platform.system()),
+            _label_segment(platform.machine()),
+            _label_segment(_hardware_model()),
+            f"{cpu_count}cpu",
+            f"{_physical_memory_bytes()}b",
+        )
+    )
+    return RuntimeIdentity(
+        python_version=platform.python_version(),
+        software_versions=software_versions,
+        hardware_label=hardware_label,
+    )
+
+
+def verify_runtime_identity(expected: RuntimeIdentity) -> None:
+    """Fail if software or hardware identity changed during execution."""
+
+    if collect_runtime_identity() != expected:
+        raise RuntimeError("benchmark runtime identity drifted during execution")
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    return path == root or root in path.parents
+
+
+def validate_output_path(
+    output: Path | None,
+    *,
+    source_root: Path,
+    model_locks: Sequence[LocalModelLock],
+) -> Path | None:
+    """Reject result destinations that could invalidate certified inputs."""
+
+    if output is None:
+        return None
+    candidate = Path(output).expanduser()
+    if candidate.is_symlink():
+        raise RuntimeError("benchmark output must not be a symlink")
+    resolved = candidate.resolve(strict=False)
+    protected_roots = (
+        Path(source_root).resolve(strict=True),
+        *(lock.resolved_path.resolve(strict=True) for lock in model_locks),
+    )
+    if any(_path_is_within(resolved, root) for root in protected_roots):
+        raise RuntimeError("benchmark output must stay outside source and model roots")
+    if candidate.exists() and not candidate.is_file():
+        raise RuntimeError("benchmark output must be a regular file destination")
+    return resolved
+
+
+def _atomic_write_result(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def _git_probe(repo_root: Path, arguments: tuple[str, ...]) -> str:
+    completed = subprocess.run(
+        ["git", "-C", os.fspath(repo_root), *arguments],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError("cannot establish benchmark Git provenance")
+    return completed.stdout
+
+
+def _source_tree_sha256(repo_root: Path, source_files: Sequence[str]) -> str:
+    digest = hashlib.sha256()
+    for relative_name in sorted(source_files):
+        relative = Path(relative_name)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise RuntimeError("source lock contains a non-relative file name")
+        path = repo_root / relative
+        if path.is_symlink() or not path.is_file():
+            raise RuntimeError("source lock input is not a regular file")
+        before = path.stat()
+        content = path.read_bytes()
+        after = path.stat()
+        before_identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+        after_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        if before_identity != after_identity:
+            raise RuntimeError("source changed while its benchmark digest was computed")
+        encoded_name = relative.as_posix().encode("utf-8")
+        digest.update(len(encoded_name).to_bytes(8, "big"))
+        digest.update(encoded_name)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()
+
+
+def capture_clean_source_lock(
+    repo_root: Path | None = None,
+    *,
+    git_probe: GitProbe = _git_probe,
+    source_files: Sequence[str] = _SOURCE_LOCK_FILES,
+) -> CleanSourceLock:
+    """Bind the run to one full clean Git revision and one source digest."""
+
+    root = Path(repo_root or Path(__file__).resolve().parents[1]).resolve(strict=True)
+    top_level = Path(git_probe(root, ("rev-parse", "--show-toplevel")).strip()).resolve(strict=True)
+    if top_level != root:
+        raise RuntimeError("benchmark source root is not the Git top level")
+    revision = git_probe(root, ("rev-parse", "HEAD")).strip().casefold()
+    if not _FULL_GIT_REVISION.fullmatch(revision):
+        raise RuntimeError("benchmark requires a full immutable Git revision")
+    status = git_probe(root, ("status", "--porcelain=v1", "--untracked-files=all"))
+    if status:
+        raise RuntimeError("benchmark requires a clean Git worktree")
+    tracked_output = git_probe(root, ("ls-files", "-z", "--", *source_files))
+    tracked = tuple(item for item in tracked_output.split("\x00") if item)
+    if set(tracked) != set(source_files) or len(tracked) != len(source_files):
+        raise RuntimeError("benchmark source-lock scope is not fully tracked")
+    return CleanSourceLock(
+        repo_root=root,
+        git_revision=revision,
+        source_sha256=_source_tree_sha256(root, source_files),
+        source_file_count=len(source_files),
+    )
+
+
+def verify_clean_source_lock(
+    expected: CleanSourceLock,
+    *,
+    git_probe: GitProbe = _git_probe,
+    source_files: Sequence[str] = _SOURCE_LOCK_FILES,
+) -> None:
+    """Reject a dirty tree, revision change, or source drift after execution."""
+
+    observed = capture_clean_source_lock(
+        expected.repo_root,
+        git_probe=git_probe,
+        source_files=source_files,
+    )
+    if observed != expected:
+        raise RuntimeError("benchmark implementation source drifted during execution")
+
+
+def bind_frozen_local_models(
+    target_path: Path,
+    draft_path: Path,
+    *,
+    fingerprint: ModelFingerprint = fingerprint_local_model,
+) -> tuple[LocalModelLock, LocalModelLock]:
+    """Fail closed unless both local paths exactly match preregistered bytes."""
+
+    target = Path(target_path).expanduser().resolve(strict=True)
+    drafter = Path(draft_path).expanduser().resolve(strict=True)
+    if target == drafter:
+        raise RuntimeError("target and drafter must be distinct local model snapshots")
+    locks: list[LocalModelLock] = []
+    for role, label, identity, path in (
+        ("target", TARGET_REPOSITORY_LABEL, TARGET_CONTENT_IDENTITY, target),
+        ("drafter", DRAFT_REPOSITORY_LABEL, DRAFT_CONTENT_IDENTITY, drafter),
+    ):
+        observed = fingerprint(path)
+        if getattr(observed, "revision", None) != identity:
+            raise RuntimeError(f"{role} local model does not match the frozen content identity")
+        locks.append(
+            LocalModelLock(
+                role=role,
+                repository_label=label,
+                content_identity=identity,
+                resolved_path=path,
+            )
+        )
+    return locks[0], locks[1]
+
+
+def verify_frozen_local_models(
+    expected: Sequence[LocalModelLock],
+    *,
+    fingerprint: ModelFingerprint = fingerprint_local_model,
+) -> None:
+    """Re-fingerprint both model bundles after all paired generations."""
+
+    if tuple(lock.role for lock in expected) != ("target", "drafter"):
+        raise RuntimeError("post-run model verification received an invalid lock set")
+    for lock in expected:
+        observed = fingerprint(lock.resolved_path)
+        if getattr(observed, "revision", None) != lock.content_identity:
+            raise RuntimeError(f"{lock.role} local model changed during benchmark execution")
+
+
+def _assert_source_free_artifact(value: object) -> None:
+    """Reject private records, content fields, and absolute paths recursively."""
+
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError("public benchmark artifact keys must be strings")
+            normalized = key.casefold()
+            path_key = normalized.endswith(("_path", "_paths")) and normalized != "bmp_paths"
+            if normalized in _SENSITIVE_ARTIFACT_KEYS or path_key:
+                raise ValueError("public benchmark artifact contains a sensitive key")
+            if normalized == "hidden_labels_serialized" and item is not False:
+                raise ValueError("hidden labels must never be serialized")
+            _assert_source_free_artifact(item)
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _assert_source_free_artifact(item)
+        return
+    if isinstance(value, str) and (
+        value.startswith(("/", "~/")) or _WINDOWS_ABSOLUTE_PATH.match(value)
+    ):
+        raise ValueError("public benchmark artifact contains an absolute path")
+
+
+def serialize_source_free_result(
+    envelope: BenchmarkResultEnvelope,
+    *,
+    indent: int | None = 2,
+) -> str:
+    """Serialize the fixed provenance envelope and no private run records."""
+
+    if not isinstance(envelope, BenchmarkResultEnvelope):
+        raise TypeError("only BenchmarkResultEnvelope may be serialized for publication")
+    envelope.__post_init__()
+    payload = envelope.to_dict()
+    _assert_source_free_artifact(payload)
+    return json.dumps(payload, sort_keys=True, indent=indent, allow_nan=False) + "\n"
 
 
 @dataclass(frozen=True)
@@ -476,6 +1140,82 @@ def fixture_tree_sha256(fixture: CodingFixture) -> str:
     return digest.hexdigest()
 
 
+def protocol_suite_sha256(
+    cases: Sequence[CorpusCase],
+    *,
+    evaluator_timeout_s: float = FROZEN_EVALUATOR_TIMEOUT_S,
+    seed: int = FROZEN_SEED,
+    bootstrap_samples: int = FROZEN_BOOTSTRAP_SAMPLES,
+    alpha: float = FROZEN_ALPHA,
+    minimum_pairs_for_claim: int = FROZEN_MINIMUM_PAIRS_FOR_CLAIM,
+) -> str:
+    """Seal public inputs, private evaluators, edit scope, and analysis knobs."""
+
+    ordered = sorted(cases, key=lambda case: case.fixture.fixture_id)
+    if not ordered:
+        raise ValueError("protocol seal requires at least one corpus case")
+    payload = {
+        "schema": "mio.coding-quality-corpus-protocol.v1",
+        "gate_profile_sha256": GATE_PROFILE_SHA256,
+        "public_suite_sha256": fixture_suite_sha256(
+            tuple(case.fixture for case in ordered)
+        ),
+        "evaluator": {
+            "implementation": "CorpusHiddenEvaluator.v1",
+            "timeout_s": evaluator_timeout_s,
+        },
+        "analysis": {
+            "seed": seed,
+            "bootstrap_samples": bootstrap_samples,
+            "alpha": alpha,
+            "minimum_pairs_for_claim": minimum_pairs_for_claim,
+        },
+        "cases": [
+            {
+                "fixture_id": case.fixture.fixture_id,
+                "split": case.split,
+                "editable_names": list(case.editable_names),
+                "public_regression": case.oracle.public_regression,
+                "hidden_checks": case.oracle.hidden_checks,
+            }
+            for case in ordered
+        ],
+    }
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+# Explicit private-protocol seals.  Updating a hidden oracle, edit scope,
+# timeout, schedule seed, or analysis threshold requires a reviewed protocol
+# revision and new constants before any generation can start.
+SMOKE_PROTOCOL_SHA256 = "3d595244487a82471a1ac596fd0f29be495bf3b0e63d8a42e1cfad0985553cf3"
+DEVELOPMENT_PROTOCOL_SHA256 = "f93ca2da59a4e1a3f4cd74bc146b508dfbb68e3e1b4c96eecca5880dcd0ccd0f"
+ALL_PROTOCOL_SHA256 = "4077241ce159be68f755c5d083f5e4d99f7d786c075c2e5de23a24ff304b147d"
+
+
+def sealed_protocol_sha256(cases: Sequence[CorpusCase]) -> str:
+    _assert_gate_profile_seal()
+    identifiers = tuple(case.fixture.fixture_id for case in cases)
+    seals = {
+        tuple(case.fixture.fixture_id for case in select_cases("smoke")): SMOKE_PROTOCOL_SHA256,
+        tuple(case.fixture.fixture_id for case in select_cases("development")): DEVELOPMENT_PROTOCOL_SHA256,
+        tuple(case.fixture.fixture_id for case in select_cases("all")): ALL_PROTOCOL_SHA256,
+    }
+    expected = seals.get(identifiers)
+    if expected is None:
+        raise ValueError("cases must be one complete frozen MioCodeBench split")
+    actual = protocol_suite_sha256(cases)
+    if actual != expected:
+        raise RuntimeError("MioCodeBench private protocol no longer matches its explicit seal")
+    return expected
+
+
 def workspace_tree_sha256(workspace: Path) -> str:
     digest = hashlib.sha256()
     root = workspace.resolve()
@@ -679,7 +1419,12 @@ class RealMioGenerationRunner:
 class CorpusHiddenEvaluator:
     """Run pristine public and private oracles after all agent arms are sealed."""
 
-    def __init__(self, cases: Sequence[CorpusCase], *, timeout_s: float = 5.0) -> None:
+    def __init__(
+        self,
+        cases: Sequence[CorpusCase],
+        *,
+        timeout_s: float = FROZEN_EVALUATOR_TIMEOUT_S,
+    ) -> None:
         self._cases = {case.fixture.fixture_id: case for case in cases}
         self.timeout_s = timeout_s
 
@@ -753,21 +1498,24 @@ def execute_corpus(
     runner: Callable[[GenerationRequest], GenerationObservation],
     work_root: Path,
     hidden_evaluator: Callable[[EvaluationRequest], HiddenEvaluation] | None = None,
-    seed: int = 20260718,
+    seed: int = FROZEN_SEED,
 ) -> BenchmarkExecution:
     """Execute a non-confirmatory split through the shared two-phase harness."""
 
     if not cases:
         raise ValueError("at least one corpus case is required")
+    if seed != FROZEN_SEED:
+        raise ValueError("MioCodeBench execution seed is frozen by the private protocol seal")
     fixtures = tuple(case.fixture for case in cases)
+    sealed_protocol_sha256(cases)
     return run_benchmark(
         fixtures=fixtures,
         preregistration=Preregistration(
             expected_suite_sha256=sealed_suite_sha256(cases),
             seed=seed,
-            bootstrap_samples=10_000,
-            alpha=0.05,
-            minimum_pairs_for_claim=16,
+            bootstrap_samples=FROZEN_BOOTSTRAP_SAMPLES,
+            alpha=FROZEN_ALPHA,
+            minimum_pairs_for_claim=FROZEN_MINIMUM_PAIRS_FOR_CLAIM,
         ),
         runner=runner,
         hidden_evaluator=hidden_evaluator or CorpusHiddenEvaluator(cases),
@@ -775,24 +1523,64 @@ def execute_corpus(
     )
 
 
-def _load_native_executor(*, tier: str, config_path: Path | None) -> tuple[NativeAgentTurnExecutor, Any]:
-    from mio.config import load_config
-    from mio.model_manager import ModelManager
+def _load_native_executor(
+    *,
+    tier: str,
+    config_path: Path | None,
+    target_path: Path,
+    draft_path: Path,
+    config_loader: Callable[[Path | None], Any] | None = None,
+    manager_factory: Callable[[Any], Any] | None = None,
+) -> tuple[NativeAgentTurnExecutor, Any]:
+    if config_loader is None:
+        from mio.config import load_config
 
-    config = load_config(config_path)
+        config_loader = load_config
+    if manager_factory is None:
+        from mio.model_manager import ModelManager
+
+        manager_factory = ModelManager
+
+    config = config_loader(config_path)
     if tier not in config.tiers:
         raise ValueError(f"unknown configured tier: {tier}")
     config.active_tiers = [tier]
     tier_config = config.tiers[tier]
+    # The command-line snapshots are authoritative.  Never allow a persisted
+    # tier, registry fallback, or alternate drafter backend to change an arm.
+    tier_config.target_model = os.fspath(Path(target_path).resolve(strict=True))
+    tier_config.draft_model = os.fspath(Path(draft_path).resolve(strict=True))
+    tier_config.draft_fallback_model = None
+    tier_config.drafter_backend = "dflash"
+    tier_config.drafter_strict = True
+    tier_config.tq_bits = 16
+    tier_config.pq_bits = 16
+    tier_config.bmp_paths = 1
+    tier_config.ddtree_budget = 0
+    tier_config.context_window = FROZEN_CONTEXT_WINDOW
+    tier_config.max_output_tokens = FROZEN_MAX_OUTPUT_TOKENS
     tier_config.temperature = 0.0
     tier_config.top_p = 1.0
     tier_config.top_k = 0
     # Both arms are cold by protocol. Disable DSpark's private prefix slots;
     # MioEngine's own cache is explicitly invalidated before every arm.
     tier_config.dspark_prefix_cache = False
-    manager = ModelManager(config)
+    manager = manager_factory(config)
     manager.load_tier(tier)
     engine = manager.get_engine(tier)
+    drafter_status = getattr(engine, "drafter_status", None)
+    try:
+        loaded_drafter_path = Path(str(drafter_status.get("ref"))).expanduser().resolve(strict=True)
+    except (AttributeError, OSError, RuntimeError):
+        loaded_drafter_path = None
+    if not isinstance(drafter_status, Mapping) or (
+        drafter_status.get("selected") != "dflash"
+        or drafter_status.get("fallback_used") is not False
+        or drafter_status.get("strict") is not True
+        or loaded_drafter_path != Path(draft_path).resolve(strict=True)
+    ):
+        manager.unload_all()
+        raise RuntimeError("benchmark engine did not load the exact strict DFlash primary")
     return NativeAgentTurnExecutor(config=config, manager=manager, engine=engine, tier=tier), manager
 
 
@@ -802,6 +1590,18 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--tier", default="small")
     parser.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "ultra"], default="medium")
     parser.add_argument("--config", type=Path, default=None)
+    parser.add_argument(
+        "--target-path",
+        type=Path,
+        required=True,
+        help=f"exact local {TARGET_REPOSITORY_LABEL} snapshot",
+    )
+    parser.add_argument(
+        "--draft-path",
+        type=Path,
+        required=True,
+        help=f"exact local {DRAFT_REPOSITORY_LABEL} snapshot",
+    )
     parser.add_argument("--work-root", type=Path, default=None)
     parser.add_argument("--output", type=Path, default=None)
     return parser.parse_args(argv)
@@ -809,15 +1609,31 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
+    _assert_frozen_environment()
+    _assert_gate_profile_seal()
     cases = select_cases(args.split)
     fixtures = tuple(case.fixture for case in cases)
+    protocol_sha256 = sealed_protocol_sha256(cases)
+    source_lock = capture_clean_source_lock()
+    runtime_identity = collect_runtime_identity()
+    model_locks = bind_frozen_local_models(args.target_path, args.draft_path)
+    output_path = validate_output_path(
+        args.output,
+        source_root=source_lock.repo_root,
+        model_locks=model_locks,
+    )
     manager = None
     temporary: tempfile.TemporaryDirectory[str] | None = None
     try:
         # Model loaders are verbose; reserve stdout exclusively for the JSON
         # artifact and keep content-bearing agent output in an in-memory sink.
         with redirect_stdout(sys.stderr):
-            executor, manager = _load_native_executor(tier=args.tier, config_path=args.config)
+            executor, manager = _load_native_executor(
+                tier=args.tier,
+                config_path=args.config,
+                target_path=model_locks[0].resolved_path,
+                draft_path=model_locks[1].resolved_path,
+            )
         runner = RealMioGenerationRunner(
             executor=executor,
             fixtures=fixtures,
@@ -830,12 +1646,36 @@ def main(argv: Sequence[str] | None = None) -> int:
             work_root = args.work_root
         with redirect_stdout(sys.stderr):
             execution = execute_corpus(cases=cases, runner=runner, work_root=work_root)
-        serialized = serialize_source_free_aggregate(execution.aggregate)
-        if args.output is None:
+        manager.unload_all()
+        manager = None
+        verify_frozen_local_models(model_locks)
+        verify_clean_source_lock(source_lock)
+        verify_runtime_identity(runtime_identity)
+        serialized = serialize_source_free_result(
+            BenchmarkResultEnvelope(
+                source_lock=source_lock,
+                model_locks=model_locks,
+                runtime_identity=runtime_identity,
+                aggregate=execution.aggregate,
+                split=args.split,
+                tier=args.tier,
+                effort=args.effort,
+                protocol_sha256=protocol_sha256,
+            )
+        )
+        if output_path is None:
             sys.stdout.write(serialized)
         else:
-            args.output.parent.mkdir(parents=True, exist_ok=True)
-            args.output.write_text(serialized, encoding="utf-8")
+            # Re-resolve after the long-running generation to catch a target or
+            # parent changed into a symlink while the benchmark was executing.
+            verified_output = validate_output_path(
+                output_path,
+                source_root=source_lock.repo_root,
+                model_locks=model_locks,
+            )
+            if verified_output is None:  # pragma: no cover - guarded above
+                raise RuntimeError("benchmark output path disappeared")
+            _atomic_write_result(verified_output, serialized)
     finally:
         if manager is not None:
             manager.unload_all()
