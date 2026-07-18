@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import html
 import math
 import os
 import selectors
@@ -38,15 +37,24 @@ from mio.prompt_policy import PromptMode, PromptPolicy, apply_prompt_policy
 console = Console()
 _MAX_TOOL_CALLS_PER_TURN = 32
 _MAX_TOOL_RESULT_CHARS_PER_TURN = 100_000
+_MAX_AGENT_ROUNDS_PER_TURN = 12
+_FINALIZE_TOOL_LOOP = (
+    "Tool execution must stop now ({reason}). Do not call another tool. "
+    "Give a concise, evidence-based status with files changed, latest validation "
+    "or test outcome, and any unfinished work or limitation."
+)
 
 # --- System Prompts ---
 
 AGENT_SYSTEM_PROMPT = """You are Mio, a fast local coding agent running on Apple Silicon.
 You have access to local coding, Mio skill-catalog, and permission-gated Mio MCP tools.
 When the user asks you to write or modify code, do it directly. Be precise and concise.
-Always show the code you write or modify.
-When running bash commands, show the command and its output.
 If you encounter an error, fix it and retry.
+Use tools without narrating obvious steps or echoing tool-call XML. Do not repeat an
+identical tool call unless its inputs or relevant state changed, or the previous
+result explains why a retry can succeed. After edits, run the narrowest relevant
+validation. Finish with changed files, observed test/command outcome, and any real
+limitation; do not paste full code or command output unless the user asks.
 File tools are confined to declared workspace roots. Write, edit, and shell
 tools work only when the trusted caller explicitly granted their capability."""
 
@@ -1002,9 +1010,10 @@ def _process_user_input(
 ) -> None:
     """Process a user message: build prompt, generate, run any tool calls
     the model emits, feed the results back, and repeat until the model
-    stops calling tools (up to MAX_ROUNDS). Without this loop the model
-    would just emit <tool_call>…</tool_call> tags as literal text and the
-    file would never actually be written.
+    stops calling tools. The last bounded model round is reserved for a
+    no-tools status synthesis when execution has not converged. Without this
+    loop the model would just emit <tool_call>…</tool_call> tags as literal
+    text and the file would never actually be written.
     """
     current_tier = state.get("tier", "large-moe")
     if current_tier in manager.loaded_tiers():
@@ -1028,21 +1037,47 @@ def _process_user_input(
     # is interrupted.
     state["messages"].append({"role": "user", "content": user_input})
 
-    from mio.tool_calls import parse_tool_calls as _parse_tc
+    from mio.tool_calls import StreamingToolCallParser, parse_tool_calls as _parse_tc
 
-    MAX_ROUNDS = 5
-    assistant_text_accum: list[str] = []
+    terminal_assistant_text = ""
     tool_calls_used = 0
     tool_result_chars = 0
+    forced_finalization_reason: str | None = None
 
-    for round_idx in range(MAX_ROUNDS):
+    for _round_idx in range(_MAX_AGENT_ROUNDS_PER_TURN):
+        finalization_reason = forced_finalization_reason
+        if finalization_reason is None and _round_idx == _MAX_AGENT_ROUNDS_PER_TURN - 1:
+            finalization_reason = f"model round limit {_MAX_AGENT_ROUNDS_PER_TURN} reached"
+        finalization_only = finalization_reason is not None
+        generation_messages = current_messages
+        generation_tools = AGENT_TOOLS_SPEC
+        if finalization_only:
+            generation_messages = list(current_messages) + [{
+                "role": "user",
+                "content": _FINALIZE_TOOL_LOOP.format(reason=finalization_reason),
+            }]
+            # The final round is reserved for truthful synthesis. Omitting the
+            # tool schema prevents one more mutation from silently exceeding
+            # the model-round, call-count, or result-size budget.
+            generation_tools = None
+
         console.print("[bold green]Mio[/bold green]: ", end="")
         full_text = ""
-        for chunk, metrics in engine.generate_stream(current_messages, tools=AGENT_TOOLS_SPEC):
-            # Strip <tool_call> tags from live display so the raw XML doesn't
-            # clutter the terminal while still streaming.
-            console.print(chunk, end="", highlight=False)
+        visible_parts: list[str] = []
+        display_parser = StreamingToolCallParser()
+        for chunk, metrics in engine.generate_stream(generation_messages, tools=generation_tools):
             full_text += chunk
+            # Keep native tool XML for parsing, but never expose it as ordinary
+            # assistant prose in the terminal. The incremental parser also
+            # handles a tag split across model-stream chunks.
+            visible_chunk = display_parser.feed(chunk)
+            if visible_chunk:
+                visible_parts.append(visible_chunk)
+                console.print(visible_chunk, end="", highlight=False)
+        visible_tail, streamed_tool_calls = display_parser.flush()
+        if visible_tail:
+            visible_parts.append(visible_tail)
+            console.print(visible_tail, end="", highlight=False)
         console.print()
 
         # Metrics line
@@ -1056,32 +1091,73 @@ def _process_user_input(
 
         # Extract tool calls (OpenAI-format: {function: {name, arguments}})
         import json as _json
-        import re as _re
-        _leading, tool_calls = _parse_tc(full_text)
-        visible_text = _re.sub(r"<tool_call>[\s\S]*?</tool_call>\s*", "", full_text).strip()
-        assistant_text_accum.append(visible_text)
+        _leading, parsed_tool_calls = _parse_tc(full_text)
+        # Streaming and whole-response parsing have the same grammar. Prefer
+        # the streamed calls so terminal filtering and dispatch share one
+        # interpretation; retain the whole-response fallback for test doubles
+        # and unusual generators that return a single incomplete stream event.
+        tool_calls = streamed_tool_calls or parsed_tool_calls
+        # Persist exactly what the terminal filter considered ordinary prose.
+        # An unterminated tool block is neither shown nor smuggled into future
+        # conversation history as assistant content.
+        visible_text = "".join(visible_parts).strip()
+        if finalization_only:
+            if tool_calls:
+                # A model can still emit memorized XML after the schema is
+                # removed. It is never dispatched on the reserved final round.
+                notice = (
+                    f"Tool loop stopped: {finalization_reason}. "
+                    "The final model response requested another tool, so no "
+                    "additional operation was executed."
+                )
+                console.print(notice, style="yellow")
+            terminal_assistant_text = "\n\n".join(
+                text for text in (visible_text, notice if tool_calls else "") if text
+            )
+            break
 
         if not tool_calls:
+            terminal_assistant_text = visible_text
             break  # model stopped calling tools
 
-        current_messages = list(current_messages) + [
-            {"role": "assistant", "content": full_text},
-        ]
-
+        # Re-render the previous turn through the tokenizer's native structured
+        # tool transcript. Qwen templates expect assistant.tool_calls followed
+        # by role=tool messages; treating a tool result as a fresh user query
+        # breaks multi-step state and can make the model repeat the same read.
+        invocations: list[tuple[dict, str, dict]] = []
+        normalized_calls: list[dict] = []
         for tc in tool_calls:
             fn = tc.get("function", {}) or {}
-            name = fn.get("name", "")
+            name = str(fn.get("name", ""))
             raw_args = fn.get("arguments", "{}")
             try:
                 args = _json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args or {})
             except Exception:
                 args = {}
+            normalized_call = dict(tc)
+            normalized_call["function"] = {**fn, "name": name, "arguments": args}
+            normalized_calls.append(normalized_call)
+            invocations.append((tc, name, args))
+
+        current_messages = list(current_messages) + [{
+            "role": "assistant",
+            "content": _leading or None,
+            "tool_calls": normalized_calls,
+        }]
+
+        for tc, name, args in invocations:
             spec = AGENT_TOOLS.get(name)
             tool_calls_used += 1
             if tool_calls_used > _MAX_TOOL_CALLS_PER_TURN:
                 result = "(tool call budget exhausted for this turn)"
+                forced_finalization_reason = (
+                    f"tool call limit {_MAX_TOOL_CALLS_PER_TURN} reached"
+                )
             elif tool_result_chars >= _MAX_TOOL_RESULT_CHARS_PER_TURN:
                 result = "(tool result budget exhausted for this turn)"
+                forced_finalization_reason = (
+                    f"tool result limit {_MAX_TOOL_RESULT_CHARS_PER_TURN} characters reached"
+                )
             elif not spec:
                 result = f"(unknown tool: {name})"
             else:
@@ -1103,19 +1179,28 @@ def _process_user_input(
                 else "(tool result budget exhausted for this turn)"
             )
             tool_result_chars += len(result)
+            if tool_result_chars >= _MAX_TOOL_RESULT_CHARS_PER_TURN:
+                forced_finalization_reason = (
+                    f"tool result limit {_MAX_TOOL_RESULT_CHARS_PER_TURN} characters reached"
+                )
             preview = ", ".join(k for k in (spec["args"] if spec else []) if k in args)
             console.print(
                 f"  ◆ {name}({preview}) → {str(result)[:120]}",
                 style="dim cyan",
                 markup=False,
             )
-            safe_name = html.escape(str(name), quote=True)
-            safe_result = html.escape(str(result), quote=False)
+            # The template supplies the surrounding <tool_response> element.
+            # Neutralize only a result-supplied closing delimiter so ordinary
+            # source code operators such as '<' remain exact for later edits.
+            safe_result = str(result).replace(
+                "</tool_response>",
+                "&lt;/tool_response&gt;",
+            )
             current_messages.append({
-                "role": "user",
-                "content": (
-                    f'<tool_response name="{safe_name}">{safe_result}</tool_response>'
-                ),
+                "role": "tool",
+                "tool_call_id": str(tc.get("id", "")),
+                "name": name,
+                "content": safe_result,
             })
 
     console.print()
@@ -1123,7 +1208,10 @@ def _process_user_input(
     # history stays sensible.
     state["messages"].append({
         "role": "assistant",
-        "content": "\n\n".join(t for t in assistant_text_accum if t) or "(tool-only turn)",
+        # Earlier pre-tool narration was already visible live and was replayed
+        # while this turn ran. Persist only the terminal synthesis so the next
+        # user turn starts from the outcome, not a duplicate execution diary.
+        "content": terminal_assistant_text or "(tool-only turn)",
     })
 
     # Trim history (keep last 40 entries — ~20 exchanges)
