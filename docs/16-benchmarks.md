@@ -292,7 +292,9 @@ Currently supported:
 - upstream DFlash has a large direct decode/E2E advantage but regresses TTFT
   and is not yet production-compatible with all Mio semantics;
 - the fused cold-prefill pilot improves short-prompt TTFT/E2E with 12/12
-  parity and warrants stronger validation.
+  parity and warrants stronger validation;
+- the two-pair Qwen 3.6 27B Verified smoke resolved 0/2 for both Plain and
+  Quality; Quality produced the only non-empty patch, but it was unresolved.
 
 Not currently supported:
 
@@ -302,7 +304,7 @@ Not currently supported:
 - PolarQuant zero overhead or exact parity;
 - TurboQuant memory savings on long context;
 - improved coding-agent quality from MCP, skills, Caveman, Ponytail, or
-  Headroom;
+  Headroom or the Quality gate;
 - a scientific breakthrough.
 
 ## Adding a result

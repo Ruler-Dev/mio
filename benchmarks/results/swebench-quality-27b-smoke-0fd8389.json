@@ -1,0 +1,145 @@
+{
+  "artifact_policy": {
+    "absolute_private_paths_included": false,
+    "evaluator_output_included": false,
+    "issue_text_included": false,
+    "model_text_included": false,
+    "patch_text_included": false,
+    "raw_private_artifacts_retained_outside_repository": true
+  },
+  "claim": {
+    "coding_quality_improvement_supported": false,
+    "performance_improvement_supported": false,
+    "promotion_eligible": false,
+    "reason": "two_pair_non_evidence_smoke_with_zero_resolution_difference"
+  },
+  "dataset": {
+    "name": "princeton-nlp/SWE-bench_Verified",
+    "parquet_sha256": "a45b1fe4e2f0c8390b2b2938ac83e92ed5979000856808f3679c07812e9e6dcd",
+    "revision": "c104f840cc67f8b6eec6f759ebc8b2693d585d4a"
+  },
+  "descriptive_efficiency": {
+    "interpretation": "non_causal_two_pair_smoke_dynamic_agent_trajectories",
+    "plain": {
+      "decode_seconds": 99.952273568,
+      "decode_tokens": 1466,
+      "decode_tokens_per_second": 14.667000035799,
+      "delivered_output_tokens": 1466,
+      "model_seconds": 765.87371182,
+      "physical_prefill_tokens": 127306,
+      "prefill_seconds": 665.921438252,
+      "prefill_tokens_per_second": 191.172700993333,
+      "rounds": 24,
+      "tool_calls": 22,
+      "wall_seconds": 772.875760583
+    },
+    "quality": {
+      "decode_seconds": 89.73511491,
+      "decode_tokens": 1411,
+      "decode_tokens_per_second": 15.724056311904,
+      "delivered_output_tokens": 1411,
+      "model_seconds": 560.101838328,
+      "physical_prefill_tokens": 95705,
+      "prefill_seconds": 470.366723418,
+      "prefill_tokens_per_second": 203.468900402952,
+      "rounds": 24,
+      "tool_calls": 22,
+      "wall_seconds": 665.00126475
+    },
+    "quality_over_plain_ratios": {
+      "decode_cost_per_token": 0.932774580863,
+      "delivered_output_tokens": 0.962482946794,
+      "physical_prefill_tokens": 0.75177132264,
+      "prefill_cost_per_token": 0.939567180118,
+      "wall_seconds": 0.860424532202
+    }
+  },
+  "evaluator": {
+    "commit": "9aec54f73c3d068b4017eb2b0bd4484cb4ff9ff8",
+    "evaluation_receipt_sha256": "b464b951b8ddb2d2c0a99b43621821f24e55792b9fd946a3a883dbcb36e6f75c",
+    "harness_commit": "f7bbbb2ccdf479001d6467c9e34af59e44a840f9",
+    "harness_tree": "81083caddb04c76896805b38eaa4e43ca3ce2d63",
+    "image_manifest_sha256": "bf0d8c75d5d6b2905cc63e209a548aa071dca1d845e48f2e57d98f9b8c3620ac",
+    "plan_sha256": "949f86e08247a17c556bb505c6e314af7c3f0236dd805f819db76355769a4a26",
+    "python_base_manifest_sha256": "975423477c9a5ebfe0e900fd92feae23cb44b29c10ff3169af09b50601ba5239",
+    "python_bytecode_writes_disabled": true,
+    "python_version": "3.11.15",
+    "venv_manifest_sha256": "fec662a6267d3a9de7535248dc5f1ca4e8760094d2fd68906b02a69c3025c870"
+  },
+  "generation": {
+    "arm_count": 4,
+    "commit": "0fd8389f891ebb47ffbca83039f8650dc805096e",
+    "factor_sha256": "839b4582e96aafbaef2a27db66c14ec142c1b16acdadf41a7c1fa7afd578ff27",
+    "generation_receipt_sha256": "431ec1250d4abfbeb6ccf82205a5b2494c4fc413df290452d4996407cb5e84e4",
+    "model_identity": "local-sha256-v1:ba3975accc6b6398f47f82ff7640b39f5541abb49f1d3c6f34113aa7fb040c87",
+    "pair_count": 2,
+    "preregistration_sha256": "834b205733c02a81adaa8ad1cbfd3ab66bdb65575fc162742c53af246422d708",
+    "runtime_digest": "d384cd9f77651121d97387a1bd95b89328ff51d431b1b30c4bbb133e556c89e9",
+    "schedule_sha256": "26e348239625b0d8c863adfa1b54a4c41d340c9526e657fd0ac223f56b823780"
+  },
+  "official_outcomes": {
+    "all_preregistered_terminal_outcomes_included": true,
+    "empty_predictions_count_as_effective_unresolved": true,
+    "plain_effective_unresolved": 2,
+    "plain_empty_predictions": 2,
+    "plain_resolved": 0,
+    "quality_effective_unresolved": 2,
+    "quality_empty_predictions": 1,
+    "quality_minus_plain": 0,
+    "quality_resolved": 0,
+    "selection_by_terminal_status_or_patch_availability": false
+  },
+  "pairs": [
+    {
+      "instance_id": "django__django-15268",
+      "order": [
+        "plain",
+        "quality"
+      ],
+      "plain": {
+        "gate_decision": "not_applicable",
+        "patch_chars": 0,
+        "resolved": false,
+        "status": "incomplete",
+        "wall_seconds": 271.787826292
+      },
+      "quality": {
+        "gate_decision": "satisfied",
+        "patch_chars": 0,
+        "resolved": false,
+        "status": "incomplete",
+        "wall_seconds": 310.528125208
+      },
+      "quality_over_plain_wall_ratio": 1.142538756958
+    },
+    {
+      "instance_id": "matplotlib__matplotlib-24149",
+      "order": [
+        "quality",
+        "plain"
+      ],
+      "plain": {
+        "gate_decision": "not_applicable",
+        "patch_chars": 0,
+        "resolved": false,
+        "status": "incomplete",
+        "wall_seconds": 501.087934291
+      },
+      "quality": {
+        "gate_decision": "incomplete",
+        "patch_chars": 716,
+        "resolved": false,
+        "status": "incomplete",
+        "wall_seconds": 354.473139542
+      },
+      "quality_over_plain_wall_ratio": 0.7074070543
+    }
+  ],
+  "result_classification": {
+    "confirmatory_evidence_admissible": false,
+    "evidence_class": "non_evidence_smoke",
+    "full_verified_pairs_required_for_claim": 500,
+    "observed_pairs": 2
+  },
+  "schema": "mio.swebench-quality-27b-smoke-summary.v1"
+}

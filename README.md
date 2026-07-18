@@ -609,12 +609,19 @@ TTFT by 1.1555x and end-to-end time by 1.0794x with 12/12 parity, but remains a
 single-thread, short-context prototype. None is a breakthrough or production
 speed claim.
 
-Mio has not yet measured SWE-bench-style task success, edit correctness,
-tool-call accuracy, Caveman/Ponytail quality, long-context scaling, or
-multi-user throughput. A result will be called a breakthrough only if
-independent reruns show a Pareto improvement without unacceptable regressions
-in parity, quality, TTFT, memory, or reliability. Negative experiments remain
-publishable results.
+A sealed two-pair Qwen 3.6 27B SWE-bench Verified smoke measured Plain at 0/2
+and Quality at 0/2. Quality produced the run's only non-empty patch, but the
+official harness did not resolve that issue. Its aggregate wall ratio was
+0.8604 Quality/Plain, with opposite pair-level directions, so neither a coding
+quality nor a speed improvement is supported. The source-free result is
+[`benchmarks/results/swebench-quality-27b-smoke-0fd8389.json`](benchmarks/results/swebench-quality-27b-smoke-0fd8389.json);
+the mandatory 500-pair study remains outstanding.
+
+Mio has not yet measured general edit correctness, tool-call accuracy,
+Caveman/Ponytail quality, long-context scaling, or multi-user throughput. A
+result will be called a breakthrough only if independent reruns show a Pareto
+improvement without unacceptable regressions in parity, quality, TTFT, memory,
+or reliability. Negative experiments remain publishable results.
 
 ## License and upstream work
 

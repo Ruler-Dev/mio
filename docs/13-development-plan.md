@@ -276,6 +276,13 @@ external tool-protocol system prompts are not corrupted.
 
 ### 7.3 Coding harness evaluation
 
+- **Landed:** a portable, fail-closed paired SWE-bench Verified generation and
+  official-evaluation path with immutable checkpoints, all-terminal-outcome
+  accounting, pinned dataset/harness/images, and post-run runtime manifests.
+- **Current evidence:** the first two-pair Qwen 3.6 27B smoke was null (Plain
+  0/2, Quality 0/2). Quality emitted one non-empty but unresolved patch. This
+  validates the path, not the policy; run the frozen 500-pair study before any
+  quality or promotion claim.
 - Build a local task corpus with unit-test outcomes, edit correctness, tool
   calls, retries, elapsed time and total generated tokens.
 - Compare base target, DFlash target, Caveman and Ponytail separately.
@@ -479,7 +486,8 @@ Required merge gate:
   [16-benchmarks.md](16-benchmarks.md).
 - **Current:** publish
   [the repository research paper](../papers/mio-qwen36-research.md) covering
-  architecture, harnessing, the missing coding-quality experiment,
+  architecture, harnessing, the initial null coding-quality smoke and missing
+  full-500 experiment,
   prefill/decode methods, ablations, limitations and threats to validity.
 - Include negative experiments and distinguish engineering observations from
   scientific evidence.

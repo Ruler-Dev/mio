@@ -437,7 +437,7 @@ but not the same complete hardware provenance.
 
 ### 6.2 Evidence status and historical commit
 
-This report keeps five evidence classes separate:
+This report keeps six evidence classes separate:
 
 1. **Versioned historical artifacts.** The two schema-v1 JSON files support
    claims only about their recorded Mio implementation and workload.
@@ -452,6 +452,9 @@ This report keeps five evidence classes separate:
 5. **Negative replication.** The Qwen3-4B v0.4.1 artifacts fail exact parity
    and therefore cannot support performance promotion even when speed ratios
    look favorable.
+6. **Non-evidence coding smoke.** A clean two-pair Qwen 3.6 27B Verified run
+   validates the paired generation/evaluation chain, but is far below the
+   preregistered 500-pair quality study and cannot support promotion.
 
 The versioned historical artifacts identify:
 
@@ -789,7 +792,23 @@ identical token stream has the same semantic content for that prompt whether
 the exact engine is faster or slower, while the broader harness may change
 prompts, tools, retries, context, and outputs.
 
-### 9.2 Missing coding-quality experiment
+### 9.2 Initial quality-gate smoke and missing full study
+
+Mio completed a counterbalanced two-pair SWE-bench Verified smoke with the
+target-only Qwen 3.6 27B backend. All four arms reached their 12-round,
+11-tool-call terminal budget. Plain produced two empty predictions. Quality
+produced one empty prediction and one 716-character Matplotlib patch. The
+pinned official harness resolved 0/2 for Plain and 0/2 for Quality; the
+non-empty Quality patch was not correct enough to resolve the issue.
+
+Quality used 665.001 aggregate wall seconds versus 772.876 for Plain, but the
+pair-level ratios pointed in opposite directions (1.1425 Django, 0.7074
+Matplotlib) and the dynamic prompt streams differed. With only two pairs and
+zero resolution difference, this is neither coding-quality nor speed evidence.
+It is a useful null result: enforcing the current gate made the agent produce a
+patch where Plain did not, but did not make that patch successful. The
+source-free artifact is
+[`benchmarks/results/swebench-quality-27b-smoke-0fd8389.json`](../benchmarks/results/swebench-quality-27b-smoke-0fd8389.json).
 
 A proper coding study should compare at least:
 
@@ -812,8 +831,8 @@ Tasks should come from held-out repositories and record:
 - security-policy violations and data-loss incidents;
 - human review for maintainability where automated tests are insufficient.
 
-Until this corpus exists, the paper reports harness capabilities, not coding
-improvement over the base control.
+Until the full held-out corpus exists, the paper reports harness capabilities
+and this null smoke, not coding improvement over the base control.
 
 ### 9.3 Harness-token accounting
 
@@ -1121,10 +1140,10 @@ not itself performance evidence.
 Mio's wider contribution remains a testable local harness around the engine:
 model validation, explicit fallback, prompt-policy separation, on-demand
 instruction skills, permission-gated local MCP, and multiple user surfaces.
-No current experiment shows that these layers improve coding-task quality over
-target AR. Because all new R&D artifacts were untracked and `git_dirty=true`,
-this report ends with a falsifiable six-gate protocol and a clean-rerun
-requirement, not a final publication or declaration of breakthrough.
+The first clean paired Verified smoke is null at 0/2 versus 0/2, so no current
+experiment shows that these layers improve coding-task quality over target AR.
+The report ends with a falsifiable six-gate protocol and a clean full-500
+requirement, not a declaration of breakthrough.
 
 ## Appendix A. Raw result pointers
 
@@ -1139,6 +1158,7 @@ requirement, not a final publication or declaration of breakthrough.
 - [`scripts/bench_speculative_matched.py`](../scripts/bench_speculative_matched.py)
 - [`benchmarks/results/qwen36-core-256.json`](../benchmarks/results/qwen36-core-256.json)
 - [`benchmarks/results/qwen36-cache-256.json`](../benchmarks/results/qwen36-cache-256.json)
+- [`benchmarks/results/swebench-quality-27b-smoke-0fd8389.json`](../benchmarks/results/swebench-quality-27b-smoke-0fd8389.json)
 - [`scripts/bench_qwen36_matrix.py`](../scripts/bench_qwen36_matrix.py)
 - [`benchmarks/results/qwen36-20260715-192941.json`](../benchmarks/results/qwen36-20260715-192941.json)
 - [`benchmarks/results/qwen36-20260715-193332.json`](../benchmarks/results/qwen36-20260715-193332.json)
@@ -1166,6 +1186,8 @@ narrower provenance.
 | `3733d1a` | pinned 916-skill catalog integrated into Mio |
 | `d8c42ba` | MLX-LM continuous batch path and real 4B smoke |
 | `9b9bb14` | runtime hardening and reproducible R&D harness base revision |
+| `0fd8389` | clean two-pair Qwen 3.6 27B Quality generation |
+| `9aec54f` | bytecode-immutable official evaluator and sealed rerun |
 
 The versioned schema-v1 performance JSON records
 `d49dec26dbd6053526027e013d5580e9cf5c10f4` with a clean tree. The new

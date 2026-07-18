@@ -5,12 +5,14 @@
 > cross-process receipt verifier, and fail-closed official smoke evaluator are
 > implemented. Confirmatory `evaluate` and `aggregate` remain deliberately
 > **hard-blocked** by the unresolved v2 controls and protocol revision. No
-> quality result is reported here. The Mac now has Docker CLI 29.6.2, a prepared
+> confirmatory quality result is reported here. The Mac now has Docker CLI 29.6.2, a prepared
 > QEMU/Colima `linux/amd64` profile, the two pinned smoke images, and a clean
 > official harness checkout; that VM is intentionally stopped while MLX owns
 > host memory and is restarted only for evaluation. The machine-readable
 > protocol is
 > [`benchmarks/swebench-quality-preregistration-v1.json`](../benchmarks/swebench-quality-preregistration-v1.json).
+> A completed two-pair `non_evidence_smoke` is reported below: both Plain and
+> Quality resolved 0/2, so it supports no quality or speed claim.
 
 This is the required external benchmark for Mio's coding-quality gate. It
 compares the same local Qwen 3.6 27B target, Mio commit, MLX runtime, prompt,
@@ -113,6 +115,41 @@ claims, and it cannot be pooled with the 500-pair run. Any partial run is also
 non-evidence. Synthetic checkpoints and reports can exercise plumbing, but
 cannot produce `confirmatory_complete` while the generation attestation is
 unimplemented.
+
+## Executed two-pair smoke
+
+The clean Qwen 3.6 27B generation commit `0fd8389f891ebb47ffbca83039f8650dc805096e`
+ran two counterbalanced Verified pairs with four terminal checkpoints. Every
+arm reached the frozen 12-round/11-tool-call budget and was retained as
+`incomplete`; no retry or post-hoc task selection occurred. Plain produced two
+empty predictions. Quality produced one empty prediction and one 716-character
+Matplotlib patch.
+
+The official harness at commit `f7bbbb2ccdf479001d6467c9e34af59e44a840f9`
+then evaluated every scheduled outcome. Plain resolved 0/2 and Quality resolved
+0/2: the non-empty Quality patch was unresolved. The sealed private evaluation
+receipt has SHA-256
+`b464b951b8ddb2d2c0a99b43621821f24e55792b9fd946a3a883dbcb36e6f75c`;
+the public source-free summary is
+[`../benchmarks/results/swebench-quality-27b-smoke-0fd8389.json`](../benchmarks/results/swebench-quality-27b-smoke-0fd8389.json),
+with SHA-256
+`81f5a3223efe0ba7c8cbf6ca5e777416c18b3bb5403b1e71203c3cfcc3e0ad28`.
+
+Descriptively, Quality used 665.001 seconds versus Plain's 772.876 seconds
+across the two pairs, a ratio of 0.8604. The directions disagreed by task:
+Quality/Plain wall ratio was 1.1425 on Django and 0.7074 on Matplotlib. Dynamic
+prompt-token totals also differed, and there are only two pairs. These values
+therefore support neither a Quality speedup nor a Quality slowdown claim; the
+causal quality result is simply the null 0/2 versus 0/2 smoke outcome. The
+preregistered 500-pair run remains required.
+
+The first official evaluation attempt exposed a harness-integrity defect
+before it could publish a receipt: CPython multiprocessing children created
+two bytecode caches in the attested base prefix. Commit `9aec54f` moved the
+write prohibition to the interpreter-level `-B` flag, added a real `spawn`
+regression test, restored the exact pre-run base manifest, and reran into a new
+output root. The successful receipt proves the base-prefix digest remained
+`975423477c9a5ebfe0e900fd92feae23cb44b29c10ff3169af09b50601ba5239`.
 
 The primary outcome is the official harness `resolved` result. The primary
 estimand is:
