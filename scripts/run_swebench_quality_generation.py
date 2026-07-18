@@ -1,0 +1,1076 @@
+#!/usr/bin/env python3
+"""Sealed paired-generation runner for Mio's SWE-bench quality study.
+
+This module contains no dataset downloader, evaluator, or model auto-loader.
+Generation is dependency injected and confirmatory runs remain subject to the
+hard gates in :mod:`scripts.bench_swebench_quality`.  The implementation keeps
+gold data out of the model boundary, runs an adjacent *whole pair* as the
+smallest resumable unit, and promotes checkpoints only after both arms exist.
+
+The model-visible checkout never contains ``.git`` (in any casing).  Trusted
+patch capture uses external, private Git metadata and assistant prose is never
+accepted as a prediction.
+"""
+
+from __future__ import annotations
+
+import copy
+import os
+import subprocess
+import time
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from types import MappingProxyType
+from typing import Any, Protocol
+
+from scripts import bench_swebench_quality as protocol
+
+GENERATION_SCHEMA = f"{protocol.SCHEMA}.paired-generation-runner.v1"
+GENERATION_RECEIPT_SCHEMA = f"{GENERATION_SCHEMA}.receipt"
+TOOL_SURFACE = ("bash", "validate", "read", "write", "edit")
+TARGET_CONTEXT_TOKENS = 32_768
+TARGET_MAX_OUTPUT_TOKENS_PER_ROUND = 4_096
+TARGET_MAX_ROUNDS = 12
+TARGET_TQ_BITS = 16
+TARGET_PQ_BITS = 16
+TARGET_BMP_PATHS = 1
+TARGET_DDTREE_BUDGET = 0
+TARGET_TEMPERATURE = 0.0
+TARGET_TOP_P = 1.0
+TARGET_TOP_K = 0
+FROZEN_COMMAND_TIMEOUT_SECONDS = 300.0
+CONFIRMATORY_GENERATION_ENABLED = False
+CONFIRMATORY_BLOCKERS = (
+    "v2_efficiency_guardrail_and_content_free_round_telemetry",
+    "trusted_automatic_mio_model_and_runtime_fingerprints",
+    "v2_wall_overrun_adjudication",
+    "v2_storage_bounded_external_object_strategy",
+    "pinned_x86_64_official_evaluation_image_digests",
+)
+MODEL_INSTRUCTION_TEMPLATE = (
+    "Repository: {repo}\n"
+    "Base commit: {base_commit}\n\n"
+    "Problem statement:\n{problem_statement}\n\n"
+    "Modify the provided workspace to solve the problem. Use only the declared local tools. "
+    "Do not use network access. Run the narrowest relevant validation after edits."
+)
+
+
+def _require_sha256(value: str, label: str) -> None:
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        raise protocol.ProtocolError(f"{label} must be a lowercase SHA-256")
+
+
+def _require_commit(value: str, label: str) -> None:
+    if len(value) != 40 or any(character not in "0123456789abcdef" for character in value):
+        raise protocol.ProtocolError(f"{label} must be a lowercase Git commit")
+
+
+def _mkdir_private(path: Path) -> Path:
+    path.mkdir(mode=0o700, parents=True, exist_ok=False)
+    os.chmod(path, 0o700)
+    return path
+
+
+def _assert_no_visible_git(workspace: Path) -> None:
+    """Reject every visible .git spelling without following symlinks."""
+
+    root = workspace.resolve(strict=True)
+    errors: list[OSError] = []
+    entries = 0
+    for directory, dirnames, filenames in os.walk(
+        root,
+        followlinks=False,
+        onerror=errors.append,
+    ):
+        entries += len(dirnames) + len(filenames)
+        if entries > 100_000:
+            raise protocol.ProtocolError("model-visible workspace exceeded traversal bound")
+        if len(Path(directory).relative_to(root).parts) > 256:
+            raise protocol.ProtocolError("model-visible workspace exceeded traversal depth")
+        if any(name.casefold() == ".git" for name in (*dirnames, *filenames)):
+            raise protocol.ProtocolError("model-visible workspace contains forbidden Git metadata")
+    if errors:
+        raise protocol.ProtocolError("model-visible workspace scan was incomplete")
+
+
+@dataclass(frozen=True)
+class GenerationBinding:
+    """Trusted identities shared by all 1,000 arms."""
+
+    mio_commit: str
+    model_identity: str
+    runtime_digest: str
+
+    def __post_init__(self) -> None:
+        _require_commit(self.mio_commit, "Mio commit")
+        if self.model_identity != protocol.EXPECTED_MODEL_IDENTITY:
+            raise protocol.ProtocolError("generation must use the frozen Qwen 3.6 27B identity")
+        _require_sha256(self.runtime_digest, "runtime digest")
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "mio_commit": self.mio_commit,
+            "model_identity": self.model_identity,
+            "runtime_digest": self.runtime_digest,
+        }
+
+
+@dataclass(frozen=True)
+class ArmWorkspace:
+    """Fresh, mutually isolated state allocated for exactly one arm."""
+
+    workspace: Path
+    external_git_directory: Path
+    cache_directory: Path
+
+    def validated(self) -> "ArmWorkspace":
+        protocol._reject_symlink_path_components(self.workspace)
+        workspace = self.workspace.resolve(strict=True)
+        git_directory = protocol.require_private_directory(self.external_git_directory)
+        cache_directory = protocol.require_private_directory(self.cache_directory)
+        for candidate, label in (
+            (workspace, "workspace"),
+            (git_directory, "external Git directory"),
+            (cache_directory, "cache directory"),
+        ):
+            if not candidate.is_dir():
+                raise protocol.ProtocolError(f"arm {label} must be a directory")
+        paths = (workspace, git_directory, cache_directory)
+        for index, first in enumerate(paths):
+            for second in paths[index + 1 :]:
+                if protocol._is_within(first, second) or protocol._is_within(second, first):
+                    raise protocol.ProtocolError("arm workspace, Git metadata, and cache must be separate")
+        _assert_no_visible_git(workspace)
+        if any(cache_directory.iterdir()):
+            raise protocol.ProtocolError("fresh arm cache directory must start empty")
+        return ArmWorkspace(workspace, git_directory, cache_directory)
+
+
+@dataclass(frozen=True)
+class ArmRunRequest:
+    """Trusted request passed to a model executor.
+
+    ``instruction`` is the complete model-facing task.  The instance identifier
+    remains runner-private and is intentionally absent from that string.
+    """
+
+    entry: protocol.ScheduleEntry
+    instruction: str
+    workspace: Path
+    cache_directory: Path
+    tool_registry: Mapping[str, Any]
+    tool_specs: tuple[dict[str, Any], ...]
+    tool_policy: Any
+    quality_gate_enabled: bool
+    coding_effort: str
+    seed: int
+
+
+@dataclass(frozen=True)
+class ArmRunOutcome:
+    """Content-free terminal outcome returned by an executor."""
+
+    status: str
+    quality_gate_decision: str
+    output_tokens: int = 0
+    tool_calls: int = 0
+    wall_seconds: float = 0.0
+
+
+class ArmExecutor(Protocol):
+    def __call__(self, request: ArmRunRequest) -> ArmRunOutcome: ...
+
+
+class WorkspaceFactory(Protocol):
+    def __call__(
+        self,
+        *,
+        instance: protocol.PublicInstance,
+        entry: protocol.ScheduleEntry,
+        destination: Path,
+    ) -> ArmWorkspace: ...
+
+
+def validate_target_only_tier(tier: Any) -> None:
+    """Enforce the frozen target-only AR control before model loading."""
+
+    expected = {
+        "drafter_backend": "target_ar",
+        "context_window": TARGET_CONTEXT_TOKENS,
+        "max_output_tokens": TARGET_MAX_OUTPUT_TOKENS_PER_ROUND,
+        "tq_bits": TARGET_TQ_BITS,
+        "pq_bits": TARGET_PQ_BITS,
+        "bmp_paths": TARGET_BMP_PATHS,
+        "ddtree_budget": TARGET_DDTREE_BUDGET,
+        "temperature": TARGET_TEMPERATURE,
+        "top_p": TARGET_TOP_P,
+        "top_k": TARGET_TOP_K,
+    }
+    differences = {
+        name: (getattr(tier, name, None), wanted)
+        for name, wanted in expected.items()
+        if getattr(tier, name, None) != wanted
+    }
+    if differences:
+        raise protocol.ProtocolError(f"target-only 27B tier differs from frozen controls: {differences}")
+
+
+def build_identical_tool_surface(
+    agent_module: Any | None = None,
+) -> tuple[Mapping[str, Any], tuple[dict[str, Any], ...], str]:
+    """Build one immutable five-tool surface shared byte-for-byte by both arms."""
+
+    if agent_module is None:
+        from mio import agent as agent_module
+
+    try:
+        registry = {}
+        for name in TOOL_SURFACE:
+            definition = dict(agent_module.AGENT_TOOLS[name])
+            definition["args"] = tuple(definition.get("args", ()))
+            registry[name] = MappingProxyType(definition)
+        raw_specs = {
+            item["function"]["name"]: item
+            for item in agent_module.AGENT_TOOLS_SPEC
+            if isinstance(item, dict) and isinstance(item.get("function"), dict)
+        }
+        specs = tuple(copy.deepcopy(raw_specs[name]) for name in TOOL_SURFACE)
+    except (KeyError, TypeError) as exc:
+        raise protocol.ProtocolError("native agent lacks the frozen SWE-bench tool surface") from exc
+    if tuple(registry) != TOOL_SURFACE or tuple(item["function"]["name"] for item in specs) != TOOL_SURFACE:
+        raise protocol.ProtocolError("SWE-bench tool surface order or schema differs")
+    document = _tool_surface_document(registry, specs)
+    digest = protocol.sha256_bytes(protocol.canonical_json_bytes(document))
+    return MappingProxyType(registry), specs, digest
+
+
+def _tool_surface_document(
+    registry: Mapping[str, Any],
+    specs: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    dispatcher = []
+    for name in TOOL_SURFACE:
+        definition = registry[name]
+        function = definition.get("fn")
+        permission = definition.get("permission")
+        dispatcher.append(
+            {
+                "name": name,
+                "args": list(definition.get("args", ())),
+                "permission": getattr(permission, "value", None),
+                "inject_policy": bool(definition.get("inject_policy", False)),
+                "callable_module": str(getattr(function, "__module__", "")),
+                "callable_qualname": str(getattr(function, "__qualname__", "")),
+            }
+        )
+    return {
+        "names": list(TOOL_SURFACE),
+        "dispatcher": dispatcher,
+        "specs": list(specs),
+    }
+
+
+def factor_document(tool_surface_sha256: str) -> dict[str, Any]:
+    """Describe the single intended experimental factor and all hard equalities."""
+
+    _require_sha256(tool_surface_sha256, "tool surface digest")
+    return {
+        "schema": f"{GENERATION_SCHEMA}.factor",
+        "experimental_factor": "mandatory_coding_quality_gate",
+        "common": {
+            "model_identity": protocol.EXPECTED_MODEL_IDENTITY,
+            "model_role": "target_only_autoregressive_control",
+            "drafter_backend": "target_ar",
+            "dflash": False,
+            "dspark": False,
+            "bmp": False,
+            "turboquant": False,
+            "polarquant": False,
+            "temperature": TARGET_TEMPERATURE,
+            "top_p": TARGET_TOP_P,
+            "top_k": TARGET_TOP_K,
+            "context_tokens": TARGET_CONTEXT_TOKENS,
+            "max_output_tokens_per_round": TARGET_MAX_OUTPUT_TOKENS_PER_ROUND,
+            "max_output_tokens_per_arm": protocol.MAX_OUTPUT_TOKENS_PER_ARM,
+            "max_rounds_per_arm": TARGET_MAX_ROUNDS,
+            "max_tool_calls_per_arm": protocol.MAX_TOOL_CALLS_PER_ARM,
+            "max_wall_seconds_per_arm": protocol.MAX_AGENT_WALL_SECONDS,
+            "command_timeout_seconds": FROZEN_COMMAND_TIMEOUT_SECONDS,
+            "tool_names": list(TOOL_SURFACE),
+            "tool_surface_sha256": tool_surface_sha256,
+            "instruction_template_sha256": protocol.sha256_bytes(MODEL_INSTRUCTION_TEMPLATE.encode("utf-8")),
+            "seed_policy": (
+                "pair_seed_recorded_in_runner_request_but_not_claimed_as_native_engine_rng_enforcement;"
+                "decode_is_frozen_greedy"
+            ),
+            "network": False,
+            "fresh_workspace_and_conversation_per_arm": True,
+            "fresh_empty_runner_cache_directory_allocated_per_arm": True,
+            "runtime_cache_directory_enforcement": False,
+        },
+        "arms": {
+            "gate_off": {
+                "quality_gate_enabled": False,
+                "quality_gate_effort": "not_applicable",
+            },
+            "gate_on": {
+                "quality_gate_enabled": True,
+                "quality_gate_effort": "medium",
+            },
+        },
+        "allowed_difference": "quality_gate_enabled_and_its_preregistered_feedback",
+    }
+
+
+def factor_digest(tool_surface_sha256: str) -> str:
+    return protocol.sha256_bytes(protocol.canonical_json_bytes(factor_document(tool_surface_sha256)))
+
+
+def _model_instruction(instance: protocol.PublicInstance) -> str:
+    return MODEL_INSTRUCTION_TEMPLATE.format(
+        repo=instance.repo,
+        base_commit=instance.base_commit,
+        problem_statement=instance.problem_statement,
+    )
+
+
+def _arm_seed(entry: protocol.ScheduleEntry) -> int:
+    # Both arms in a pair receive the same seed.  Greedy decoding makes this a
+    # redundant control, but recording it closes a future sampling ambiguity.
+    material = f"mio-swebench-arm-seed-v1\0{protocol.SCHEDULE_SEED}\0{entry.instance_digest}"
+    return int(protocol.sha256_bytes(material.encode())[:16], 16)
+
+
+class ExternalGitWorkspaceFactory:
+    """Materialize clean local clones with Git metadata outside model reach.
+
+    Workspaces are deliberately retained with their attempts for smoke-debug
+    auditability.  This implementation is not storage-bounded for 1,000 arms;
+    confirmatory generation remains blocked until v2 freezes an immutable
+    shared-object or attested post-capture cleanup design.
+    """
+
+    def __init__(self, source_for: Callable[[protocol.PublicInstance], Path]) -> None:
+        self.source_for = source_for
+
+    @staticmethod
+    def _clone(source: Path, workspace: Path) -> None:
+        environment = {
+            "HOME": "/var/empty",
+            "LANG": "C",
+            "LC_ALL": "C",
+            "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+            "TMPDIR": "/tmp",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+        result = subprocess.run(
+            [
+                protocol._trusted_git(),
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=false",
+                "clone",
+                "--quiet",
+                "--no-hardlinks",
+                "--no-checkout",
+                "--",
+                str(source),
+                str(workspace),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=300,
+            env=environment,
+        )
+        if result.returncode:
+            detail = result.stderr.decode("utf-8", errors="replace")[:500]
+            raise protocol.ProtocolError(f"trusted local clone failed: {detail}")
+
+    def __call__(
+        self,
+        *,
+        instance: protocol.PublicInstance,
+        entry: protocol.ScheduleEntry,
+        destination: Path,
+    ) -> ArmWorkspace:
+        del entry
+        source = protocol.require_private_path(self.source_for(instance), must_exist=True)
+        if not source.is_dir():
+            raise protocol.ProtocolError("trusted source mirror must be a local directory")
+        destination = _mkdir_private(destination)
+        workspace = destination / "workspace"
+        cache_directory = _mkdir_private(destination / "cache")
+        metadata_parent = _mkdir_private(destination / "trusted-metadata")
+        git_directory = metadata_parent / "git"
+        self._clone(source, workspace)
+        embedded_git = workspace / ".git"
+        if not embedded_git.is_dir() or embedded_git.is_symlink():
+            raise protocol.ProtocolError("trusted clone did not create ordinary Git metadata")
+        os.replace(embedded_git, git_directory)
+        os.chmod(git_directory, 0o700)
+        protocol._run_git(
+            workspace,
+            ["checkout", "--force", "--detach", instance.base_commit, "--"],
+            timeout_s=300,
+            git_directory=git_directory,
+            work_tree=workspace,
+        )
+        result = ArmWorkspace(workspace, git_directory, cache_directory).validated()
+        head = (
+            protocol._run_git(
+                workspace,
+                ["rev-parse", "HEAD"],
+                git_directory=git_directory,
+                work_tree=workspace,
+            )
+            .decode()
+            .strip()
+        )
+        if head != instance.base_commit:
+            raise protocol.ProtocolError("fresh workspace does not match dataset base_commit")
+        return result
+
+
+@dataclass(frozen=True)
+class GenerationLayout:
+    """Private layout separating attempts, canonical output, ledger, and receipt."""
+
+    root: Path
+    attempts: Path
+    canonical: Path
+    ledger: Path
+    receipt: Path
+
+    def validated(self) -> "GenerationLayout":
+        root = protocol.require_private_directory(self.root)
+        attempts = protocol.require_private_directory(self.attempts)
+        canonical = protocol.require_private_directory(self.canonical)
+        if attempts.parent != root or canonical.parent != root:
+            raise protocol.ProtocolError("generation layout directories must be direct private children")
+        if self.ledger.absolute().parent.resolve(strict=True) != root:
+            raise protocol.ProtocolError("attempt ledger must remain separate beside canonical output")
+        if self.receipt.absolute().parent.resolve(strict=True) != root:
+            raise protocol.ProtocolError("generation receipt must remain beside canonical output")
+        if self.ledger.is_symlink() or self.receipt.is_symlink():
+            raise protocol.ProtocolError("generation ledger and receipt must not be symlinks")
+        if self.ledger.name != "pair-attempt-ledger.jsonl" or self.receipt.name != "generation-receipt.json":
+            raise protocol.ProtocolError("generation layout artifact names differ from the sealed design")
+        return GenerationLayout(root, attempts, canonical, self.ledger.absolute(), self.receipt.absolute())
+
+    @classmethod
+    def create(cls, root: Path) -> "GenerationLayout":
+        root = protocol.create_private_directory(root)
+        attempts = _mkdir_private(root / "attempts")
+        canonical = _mkdir_private(root / "canonical")
+        return cls(
+            root=root,
+            attempts=attempts,
+            canonical=canonical,
+            ledger=root / "pair-attempt-ledger.jsonl",
+            receipt=root / "generation-receipt.json",
+        )
+
+    @classmethod
+    def open(cls, root: Path) -> "GenerationLayout":
+        root = protocol.require_private_directory(root)
+        attempts = protocol.require_private_directory(root / "attempts")
+        canonical = protocol.require_private_directory(root / "canonical")
+        return cls(
+            root=root,
+            attempts=attempts,
+            canonical=canonical,
+            ledger=root / "pair-attempt-ledger.jsonl",
+            receipt=root / "generation-receipt.json",
+        )
+
+
+def _pairs(schedule: Sequence[protocol.ScheduleEntry]) -> tuple[tuple[protocol.ScheduleEntry, ...], ...]:
+    protocol._expected_instance_ids(schedule)
+    return tuple(tuple(schedule[index : index + 2]) for index in range(0, len(schedule), 2))
+
+
+def _pair_records(
+    ledger: protocol.AttemptLedger,
+    pair_index: int,
+) -> tuple[dict[str, Any], ...]:
+    return tuple(record for record in ledger.read() if record["pair_index"] == pair_index)
+
+
+def _attempt_index(records: Sequence[Mapping[str, Any]]) -> int:
+    starts = [int(record["attempt_index"]) for record in records if record["event"] == "started"]
+    return max(starts, default=-1) + 1
+
+
+def _completed_event(records: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
+    completed = [record for record in records if record["event"] == "completed"]
+    if len(completed) > 1:
+        raise protocol.ProtocolError("pair has multiple completed attempts")
+    return completed[0] if completed else None
+
+
+def _has_open_attempt(records: Sequence[Mapping[str, Any]]) -> bool:
+    if not records:
+        return False
+    key = (records[-1]["attempt_index"], records[-1]["event"])
+    return key[1] == "started"
+
+
+def _checkpoint_hashes(
+    store: protocol.CheckpointStore,
+    pair: Sequence[protocol.ScheduleEntry],
+) -> dict[str, str]:
+    hashes: dict[str, str] = {}
+    for entry in pair:
+        path = store.path_for(entry)
+        if not path.is_file():
+            raise protocol.ProtocolError("completed pair attempt lacks an arm checkpoint")
+        store.load(entry)
+        hashes[entry.condition] = protocol.sha256_file(path)
+    return hashes
+
+
+def _promote_completed_pair(
+    layout: GenerationLayout,
+    pair: Sequence[protocol.ScheduleEntry],
+    completed: Mapping[str, Any],
+) -> None:
+    attempt_index = int(completed["attempt_index"])
+    attempt_store = protocol.pair_attempt_store(layout.attempts, pair[0].pair_index, attempt_index)
+    hashes = _checkpoint_hashes(attempt_store, pair)
+    if hashes != completed["checkpoint_sha256s"]:
+        raise protocol.ProtocolError("completed ledger event differs from retained attempt")
+    canonical_store = protocol.CheckpointStore(layout.canonical)
+    for entry in pair:
+        checkpoint = attempt_store.load(entry)
+        destination = canonical_store.save(checkpoint)
+        if protocol.sha256_file(destination) != hashes[entry.condition]:
+            raise protocol.ProtocolError("canonical promotion changed checkpoint bytes")
+
+
+def pending_pairs(
+    schedule: Sequence[protocol.ScheduleEntry],
+    layout: GenerationLayout,
+    *,
+    repair_completed_promotions: bool = True,
+) -> tuple[tuple[protocol.ScheduleEntry, ...], ...]:
+    """Resume only complete pairs; never continue after one arm."""
+
+    layout = layout.validated()
+    digest = protocol.schedule_digest(schedule)
+    ledger = protocol.AttemptLedger(layout.ledger, digest)
+    canonical_store = protocol.CheckpointStore(layout.canonical)
+    pending: list[tuple[protocol.ScheduleEntry, ...]] = []
+    expected_paths = {canonical_store.path_for(entry).name for entry in schedule}
+    observed_paths = {path.name for path in layout.canonical.glob("*.json")}
+    if observed_paths - expected_paths:
+        raise protocol.ProtocolError("canonical store contains an unexpected checkpoint")
+    for pair in _pairs(schedule):
+        records = _pair_records(ledger, pair[0].pair_index)
+        if _has_open_attempt(records):
+            raise protocol.ProtocolError(
+                "pair has an interrupted attempt; append a blinded infrastructure abort before retry"
+            )
+        completed = _completed_event(records)
+        existing = [canonical_store.path_for(entry).exists() for entry in pair]
+        if completed is None:
+            if any(existing):
+                raise protocol.ProtocolError("canonical arm exists without a completed pair ledger event")
+            pending.append(pair)
+            continue
+        if repair_completed_promotions:
+            _promote_completed_pair(layout, pair, completed)
+        elif not all(existing):
+            raise protocol.ProtocolError("sealed canonical pair is incomplete")
+        expected_hashes = completed["checkpoint_sha256s"]
+        if _checkpoint_hashes(canonical_store, pair) != expected_hashes:
+            raise protocol.ProtocolError("canonical pair differs from completed attempt")
+    return tuple(pending)
+
+
+def abort_interrupted_pair(
+    schedule: Sequence[protocol.ScheduleEntry],
+    layout: GenerationLayout,
+    *,
+    pair_index: int,
+    reason_code: str,
+) -> None:
+    """Declare one interrupted pair retry using a frozen blinded reason."""
+
+    layout = layout.validated()
+    pairs = _pairs(schedule)
+    if pair_index < 0 or pair_index >= len(pairs):
+        raise protocol.ProtocolError("interrupted pair index is outside the schedule")
+    ledger = protocol.AttemptLedger(layout.ledger, protocol.schedule_digest(schedule))
+    records = _pair_records(ledger, pair_index)
+    if not _has_open_attempt(records):
+        raise protocol.ProtocolError("pair has no open attempt to abort")
+    ledger.append(
+        pair_index=pair_index,
+        attempt_index=int(records[-1]["attempt_index"]),
+        event="aborted",
+        reason_code=reason_code,
+    )
+
+
+def _validate_schedule_document(
+    document: Mapping[str, Any],
+    schedule: Sequence[protocol.ScheduleEntry],
+) -> tuple[dict[str, protocol.PublicInstance], bool]:
+    if document.get("schema") != protocol.SCHEMA:
+        raise protocol.ProtocolError("generation schedule schema differs from the frozen adapter")
+    if document.get("preregistration_sha256") != protocol.preregistration_digest():
+        raise protocol.ProtocolError("generation schedule preregistration binding mismatch")
+    if (
+        document.get("dataset") != protocol.DATASET_NAME
+        or document.get("dataset_revision") != protocol.DATASET_REVISION
+        or document.get("dataset_full_snapshot_sha256") != protocol.FULL_SNAPSHOT_SHA256
+        or document.get("expected_model_identity") != protocol.EXPECTED_MODEL_IDENTITY
+    ):
+        raise protocol.ProtocolError("generation schedule dataset or model binding mismatch")
+    if document.get("source_free_summary") != protocol.source_free_schedule_summary(schedule):
+        raise protocol.ProtocolError("generation schedule document does not bind the supplied schedule")
+    raw_instances = document.get("public_instances")
+    if not isinstance(raw_instances, list):
+        raise protocol.ProtocolError("generation schedule lacks public instances")
+    instances = tuple(protocol.PublicInstance.from_mapping(row) for row in raw_instances)
+    by_id = {instance.instance_id: instance for instance in instances}
+    if len(by_id) != len(instances) or set(by_id) != {entry.instance_id for entry in schedule}:
+        raise protocol.ProtocolError("generation instances differ from scheduled pairs")
+    expected_schedule = protocol.make_balanced_schedule(
+        [instance.instance_id for instance in instances],
+        require_full=False,
+    )
+    if tuple(schedule) != expected_schedule:
+        raise protocol.ProtocolError("generation order differs from the deterministic balanced schedule")
+    if document.get("schedule") != [entry.private_dict() for entry in schedule]:
+        raise protocol.ProtocolError("generation schedule entries differ from the sealed document")
+    public_rows = [instance.as_dict() for instance in sorted(instances, key=lambda item: item.instance_id)]
+    observed_public_sha256 = protocol.sha256_bytes(protocol.canonical_jsonl_bytes(public_rows))
+    if document.get("dataset_public_snapshot_sha256") != observed_public_sha256:
+        raise protocol.ProtocolError("generation schedule public snapshot binding mismatch")
+    evidence_class = document.get("evidence_class")
+    if evidence_class not in {"confirmatory", "non_evidence_smoke"}:
+        raise protocol.ProtocolError("generation schedule evidence class is invalid")
+    if evidence_class == "confirmatory" and observed_public_sha256 != protocol.PUBLIC_SNAPSHOT_SHA256:
+        raise protocol.ProtocolError("confirmatory generation requires the exact official public snapshot")
+    return by_id, evidence_class == "confirmatory"
+
+
+def run_generation_pairs(
+    *,
+    schedule_document: Mapping[str, Any],
+    schedule: Sequence[protocol.ScheduleEntry],
+    layout: GenerationLayout,
+    workspace_factory: WorkspaceFactory,
+    executor: ArmExecutor,
+    binding: GenerationBinding,
+    tier_config: Any,
+    agent_module: Any | None = None,
+) -> str:
+    """Run every missing *whole pair* and return the frozen factor digest.
+
+    Confirmatory execution is intentionally delegated to the adapter's global
+    readiness gate.  With protocol v1 this currently raises before any model
+    call, preventing accidental unblinding while controls remain pending.
+    """
+
+    layout = layout.validated()
+    by_id, evidence_run = _validate_schedule_document(schedule_document, schedule)
+    if evidence_run and not CONFIRMATORY_GENERATION_ENABLED:
+        raise protocol.ProtocolError(
+            "confirmatory SWE-bench is blocked: this runner is smoke-only until every v2 control is frozen"
+        )
+    protocol.require_confirmatory_generation_attestation(evidence_run)
+    if evidence_run and len(schedule) != protocol.EXPECTED_INSTANCES * 2:
+        raise protocol.ProtocolError("confirmatory generation requires all 500 complete pairs")
+    validate_target_only_tier(tier_config)
+    registry, specs, surface_sha256 = build_identical_tool_surface(agent_module)
+    study_factor_sha256 = factor_digest(surface_sha256)
+    schedule_sha256 = protocol.schedule_digest(schedule)
+    ledger = protocol.AttemptLedger(layout.ledger, schedule_sha256)
+    seen_workspaces: set[Path] = set()
+    seen_git_directories: set[Path] = set()
+    seen_cache_directories: set[Path] = set()
+
+    for pair in pending_pairs(schedule, layout):
+        pair_index = pair[0].pair_index
+        records = _pair_records(ledger, pair_index)
+        attempt_index = _attempt_index(records)
+        ledger.append(
+            pair_index=pair_index,
+            attempt_index=attempt_index,
+            event="started",
+            reason_code="initial" if attempt_index == 0 else str(records[-1]["reason_code"]),
+        )
+        attempt_store = protocol.pair_attempt_store(layout.attempts, pair_index, attempt_index)
+        for entry in pair:
+            instance = by_id[entry.instance_id]
+            arm_root = attempt_store.root / f"arm-{entry.position_in_pair}-{entry.condition}"
+            arm = workspace_factory(
+                instance=instance,
+                entry=entry,
+                destination=arm_root,
+            ).validated()
+            if arm_root.is_symlink():
+                raise protocol.ProtocolError("arm destination must not be a symlink")
+            try:
+                resolved_arm_root = arm_root.resolve(strict=True)
+            except OSError as exc:
+                raise protocol.ProtocolError("workspace factory did not create its exclusive arm destination") from exc
+            expected_paths = {
+                "workspace": resolved_arm_root / "workspace",
+                "Git metadata": resolved_arm_root / "trusted-metadata" / "git",
+                "cache": resolved_arm_root / "cache",
+            }
+            observed_paths = {
+                "workspace": arm.workspace,
+                "Git metadata": arm.external_git_directory,
+                "cache": arm.cache_directory,
+            }
+            if observed_paths != expected_paths:
+                raise protocol.ProtocolError("workspace factory returned state outside its exclusive arm destination")
+            for path, seen, label in (
+                (arm.workspace, seen_workspaces, "workspace"),
+                (arm.external_git_directory, seen_git_directories, "Git metadata"),
+                (arm.cache_directory, seen_cache_directories, "cache"),
+            ):
+                resolved = path.resolve(strict=True)
+                if resolved in seen:
+                    raise protocol.ProtocolError(f"arm reused a supposedly fresh {label}")
+                seen.add(resolved)
+
+            from mio.agent_policy import AgentToolPermission, AgentToolPolicy
+
+            policy = AgentToolPolicy.coding_workspace(
+                arm.workspace,
+                command_timeout_s=FROZEN_COMMAND_TIMEOUT_SECONDS,
+                allow_network=False,
+            )
+            if AgentToolPermission.NETWORK in policy.permissions:
+                raise protocol.ProtocolError("SWE-bench generation unexpectedly grants network access")
+            request = ArmRunRequest(
+                entry=entry,
+                instruction=_model_instruction(instance),
+                workspace=arm.workspace,
+                cache_directory=arm.cache_directory,
+                tool_registry=registry,
+                tool_specs=tuple(copy.deepcopy(specs)),
+                tool_policy=policy,
+                quality_gate_enabled=entry.condition == "gate_on",
+                coding_effort="medium",
+                seed=_arm_seed(entry),
+            )
+            outcome = executor(request)
+            if not isinstance(outcome, ArmRunOutcome):
+                raise protocol.ProtocolError("arm executor returned an untrusted outcome type")
+            observed_surface = _tool_surface_document(
+                request.tool_registry,
+                request.tool_specs,
+            )
+            if (
+                tuple(request.tool_registry) != TOOL_SURFACE
+                or protocol.sha256_bytes(protocol.canonical_json_bytes(observed_surface)) != surface_sha256
+            ):
+                raise protocol.ProtocolError("arm executor mutated the frozen tool surface")
+            _assert_no_visible_git(arm.workspace)
+            patch = protocol.capture_git_patch(
+                arm.workspace,
+                expected_base_commit=instance.base_commit,
+                external_git_directory=arm.external_git_directory,
+            )
+            checkpoint = protocol.ArmCheckpoint.for_entry(
+                entry,
+                schedule_sha256=schedule_sha256,
+                status=outcome.status,
+                model_patch=patch,
+                mio_commit=binding.mio_commit,
+                model_identity=binding.model_identity,
+                runtime_digest=binding.runtime_digest,
+                quality_gate_decision=outcome.quality_gate_decision,
+                output_tokens=outcome.output_tokens,
+                tool_calls=outcome.tool_calls,
+                wall_seconds=outcome.wall_seconds,
+            )
+            attempt_store.save(checkpoint)
+
+        hashes = _checkpoint_hashes(attempt_store, pair)
+        completed = ledger.append(
+            pair_index=pair_index,
+            attempt_index=attempt_index,
+            event="completed",
+            reason_code="completed",
+            checkpoint_sha256s=hashes,
+        )
+        _promote_completed_pair(layout, pair, completed)
+    return study_factor_sha256
+
+
+def _generation_manifest(
+    schedule: Sequence[protocol.ScheduleEntry],
+    layout: GenerationLayout,
+) -> list[dict[str, Any]]:
+    layout = layout.validated()
+    if pending_pairs(schedule, layout, repair_completed_promotions=False):
+        raise protocol.ProtocolError("generation receipt requires every pair to be complete")
+    store = protocol.CheckpointStore(layout.canonical)
+    rows = []
+    for entry in schedule:
+        checkpoint = store.load(entry)
+        rows.append(
+            {
+                "execution_index": entry.execution_index,
+                "pair_index": entry.pair_index,
+                "position_in_pair": entry.position_in_pair,
+                "condition": entry.condition,
+                "instance_digest": checkpoint.instance_digest,
+                "checkpoint_sha256": protocol.sha256_file(store.path_for(entry)),
+            }
+        )
+    return rows
+
+
+def build_generation_receipt(
+    *,
+    schedule: Sequence[protocol.ScheduleEntry],
+    layout: GenerationLayout,
+    binding: GenerationBinding,
+    tool_surface_sha256: str,
+    observed_model_identity_before: str,
+    observed_model_identity_after: str,
+) -> dict[str, Any]:
+    """Build a canonical, content-free receipt after all pairs are sealed."""
+
+    if {
+        observed_model_identity_before,
+        observed_model_identity_after,
+    } != {protocol.EXPECTED_MODEL_IDENTITY}:
+        raise protocol.ProtocolError("generation receipt target identity checks differ")
+    manifest = _generation_manifest(schedule, layout)
+    ledger = protocol.AttemptLedger(layout.ledger, protocol.schedule_digest(schedule))
+    records = ledger.read()
+    completed_pairs = {record["pair_index"] for record in records if record["event"] == "completed"}
+    if completed_pairs != {pair[0].pair_index for pair in _pairs(schedule)}:
+        raise protocol.ProtocolError("generation ledger lacks exactly one completion per pair")
+    ledger_payload = layout.ledger.read_bytes()
+    factor_sha256 = factor_digest(tool_surface_sha256)
+    return {
+        "schema": GENERATION_RECEIPT_SCHEMA,
+        "preregistration_sha256": protocol.preregistration_digest(),
+        "schedule_sha256": protocol.schedule_digest(schedule),
+        "factor_sha256": factor_sha256,
+        "factor": factor_document(tool_surface_sha256),
+        "generation_binding": binding.as_dict(),
+        "model_identity_checks": {
+            "before_first_generation": observed_model_identity_before,
+            "after_last_generation": observed_model_identity_after,
+        },
+        "attempt_ledger": {
+            "sha256": protocol.sha256_bytes(ledger_payload),
+            "records": len(records),
+            "head_sha256": records[-1]["record_sha256"] if records else "",
+        },
+        "pair_count": len(schedule) // 2,
+        "arm_count": len(schedule),
+        "canonical_manifest_sha256": protocol.sha256_bytes(protocol.canonical_json_bytes(manifest)),
+        "canonical_manifest": manifest,
+        "contains_model_text_or_evaluator_output": False,
+        "evidence_class": "non_evidence_smoke",
+        "confirmatory_evidence_admissible": False,
+        "confirmatory_blockers": list(CONFIRMATORY_BLOCKERS),
+    }
+
+
+def seal_generation_receipt(
+    *,
+    schedule: Sequence[protocol.ScheduleEntry],
+    layout: GenerationLayout,
+    binding: GenerationBinding,
+    tool_surface_sha256: str,
+    observed_model_identity_before: str,
+    observed_model_identity_after: str,
+) -> str:
+    layout = layout.validated()
+    # A crash may occur after the atomic ledger completion and before both
+    # idempotent canonical publishes. Repair is allowed only before sealing.
+    pending_pairs(schedule, layout, repair_completed_promotions=True)
+    receipt = build_generation_receipt(
+        schedule=schedule,
+        layout=layout,
+        binding=binding,
+        tool_surface_sha256=tool_surface_sha256,
+        observed_model_identity_before=observed_model_identity_before,
+        observed_model_identity_after=observed_model_identity_after,
+    )
+    payload = protocol.canonical_json_bytes(receipt)
+    protocol._atomic_write(layout.receipt, payload)
+    return protocol.sha256_bytes(payload)
+
+
+def verify_generation_receipt(
+    *,
+    receipt_path: Path,
+    schedule: Sequence[protocol.ScheduleEntry],
+    layout: GenerationLayout,
+    binding: GenerationBinding,
+    tool_surface_sha256: str,
+) -> str:
+    """Recompute every ledger/checkpoint/factor binding without evaluation data."""
+
+    layout = layout.validated()
+    path = protocol.require_private_path(receipt_path, must_exist=True)
+    if path.stat().st_mode & 0o077:
+        raise protocol.ProtocolError("private generation receipt must use 0600 permissions")
+    payload = path.read_bytes()
+    try:
+        import json
+
+        observed = json.loads(payload)
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise protocol.ProtocolError("generation receipt is not valid JSON") from exc
+    if protocol.canonical_json_bytes(observed) != payload:
+        raise protocol.ProtocolError("generation receipt is not canonical JSON")
+    if observed.get("schema") != GENERATION_RECEIPT_SCHEMA:
+        raise protocol.ProtocolError("unexpected generation receipt schema")
+    expected = build_generation_receipt(
+        schedule=schedule,
+        layout=layout,
+        binding=binding,
+        tool_surface_sha256=tool_surface_sha256,
+        observed_model_identity_before=protocol.EXPECTED_MODEL_IDENTITY,
+        observed_model_identity_after=protocol.EXPECTED_MODEL_IDENTITY,
+    )
+    if observed != expected:
+        raise protocol.ProtocolError("generation receipt differs from current sealed artifacts")
+    return protocol.sha256_bytes(payload)
+
+
+class NativeMioArmExecutor:
+    """Adapter for one loaded target-only Mio engine with fresh state per arm."""
+
+    def __init__(self, *, engine: Any, manager: Any, config: Any, tier: str) -> None:
+        validate_target_only_tier(getattr(engine, "tier_config", None))
+        self.engine = engine
+        self.manager = manager
+        self.config = config
+        self.tier = tier
+
+    def _assert_manager_engine_identity(self) -> None:
+        loaded_tiers = getattr(self.manager, "loaded_tiers", None)
+        get_engine = getattr(self.manager, "get_engine", None)
+        if not callable(loaded_tiers) or not callable(get_engine):
+            return
+        if self.tier in loaded_tiers() and get_engine(self.tier) is not self.engine:
+            raise protocol.ProtocolError("manager would substitute an unverified engine for this arm")
+
+    def _reset_engine_state(self) -> None:
+        invalidator = getattr(self.engine, "_prefix_cache_invalidate", None)
+        if callable(invalidator):
+            invalidator()
+        if getattr(self.engine, "_prefix_cache", None):
+            raise protocol.ProtocolError("target engine prefix cache did not reset between arms")
+        if hasattr(self.engine, "_last_prompt_tokens"):
+            self.engine._last_prompt_tokens = []
+        if hasattr(self.engine, "_pending_assistant_prefill"):
+            self.engine._pending_assistant_prefill = ""
+        if getattr(self.engine, "_draft_model", None) is not None:
+            raise protocol.ProtocolError("target-only executor unexpectedly loaded a draft model")
+        if getattr(self.engine, "_dspark_runtime", None) is not None:
+            raise protocol.ProtocolError("target-only executor unexpectedly loaded DSpark")
+
+    def __call__(self, request: ArmRunRequest) -> ArmRunOutcome:
+        import io
+
+        from mio import agent
+        from mio.prompt_policy import PromptPolicy
+        from rich.console import Console
+
+        self._assert_manager_engine_identity()
+        self._reset_engine_state()
+        state = {
+            "tier": self.tier,
+            "prompt_policy": PromptPolicy(),
+            "tool_policy": request.tool_policy,
+            "tool_registry": request.tool_registry,
+            "tool_specs": request.tool_specs,
+            "messages": [],
+            "quality_gate_enabled": request.quality_gate_enabled,
+            "coding_effort": request.coding_effort,
+            "execution_budget": agent.AgentExecutionBudget(
+                max_rounds=TARGET_MAX_ROUNDS,
+                max_tool_calls=protocol.MAX_TOOL_CALLS_PER_ARM,
+                max_output_tokens=protocol.MAX_OUTPUT_TOKENS_PER_ARM,
+                max_wall_seconds=protocol.MAX_AGENT_WALL_SECONDS,
+                max_context_tokens=TARGET_CONTEXT_TOKENS,
+            ),
+        }
+        previous_console = agent.console
+        started = time.perf_counter()
+        try:
+            agent.console = Console(file=io.StringIO(), force_terminal=False, color_system=None)
+            try:
+                result = agent._process_user_input(
+                    request.instruction,
+                    self.engine,
+                    self.manager,
+                    self.config,
+                    state,
+                )
+            except Exception:
+                # Ordinary Python exceptions from target generation are sealed
+                # as a non-retryable model outcome. Host/process loss never
+                # reaches this branch and leaves the whole pair explicitly open
+                # for blinded infrastructure adjudication.
+                elapsed = time.perf_counter() - started
+                if elapsed > protocol.MAX_AGENT_WALL_SECONDS:
+                    raise protocol.ProtocolError(
+                        "model exception exceeded the frozen wall cap; v2 overrun adjudication is required"
+                    ) from None
+                return ArmRunOutcome(
+                    status="model_error",
+                    quality_gate_decision=("incomplete" if request.quality_gate_enabled else "not_applicable"),
+                    wall_seconds=elapsed,
+                )
+        finally:
+            agent.console = previous_console
+        rounds = tuple(getattr(result, "rounds", ()) or ())
+        output_tokens = int(
+            getattr(result, "completion_tokens", 0)
+            or sum(int(getattr(item, "completion_tokens", 0) or 0) for item in rounds)
+        )
+        terminal = getattr(result, "terminal_reason", "") == "model_final"
+        if request.quality_gate_enabled:
+            gate = getattr(result, "quality_gate", None)
+            decision = gate.get("decision", gate.get("status")) if isinstance(gate, Mapping) else None
+            satisfied = decision in {"satisfied", "complete", "pass"}
+            quality_decision = "satisfied" if satisfied else "incomplete"
+            terminal = terminal and satisfied
+        else:
+            quality_decision = "not_applicable"
+        return ArmRunOutcome(
+            status="completed" if terminal else "incomplete",
+            quality_gate_decision=quality_decision,
+            output_tokens=output_tokens,
+            tool_calls=int(getattr(result, "tool_calls", 0) or 0),
+            wall_seconds=float(getattr(result, "wall_time_s", 0.0) or 0.0),
+        )
+
+
+def main() -> int:
+    # Deliberately no implicit execution path: callers must inject a loaded
+    # engine, private source resolver, and frozen bindings programmatically.
+    print(
+        "SWE-bench paired smoke-generation runner installed; confirmatory evidence remains "
+        "hard-blocked and no model, dataset, or evaluator runs implicitly."
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
