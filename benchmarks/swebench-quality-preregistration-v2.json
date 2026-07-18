@@ -1,0 +1,428 @@
+{
+  "schema": "mio.swebench-verified-quality-preregistration.v2",
+  "status": "draft_hard_blocked_no_confirmatory_activation",
+  "study_id": "mio-qwen36-27b-quality-gate-swebench-verified-v2",
+  "inherits": {
+    "schema": "mio.swebench-verified-quality-preregistration.v1",
+    "canonical_sha256": "834b205733c02a81adaa8ad1cbfd3ab66bdb65575fc162742c53af246422d708",
+    "inheritance_rule": "all_v1_controls_remain_frozen_unless_explicitly_replaced_below",
+    "dataset_model_schedule_and_quality_analysis_changed": false
+  },
+  "confirmatory_scope": {
+    "dataset": "princeton-nlp/SWE-bench_Verified",
+    "dataset_revision": "c104f840cc67f8b6eec6f759ebc8b2693d585d4a",
+    "full_snapshot_sha256": "52ccbc6ec0e03085f95191b261e0ed881cd6a0752a3c5247c1aba258ec2993da",
+    "required_pairs": 500,
+    "required_arms": 1000,
+    "target_model_identity": "local-sha256-v1:ba3975accc6b6398f47f82ff7640b39f5541abb49f1d3c6f34113aa7fb040c87",
+    "target_runtime": "target_ar",
+    "draft_model": null,
+    "generation_backend_metric": "baseline"
+  },
+  "frozen_limits": {
+    "arm_wall_seconds": 1800,
+    "max_output_tokens_per_round": 4096,
+    "max_output_tokens_per_arm": 24576,
+    "max_agent_rounds": 12,
+    "max_tool_calls_per_arm": 32,
+    "maximum_pair_attempts": 3,
+    "maximum_retries_after_initial_attempt": 2
+  },
+  "frozen_timeouts_seconds": {
+    "bash": 300,
+    "validate": 300,
+    "read": 30,
+    "write": 30,
+    "edit": 30,
+    "model_round": 600,
+    "trusted_git_clone": 300,
+    "trusted_git_checkout": 300,
+    "trusted_patch_capture": 60,
+    "official_evaluator_per_instance": 1800,
+    "effective_model_visible_timeout_formula": "min(operation_timeout, arm_deadline_monotonic-now_monotonic)",
+    "process_group_shutdown": "SIGTERM_then_one_second_grace_then_SIGKILL"
+  },
+  "timeout_censoring": {
+    "administrative_wall_limit_ns": 1800000000000,
+    "observed_wall_formula": "min(actual_wall_ns,administrative_wall_limit_ns)",
+    "wall_timeout_status": "timeout",
+    "wall_timeout_is_retryable": false,
+    "tool_or_model_round_timeout_is_retryable": false,
+    "official_test_timeout_outcome": "unresolved_not_infrastructure",
+    "official_patch_apply_failure_outcome": "unresolved_not_infrastructure",
+    "phase_censoring_policy": "primary_quality_remains_admissible_but_efficiency_promotion_fails_closed"
+  },
+  "whole_pair_retry": {
+    "unit": "both_generation_arms_for_one_instance",
+    "authority": "trusted_supervisor_only",
+    "classifier_is_authority": false,
+    "automatic_retry": false,
+    "sealed_incident_receipt_required": true,
+    "sealed_pair_attempt_ledger_required": true,
+    "infrastructure_reason_allowlist_is_exclusive": true,
+    "same_within_pair_order_and_seed": true,
+    "fresh_workspace_cache_and_conversation": true,
+    "partial_success_is_never_promoted": true,
+    "first_completed_attempt_is_final": true,
+    "retry_after_completed_attempt": false,
+    "open_attempt_requires_explicit_blinded_abort": true,
+    "aborted_attempt_manifest_must_be_hash_bound": true,
+    "retry_reason_enum": [
+      "infrastructure_docker_daemon_failure",
+      "infrastructure_harness_failure",
+      "infrastructure_host_loss",
+      "infrastructure_locked_image_corruption",
+      "infrastructure_process_external_kill",
+      "infrastructure_storage_io_failure",
+      "infrastructure_telemetry_corruption_pre_completion"
+    ],
+    "nonretryable_outcomes": [
+      "arm_wall_timeout",
+      "budget_exhaustion",
+      "empty_patch",
+      "model_error",
+      "model_round_timeout",
+      "official_evaluation_unresolved",
+      "official_patch_apply_failure",
+      "official_test_timeout",
+      "patch_validation_failure",
+      "protocol_violation",
+      "quality_gate_incomplete",
+      "tool_nonzero",
+      "tool_timeout"
+    ]
+  },
+  "content_free_telemetry": {
+    "clock": "monotonic_integer_nanoseconds",
+    "tool_name_vocabulary": [
+      "bash",
+      "validate",
+      "read",
+      "write",
+      "edit",
+      "unknown"
+    ],
+    "tool_outcome_vocabulary": [
+      "denied",
+      "error",
+      "no_work",
+      "nonzero",
+      "not_found",
+      "ok",
+      "old_string_not_found",
+      "output_limit",
+      "timeout",
+      "unrecognized",
+      "unscoped",
+      "untrusted_executable"
+    ],
+    "tool_outcomes_by_name": {
+      "bash": [
+        "denied",
+        "error",
+        "nonzero",
+        "ok",
+        "output_limit",
+        "timeout"
+      ],
+      "validate": [
+        "denied",
+        "error",
+        "no_work",
+        "nonzero",
+        "ok",
+        "output_limit",
+        "timeout",
+        "unscoped",
+        "untrusted_executable"
+      ],
+      "read": [
+        "denied",
+        "error",
+        "not_found",
+        "ok",
+        "timeout"
+      ],
+      "write": [
+        "denied",
+        "error",
+        "ok",
+        "timeout"
+      ],
+      "edit": [
+        "denied",
+        "error",
+        "not_found",
+        "ok",
+        "old_string_not_found",
+        "timeout"
+      ],
+      "unknown": [
+        "unrecognized"
+      ]
+    },
+    "exit_status_semantics": {
+      "file_and_unknown_tools": "null_only",
+      "denied_preexecution_and_error_outcomes": "null_only",
+      "command_ok_and_validate_no_work": "integer_zero",
+      "command_nonzero": "nonzero_integer_or_signal",
+      "command_timeout_or_output_limit": "null_integer_or_signal"
+    },
+    "round_required_fields": [
+      "round_index",
+      "generation_backend",
+      "drafter_requested",
+      "drafter_selected",
+      "drafter_ref",
+      "timing_source",
+      "effective_timeout_ns",
+      "logical_prompt_tokens",
+      "warm_offset_tokens",
+      "physical_prefill_tokens",
+      "completion_tokens",
+      "prefill_ns",
+      "decode_ns",
+      "model_total_ns",
+      "phase_censored",
+      "deadline_hit"
+    ],
+    "tool_required_fields": [
+      "sequence",
+      "round_index",
+      "tool_name",
+      "allowed",
+      "outcome",
+      "duration_ns",
+      "effective_timeout_ns",
+      "exit_code_or_signal",
+      "output_chars",
+      "target_hmac_sha256"
+    ],
+    "arm_required_fields": [
+      "pair_index",
+      "condition",
+      "status",
+      "termination_reason",
+      "wall_elapsed_ns",
+      "wall_observed_ns",
+      "wall_limit_ns",
+      "wall_censored",
+      "watchdog_overrun_ns",
+      "round_count",
+      "tool_call_count",
+      "output_tokens",
+      "physical_prefill_tokens",
+      "prefill_ns",
+      "decode_tokens",
+      "decode_ns",
+      "phase_censored",
+      "telemetry_complete"
+    ],
+    "forbidden_fields": [
+      "instance_id",
+      "repo",
+      "base_commit",
+      "problem_statement",
+      "model_patch",
+      "assistant_text",
+      "tool_arguments",
+      "tool_output",
+      "official_result"
+    ],
+    "receipt_bindings": [
+      "round_telemetry_sha256",
+      "tool_telemetry_sha256",
+      "pair_attempt_ledger_sha256",
+      "docker_image_lock_sha256",
+      "execution_chain_of_custody_sha256"
+    ],
+    "field_semantics": {
+      "round_completion_tokens": "physically_decoded_tokens_including_tokens_not_delivered_when_phase_censored",
+      "round_completion_tokens_source": "AgentRoundTrace.physical_decode_tokens",
+      "arm_output_tokens": "tokens_delivered_to_agent_loop_and_charged_to_generation_budget",
+      "arm_output_tokens_source": "sum_AgentRoundTrace.completion_tokens",
+      "arm_decode_tokens": "sum_round_physical_completion_tokens_used_for_decode_cost_guardrail",
+      "censored_output_decode_relation": "output_tokens_le_decode_tokens_and_difference_only_when_phase_censored",
+      "tool_record_unit": "exactly_one_record_per_admitted_tool_invocation_not_per_audit_event",
+      "pre_admission_budget_block": "no_tool_record_because_no_invocation_was_admitted",
+      "tool_output_chars": "visible_capped_result_chars_including_denial_unknown_and_error_messages",
+      "known_tool_adapter_precondition": "AgentToolTrace.timeout_enforced_must_be_true_but_is_not_serialized_as_evidence",
+      "blocked_command_adapter_names": "bash_and_validate_until_full_invocation_watchdog_attested",
+      "nonterminal_visible_tool_outcomes": "not_found_and_old_string_not_found_are_allowed_results_not_dispatch_failures",
+      "tool_round_topology": "tool_round_index_nondecreasing",
+      "terminal_tool_topology": "last_tool_in_final_round_with_no_later_round",
+      "arm_wall_timeout_topology": "at_most_one_terminal_timeout_and_no_event_after_it",
+      "round_timing_source": "runtime_raw_ns",
+      "round_effective_timeout": "positive_ns_capped_at_frozen_600_second_model_round_timeout",
+      "tool_target_identifier": "hmac_sha256_pseudonymous_within_run_tag_not_authenticity_or_public_commitment",
+      "tool_target_hmac_source": "HMAC_SHA256(private_per_run_key,AgentToolTrace.target_sha256)",
+      "tool_target_hmac_key": "caller_bytes_shape_checked_only_supervisor_private_random_per_run_key_not_attested",
+      "tool_trace_adapter_authority": "shape_only_non_authoritative_non_evidence",
+      "tool_target_cross_run_comparison": "forbidden_tags_intentionally_noncomparable_across_runs",
+      "unknown_tool_name_representation": "tool_name_unknown_outcome_unrecognized_allowed_false_requested_name_never_serialized"
+    }
+  },
+  "termination_taxonomy": {
+    "completed": {
+      "status": "completed",
+      "wall_censored": false
+    },
+    "model_final_incomplete": {
+      "status": "incomplete",
+      "wall_censored": false
+    },
+    "quality_gate_incomplete": {
+      "status": "incomplete",
+      "wall_censored": false
+    },
+    "budget_exhaustion": {
+      "status": "incomplete",
+      "wall_censored": false
+    },
+    "tool_nonzero": {
+      "status": "incomplete",
+      "wall_censored": false,
+      "requires": "terminal_tool_outcome_nonzero"
+    },
+    "protocol_violation": {
+      "status": "incomplete",
+      "wall_censored": false
+    },
+    "model_error": {
+      "status": "model_error",
+      "wall_censored": false
+    },
+    "model_round_timeout": {
+      "status": "timeout",
+      "wall_censored": false,
+      "requires": "terminal_round_deadline_hit"
+    },
+    "tool_timeout": {
+      "status": "timeout",
+      "wall_censored": false,
+      "requires": "terminal_tool_outcome_timeout"
+    },
+    "arm_wall_timeout": {
+      "status": "timeout",
+      "wall_censored": true
+    }
+  },
+  "execution_chain_of_custody": {
+    "status": "required_not_attested",
+    "trusted_observer": "supervisor_outside_model_visible_loop",
+    "receipt_binding": "execution_chain_of_custody_sha256",
+    "model_tree_binding": {
+      "executor": "scripts.run_swebench_quality_generation.NativeMioArmExecutor",
+      "caller_supplied_model_path_is_sufficient": false,
+      "required_receipt_fields": [
+        "executor_engine_object_identity",
+        "resolved_loaded_target_root",
+        "complete_loaded_model_tree_manifest_sha256_before",
+        "engine_loaded_target_tree_manifest_sha256",
+        "complete_loaded_model_tree_manifest_sha256_after",
+        "frozen_target_model_identity"
+      ],
+      "required_equivalence": "before_tree_equals_engine_loaded_target_tree_equals_after_tree_equals_frozen_target_tree"
+    },
+    "executed_code_binding": {
+      "caller_supplied_repo_commit_is_sufficient": false,
+      "required_receipt_fields": [
+        "clean_repo_head_commit",
+        "clean_repo_head_tree",
+        "native_executor_source_sha256",
+        "executed_mio_import_origins_sha256",
+        "executed_runtime_import_origins_sha256",
+        "sealed_dependency_lock_sha256"
+      ],
+      "required_equivalence": "executed_mio_origins_resolve_to_sealed_repo_tree_and_runtime_origins_to_sealed_lock"
+    },
+    "activation_rule": "both_bindings_verified_before_and_after_confirmatory_generation"
+  },
+  "efficiency_guardrails": {
+    "population": "all_500_complete_pairs",
+    "cost_direction": "gate_on_divided_by_gate_off_lower_is_better",
+    "wall_ratio_formula": "sum(observed_wall_on)/sum(observed_wall_off)",
+    "prefill_cost_ratio_formula": "(sum(prefill_ns_on)/sum(physical_prefill_tokens_on))/(sum(prefill_ns_off)/sum(physical_prefill_tokens_off))",
+    "decode_cost_ratio_formula": "(sum(decode_ns_on)/sum(decode_tokens_on))/(sum(decode_ns_off)/sum(decode_tokens_off))",
+    "paired_bootstrap_samples": 10000,
+    "paired_bootstrap_seed": 20260718,
+    "paired_bootstrap_rng": "splitmix64_rejection_sampling_v1",
+    "one_sided_upper_confidence": 0.95,
+    "upper_percentile_zero_based_index": 9499,
+    "thresholds": {
+      "wall_ratio_upper_95": 1.25,
+      "prefill_cost_per_token_ratio_upper_95": 1.1,
+      "decode_cost_per_token_ratio_upper_95": 1.05
+    },
+    "missing_or_censored_phase_telemetry": "fail_closed",
+    "all_three_required": true,
+    "aggregate_origin": "pure_offline_protocol_calculation_non_evidence",
+    "aggregate_integrity": "canonical_sha256_checksum_not_authenticity_or_commitment"
+  },
+  "quality_and_promotion_gates": {
+    "quality_improvement": "paired_bootstrap_lower_95_gt_0_and_exact_one_sided_mcnemar_p_lt_0_05",
+    "practical_resolution_difference_minimum": 0.02,
+    "full_500_pairs_required": true,
+    "promotion": "quality_improvement_and_resolution_difference_ge_0_02_and_all_efficiency_guardrails_pass",
+    "current_v2_decision_mode": "shape_only_all_admissible_criteria_false_without_authority_receipt_binding",
+    "caller_counts_bootstrap_checksum_are_evidence": false
+  },
+  "docker_image_lock": {
+    "status": "required_not_materialized",
+    "manifest_sha256": null,
+    "required_images": 500,
+    "harness_arch": "x86_64",
+    "oci_platform": "linux/amd64",
+    "namespace": "swebench",
+    "source_tag": "latest",
+    "locked_local_alias_tag": "mio-swe-v2-locked",
+    "required_record_identities": [
+      "registry_index_digest",
+      "linux_amd64_manifest_digest",
+      "config_digest",
+      "docker_image_id",
+      "compressed_layer_digests",
+      "rootfs_diff_ids"
+    ],
+    "offline_validator_result": "syntactic_non_evidence",
+    "expected_instance_digests_required_for_binding": true,
+    "official_harness_flags": {
+      "cache_level": "instance",
+      "clean": false,
+      "force_rebuild": false,
+      "instance_image_tag": "mio-swe-v2-locked"
+    },
+    "verification_points": [
+      "before_gate_off_evaluation",
+      "between_gate_off_and_gate_on_evaluation",
+      "after_gate_on_evaluation"
+    ],
+    "pull_or_build_during_confirmatory_evaluation": false,
+    "bind_manifest_sha256_into": [
+      "preregistration",
+      "run_id",
+      "evaluation_seal",
+      "evaluation_receipt"
+    ]
+  },
+  "confirmatory_activation": {
+    "enabled": false,
+    "fail_closed": true,
+    "blockers": [
+      "v2_clean_commit_and_runtime_not_sealed",
+      "native_executor_loaded_model_tree_chain_of_custody_not_attested",
+      "executed_commit_and_import_origins_chain_of_custody_not_attested",
+      "supervisor_private_per_run_hmac_key_not_attested",
+      "promotion_input_authority_and_receipt_binding_not_implemented",
+      "supervisor_monotonic_timeline_not_attested",
+      "hard_arm_watchdog_not_attested",
+      "known_tool_full_invocation_watchdog_not_attested",
+      "raw_phase_and_tool_telemetry_not_attested",
+      "whole_pair_retry_v2_not_attested",
+      "docker_x86_64_image_lock_not_materialized",
+      "official_harness_locked_image_flags_not_attested",
+      "evaluator_timeout_outcome_classifier_not_attested"
+    ]
+  },
+  "result_status": "no_generation_no_evaluation_no_quality_result"
+}
