@@ -130,6 +130,12 @@ inside them only after an exact public-validator failure or a supported,
 calibrated uncertainty trigger. The default support floor is eight independent
 task clusters and the default conservative success floor is 0.10.
 
+The action envelopes also differ: `medium` may repair only; `high` may repair
+or create an independent alternative; `xhigh` and `ultra` additionally permit
+refinement. An action may repeat at a later tree depth only when that exact
+depth/action transition has its own calibrated row. This makes the fifth
+`ultra` candidate reachable without treating an uncalibrated retry as free.
+
 The latency ratio is an end-to-end request envelope relative to the observed
 direct candidate, not a promise about decode speed. Generation, validation,
 and controller overhead count toward it. An overshoot is retained as a deadline

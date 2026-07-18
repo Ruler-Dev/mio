@@ -10,6 +10,7 @@ from experimental.markov_effort_controller import (
     CandidateEvidence,
     ControllerAction,
     EFFORT_PROFILES,
+    EXTRA_ACTIONS,
     EffortProfile,
     EffortTier,
     FrozenTransitionModel,
@@ -357,6 +358,68 @@ def test_frozen_transition_estimates_have_stable_public_order() -> None:
     repair = estimate(ControllerAction.GENERATE_REPAIR, context="alpha")
     model = FrozenTransitionModel(CALIBRATION_IDENTITY, (alternative, repair))
     assert model.estimates == (repair, alternative)
+
+
+def test_tiers_expose_distinct_action_sets() -> None:
+    assert EFFORT_PROFILES[EffortTier.LOW].allowed_actions == ()
+    assert EFFORT_PROFILES[EffortTier.MEDIUM].allowed_actions == (
+        ControllerAction.GENERATE_REPAIR,
+    )
+    assert EFFORT_PROFILES[EffortTier.HIGH].allowed_actions == (
+        ControllerAction.GENERATE_REPAIR,
+        ControllerAction.GENERATE_ALTERNATIVE,
+    )
+    assert EFFORT_PROFILES[EffortTier.XHIGH].allowed_actions == EXTRA_ACTIONS
+    assert EFFORT_PROFILES[EffortTier.ULTRA].allowed_actions == EXTRA_ACTIONS
+
+
+def test_medium_cannot_branch_and_high_cannot_refine() -> None:
+    alternative = estimate(ControllerAction.GENERATE_ALTERNATIVE)
+    medium = controller(alternative, tier="medium")
+    state = add_direct(
+        medium,
+        medium.initial_state("medium-action-envelope"),
+        evidence(ValidationOutcome.FAIL),
+    )
+    assert medium.decide(state).action is ControllerAction.STOP
+
+    refine = estimate(
+        ControllerAction.GENERATE_REFINE,
+        trigger=Trigger.CALIBRATED_UNCERTAINTY,
+    )
+    high = controller(refine, tier="high")
+    state = add_direct(
+        high,
+        high.initial_state("high-action-envelope"),
+        evidence(ValidationOutcome.UNKNOWN, uncertainty=0.9),
+    )
+    assert high.decide(state).action is ControllerAction.ACCEPT
+
+    xhigh = controller(refine, tier="xhigh")
+    state = add_direct(
+        xhigh,
+        xhigh.initial_state("xhigh-action-envelope"),
+        evidence(ValidationOutcome.UNKNOWN, uncertainty=0.9),
+    )
+    assert xhigh.decide(state).action is ControllerAction.GENERATE_REFINE
+
+
+def test_ultra_can_repeat_a_calibrated_action_at_a_later_depth() -> None:
+    ctrl = controller(
+        estimate(ControllerAction.GENERATE_REPAIR, depth=1),
+        estimate(ControllerAction.GENERATE_REPAIR, depth=2),
+        tier="ultra",
+    )
+    state = add_direct(
+        ctrl,
+        ctrl.initial_state("repeat-action"),
+        evidence(ValidationOutcome.FAIL),
+    )
+    first = ctrl.decide(state)
+    state = ctrl.observe(state, first, evidence(ValidationOutcome.FAIL))
+    second = ctrl.decide(state)
+    assert first.action is second.action is ControllerAction.GENERATE_REPAIR
+    assert second.parent_id == 1
 
 
 def test_token_and_latency_budgets_gate_before_generation() -> None:

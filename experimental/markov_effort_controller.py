@@ -132,6 +132,7 @@ class EffortProfile:
     uncertainty_threshold: float
     min_task_clusters: int = 8
     min_success_lcb: float = 0.10
+    allowed_actions: tuple[ControllerAction, ...] = EXTRA_ACTIONS
 
     def __post_init__(self) -> None:
         if self.max_candidates < 1:
@@ -148,6 +149,12 @@ class EffortProfile:
             raise ValueError("min_task_clusters must be at least two")
         if not 0.0 <= self.min_success_lcb <= 1.0:
             raise ValueError("min_success_lcb must be in [0, 1]")
+        if not isinstance(self.allowed_actions, tuple):
+            raise ValueError("allowed_actions must be a tuple")
+        if any(action not in EXTRA_ACTIONS for action in self.allowed_actions):
+            raise ValueError("allowed_actions may contain only extra-generation actions")
+        if len(set(self.allowed_actions)) != len(self.allowed_actions):
+            raise ValueError("allowed_actions must not contain duplicates")
 
 
 EFFORT_PROFILES: Mapping[EffortTier, EffortProfile] = MappingProxyType(
@@ -156,10 +163,34 @@ EFFORT_PROFILES: Mapping[EffortTier, EffortProfile] = MappingProxyType(
         # generation.  The remaining profiles expose increasingly wider hard
         # envelopes, but the controller still spends only after observable,
         # calibrated evidence warrants an extra transition.
-        EffortTier.LOW: EffortProfile(1, 0, 96, 1.0, 1.0),
+        EffortTier.LOW: EffortProfile(
+            1,
+            0,
+            96,
+            1.0,
+            1.0,
+            allowed_actions=(),
+        ),
         # Medium spends compute only after an exact validator failure.
-        EffortTier.MEDIUM: EffortProfile(2, 128, 128, 1.75, 1.0),
-        EffortTier.HIGH: EffortProfile(3, 256, 160, 2.50, 0.80),
+        EffortTier.MEDIUM: EffortProfile(
+            2,
+            128,
+            128,
+            1.75,
+            1.0,
+            allowed_actions=(ControllerAction.GENERATE_REPAIR,),
+        ),
+        EffortTier.HIGH: EffortProfile(
+            3,
+            256,
+            160,
+            2.50,
+            0.80,
+            allowed_actions=(
+                ControllerAction.GENERATE_REPAIR,
+                ControllerAction.GENERATE_ALTERNATIVE,
+            ),
+        ),
         EffortTier.XHIGH: EffortProfile(4, 384, 192, 3.25, 0.72),
         EffortTier.ULTRA: EffortProfile(5, 640, 224, 4.50, 0.65),
     }
@@ -552,14 +583,18 @@ class MarkovTreeEffortController:
                 force_stop=trigger is Trigger.VALIDATOR_FAILURE,
             )
 
-        used_actions = {node.action for node in state.nodes}
-        allowed_actions = (
+        trigger_actions = (
             EXTRA_ACTIONS
             if trigger is Trigger.VALIDATOR_FAILURE
             else (
                 ControllerAction.GENERATE_ALTERNATIVE,
                 ControllerAction.GENERATE_REFINE,
             )
+        )
+        allowed_actions = tuple(
+            action
+            for action in trigger_actions
+            if action in self.profile.allowed_actions
         )
         token_allocation = min(
             remaining_tokens,
@@ -576,8 +611,6 @@ class MarkovTreeEffortController:
             ]
         ] = []
         for action in allowed_actions:
-            if action in used_actions:
-                continue
             estimate, source = self.transition_model.lookup(
                 context_bucket=state.context_bucket,
                 trigger=trigger,
