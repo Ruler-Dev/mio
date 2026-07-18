@@ -77,6 +77,7 @@ def test_stream_baseline_relaxes_eos_suppression_after_configured_tokens(monkeyp
     summary = events[-1]
     assert summary["generated_token_ids"] == [1, 1, 0]
     assert masks == [("mask", (0,)), ("mask", (0,)), ("mask", ())]
+    assert all(event["fallback_ar"] is False for event in events)
     assert isinstance(summary["prefill_ns"], int)
     assert isinstance(summary["decode_ns"], int)
     assert summary["prefill_ns"] >= 0
@@ -86,6 +87,37 @@ def test_stream_baseline_relaxes_eos_suppression_after_configured_tokens(monkeyp
     assert summary["physical_prefill_tokens"] == 1
     assert summary["physical_decode_tokens"] == 3
     assert summary["warm_offset"] == 0
+
+
+def test_stream_baseline_marks_only_an_actual_fallback(monkeypatch):
+    from mio.dflash import runtime
+
+    monkeypatch.setattr(runtime, "make_target_cache", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        runtime,
+        "chunked_prefill",
+        lambda *_args, **_kwargs: (mx.zeros((1, 1, 3)), None),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "sample_tokens_with_mask",
+        lambda *_args, **_kwargs: mx.array([0], dtype=mx.uint32),
+    )
+
+    events = list(
+        runtime.stream_baseline_generate(
+            target_model=object(),
+            tokenizer=object(),
+            prompt="",
+            prompt_tokens_override=[2],
+            max_new_tokens=1,
+            stop_token_ids=[0],
+            fallback_reason="stochastic_sampling_requires_target_only",
+        )
+    )
+
+    assert all(event["fallback_ar"] is True for event in events)
+    assert all(event["fallback_reason"] == "stochastic_sampling_requires_target_only" for event in events)
 
 
 def test_stream_baseline_raw_model_timing_excludes_generator_suspension(monkeypatch):

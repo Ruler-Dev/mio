@@ -1921,7 +1921,7 @@ def stream_baseline_generate(
         "physical_prefill_tokens": prompt_len,
         "physical_decode_tokens": 0,
         "warm_offset": 0,
-        "fallback_ar": True,
+        "fallback_ar": fallback_reason is not None,
         "fallback_reason": fallback_reason,
     }
 
@@ -1946,7 +1946,7 @@ def stream_baseline_generate(
         "warm_offset": 0,
         "acceptance_ratio": 0.0,
         "cycles_completed": 0,
-        "fallback_ar": True,
+        "fallback_ar": fallback_reason is not None,
         "fallback_reason": fallback_reason,
     }
 
@@ -1983,7 +1983,7 @@ def stream_baseline_generate(
             "warm_offset": 0,
             "acceptance_ratio": 0.0,
             "cycles_completed": 0,
-            "fallback_ar": True,
+            "fallback_ar": fallback_reason is not None,
             "fallback_reason": fallback_reason,
         }
         if (
@@ -2024,7 +2024,7 @@ def stream_baseline_generate(
             "commit": 0.0,
         },
         "verify_len_cap": None,
-        "fallback_ar": True,
+        "fallback_ar": fallback_reason is not None,
         "fallback_reason": fallback_reason,
     }
 
