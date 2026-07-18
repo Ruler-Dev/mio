@@ -16,11 +16,13 @@ import experimental.effort.verify_humaneval_parity as parity_module
 from experimental.effort.verify_humaneval_parity import (
     EXPECTED_HUMANEVAL_TASKS,
     GitState,
+    PRIMARY_VERIFIER_SOURCE,
     build_parity_report,
     git_repository_root,
     inspect_git_state,
     main,
     output_is_inside_repository,
+    verifier_source_hashes,
     write_json_atomic,
 )
 
@@ -70,6 +72,10 @@ def test_report_is_source_free_and_claim_requires_clean_exact_parity() -> None:
         timeout_s=10.0,
         git_state=GitState(revision="a" * 40, dirty=False),
         verifier_sha256="b" * 64,
+        verifier_source_files={
+            PRIMARY_VERIFIER_SOURCE: "b" * 64,
+            "mio/agent.py": "c" * 64,
+        },
         verifier=passing_verifier,
         expected_tasks=1,
     )
@@ -94,6 +100,46 @@ def test_report_is_source_free_and_claim_requires_clean_exact_parity() -> None:
         "canonical_solution_sha256",
         "verified_source_sha256",
     }
+    assert report["verifier"]["source_files"] == {
+        PRIMARY_VERIFIER_SOURCE: "b" * 64,
+        "mio/agent.py": "c" * 64,
+    }
+    assert len(report["verifier"]["source_bundle_sha256"]) == 64
+
+
+def test_report_rejects_mismatched_or_malformed_source_bundle() -> None:
+    arguments = {
+        "references": (reference(),),
+        "timeout_s": 10.0,
+        "git_state": GitState(revision="a" * 40, dirty=False),
+        "verifier_sha256": "b" * 64,
+        "verifier": passing_verifier,
+        "expected_tasks": 1,
+    }
+    with pytest.raises(ValueError, match="primary verifier hash"):
+        build_parity_report(
+            **arguments,
+            verifier_source_files={PRIMARY_VERIFIER_SOURCE: "c" * 64},
+        )
+    with pytest.raises(ValueError, match="source bundle is malformed"):
+        build_parity_report(
+            **arguments,
+            verifier_source_files={
+                PRIMARY_VERIFIER_SOURCE: "b" * 64,
+                "../outside.py": "d" * 64,
+            },
+        )
+
+
+def test_real_source_bundle_is_relative_complete_and_self_consistent() -> None:
+    source_files = verifier_source_hashes()
+    assert set(source_files) == {
+        PRIMARY_VERIFIER_SOURCE,
+        "experimental/markov_effort_controller.py",
+        "mio/agent.py",
+        "mio/agent_policy.py",
+    }
+    assert source_files[PRIMARY_VERIFIER_SOURCE] == parity_module.verifier_source_sha256()
 
 
 def test_report_rejects_dirty_tree_even_when_all_references_pass() -> None:
@@ -240,7 +286,11 @@ def test_main_writes_164_rows_and_exit_reflects_git_cleanliness(
         lambda _path: references,
     )
     monkeypatch.setattr(parity_module, "verify_candidate", passing_verifier)
-    monkeypatch.setattr(parity_module, "verifier_source_sha256", lambda: "d" * 64)
+    monkeypatch.setattr(
+        parity_module,
+        "verifier_source_hashes",
+        lambda: {PRIMARY_VERIFIER_SOURCE: "d" * 64},
+    )
     monkeypatch.setattr(
         parity_module,
         "inspect_git_state",

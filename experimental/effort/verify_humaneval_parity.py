@@ -19,7 +19,7 @@ from pathlib import Path
 import secrets
 import subprocess
 import sys
-from typing import Callable, Sequence
+from typing import Callable, Mapping, Sequence
 
 from experimental.effort.humaneval import (
     HUMANEVAL_REVISION,
@@ -36,9 +36,16 @@ from experimental.effort.humaneval import (
 )
 
 
-REPORT_SCHEMA = "mio.humaneval-verifier-parity.v1"
+REPORT_SCHEMA = "mio.humaneval-verifier-parity.v2"
 EXPECTED_HUMANEVAL_TASKS = 164
 DEFAULT_TIMEOUT_SECONDS = 10.0
+PRIMARY_VERIFIER_SOURCE = "experimental/effort/humaneval.py"
+VERIFIER_SOURCE_PATHS = (
+    PRIMARY_VERIFIER_SOURCE,
+    "experimental/markov_effort_controller.py",
+    "mio/agent.py",
+    "mio/agent_policy.py",
+)
 
 
 @dataclass(frozen=True)
@@ -121,6 +128,25 @@ def verifier_source_sha256() -> str:
     return _sha256(Path(source_path_text).read_bytes())
 
 
+def verifier_source_hashes() -> dict[str, str]:
+    """Hash the verifier and every repository module it delegates to."""
+
+    repository_root = Path(__file__).resolve().parents[2]
+    return {
+        relative_path: _sha256((repository_root / relative_path).read_bytes())
+        for relative_path in VERIFIER_SOURCE_PATHS
+    }
+
+
+def _source_bundle_sha256(source_files: Mapping[str, str]) -> str:
+    canonical = json.dumps(
+        dict(sorted(source_files.items())),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return _sha256(canonical)
+
+
 def _invoke_verifier(
     verifier: Callable[..., VerificationResult],
     reference: HumanEvalReference,
@@ -140,6 +166,7 @@ def build_parity_report(
     timeout_s: float,
     git_state: GitState,
     verifier_sha256: str,
+    verifier_source_files: Mapping[str, str] | None = None,
     verifier: Callable[..., VerificationResult] | None = None,
     expected_tasks: int = EXPECTED_HUMANEVAL_TASKS,
     progress: Callable[[int, int, str, VerificationResult], None] | None = None,
@@ -151,6 +178,23 @@ def build_parity_report(
         raise ValueError("timeout_s must be between 0.1 and 30 seconds")
     if expected_tasks <= 0:
         raise ValueError("expected_tasks must be positive")
+    source_files = dict(
+        verifier_source_files
+        or {PRIMARY_VERIFIER_SOURCE: verifier_sha256}
+    )
+    if source_files.get(PRIMARY_VERIFIER_SOURCE) != verifier_sha256:
+        raise ValueError("primary verifier hash does not match the source bundle")
+    if any(
+        not isinstance(path, str)
+        or not path
+        or Path(path).is_absolute()
+        or ".." in Path(path).parts
+        or not isinstance(digest, str)
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+        for path, digest in source_files.items()
+    ):
+        raise ValueError("verifier source bundle is malformed")
     active_verifier = verifier or verify_candidate
     tasks: list[dict[str, object]] = []
     passed = 0
@@ -214,9 +258,11 @@ def build_parity_report(
         },
         "verifier": {
             "callable": "experimental.effort.humaneval.verify_candidate",
-            "source_path": "experimental/effort/humaneval.py",
+            "source_path": PRIMARY_VERIFIER_SOURCE,
             "source_sha256": verifier_sha256,
-            "source_hash_scope": "complete_module_file",
+            "source_hash_scope": "complete_module_files",
+            "source_files": dict(sorted(source_files.items())),
+            "source_bundle_sha256": _source_bundle_sha256(source_files),
             "timeout_seconds_per_task": timeout_s,
         },
         "git": {
@@ -326,11 +372,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     git_state = inspect_git_state()
     corpus_path = fetch_humaneval(arguments.corpus)
     references = load_humaneval_references(corpus_path)
+    source_files = verifier_source_hashes()
     report = build_parity_report(
         references,
         timeout_s=arguments.timeout,
         git_state=git_state,
-        verifier_sha256=verifier_source_sha256(),
+        verifier_sha256=source_files[PRIMARY_VERIFIER_SOURCE],
+        verifier_source_files=source_files,
         progress=None if arguments.quiet else _progress,
         post_verification_git_probe=inspect_git_state,
     )
