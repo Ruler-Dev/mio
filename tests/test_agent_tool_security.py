@@ -192,6 +192,34 @@ def test_agent_registry_declares_trusted_policy_injection():
     assert agent.AGENT_TOOLS["validate"]["permission"] is AgentToolPermission.SHELL
     assert agent.AGENT_TOOLS["list_mcp_tools"]["inject_policy"] is True
     assert agent.AGENT_TOOLS["call_mcp_tool"]["inject_policy"] is True
+    assert "execution_budget" not in str(agent.AGENT_TOOLS_SPEC)
+
+
+def test_execution_budget_defaults_match_legacy_limits():
+    budget = agent.AgentExecutionBudget()
+
+    assert budget.max_rounds == agent._MAX_AGENT_ROUNDS_PER_TURN == 12
+    assert budget.max_tool_calls == agent._MAX_TOOL_CALLS_PER_TURN == 32
+    assert budget.max_output_tokens is None
+    assert budget.max_wall_seconds is None
+    assert budget.max_context_tokens is None
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"max_rounds": 0}, "max_rounds"),
+        ({"max_rounds": True}, "max_rounds"),
+        ({"max_tool_calls": -1}, "max_tool_calls"),
+        ({"max_output_tokens": 0}, "max_output_tokens"),
+        ({"max_context_tokens": False}, "max_context_tokens"),
+        ({"max_wall_seconds": float("nan")}, "max_wall_seconds"),
+        ({"max_wall_seconds": float("inf")}, "max_wall_seconds"),
+    ],
+)
+def test_execution_budget_rejects_invalid_trusted_limits(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        agent.AgentExecutionBudget(**kwargs)
 
 
 def test_validate_uses_direct_argv_and_true_nonzero_status(tmp_path, monkeypatch):

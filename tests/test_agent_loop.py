@@ -25,20 +25,48 @@ class _ScriptedEngine:
         self.responses = iter(responses)
         self.requests: list[list[dict]] = []
         self.tool_specs: list[list[dict] | None] = []
+        self.max_token_limits: list[int | None] = []
         self.last_metrics = SimpleNamespace(
             generation_tps=0.0,
             completion_tokens=0,
             total_time_s=0.0,
         )
 
-    def generate_stream(self, messages, *, tools):
+    def generate_stream(self, messages, *, tools, max_tokens=None):
         self.requests.append(deepcopy(messages))
         self.tool_specs.append(tools)
+        self.max_token_limits.append(max_tokens)
         response = next(self.responses)
         # Deliberately split XML delimiters across chunks to exercise the
         # incremental terminal filter as well as whole-call dispatch.
         for offset in range(0, len(response), 7):
             yield response[offset : offset + 7], None
+
+
+class _MetricScriptedEngine(_ScriptedEngine):
+    def __init__(
+        self,
+        responses: list[str],
+        *,
+        prompt_tokens: list[int],
+        completion_tokens: list[int],
+    ) -> None:
+        super().__init__(responses)
+        self._prompt_tokens = iter(prompt_tokens)
+        self._completion_tokens = iter(completion_tokens)
+
+    def generate_stream(self, messages, *, tools, max_tokens=None):
+        self.last_metrics = SimpleNamespace(
+            prompt_tokens=next(self._prompt_tokens),
+            generation_tps=0.0,
+            completion_tokens=next(self._completion_tokens),
+            total_time_s=0.0,
+        )
+        yield from super().generate_stream(
+            messages,
+            tools=tools,
+            max_tokens=max_tokens,
+        )
 
 
 class _Manager:
@@ -322,6 +350,264 @@ def test_coding_agent_never_dispatches_memorized_tool_xml_on_final_round(
     assert engine.tool_specs[-1] is None
     assert "no additional operation was executed" in state["messages"][-1]["content"]
     assert "<tool_call>" not in output.getvalue()
+
+
+@pytest.mark.parametrize(("call_cap", "requested_calls"), [(2, 3), (32, 33)])
+def test_trusted_execution_budget_blocks_before_call_beyond_cap(
+    monkeypatch,
+    tmp_path,
+    call_cap,
+    requested_calls,
+):
+    (tmp_path / "note.txt").write_text("ready\n", encoding="utf-8")
+    monkeypatch.setattr(
+        agent,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+    dispatched: list[str] = []
+    state = _state(tmp_path)
+    state["execution_budget"] = agent.AgentExecutionBudget(
+        max_rounds=3,
+        max_tool_calls=call_cap,
+    )
+    state["tool_registry"] = {
+        "read": {
+            "fn": lambda path, *, policy: dispatched.append(path) or "ready\n",
+            "args": ["path"],
+            "permission": agent.AgentToolPermission.READ,
+        }
+    }
+    engine = _ScriptedEngine(
+        [
+            "".join(_tool_call("read", path=f"{index}.txt") for index in range(requested_calls)),
+            "Stopped after the trusted tool budget.",
+        ]
+    )
+
+    result = agent._process_user_input(
+        "Read at most the caller-authorized number of files.",
+        engine,
+        _Manager(),
+        MioConfig.default(),
+        state,
+    )
+
+    assert dispatched == [f"{index}.txt" for index in range(call_cap)]
+    assert result.tool_calls == call_cap
+    assert result.terminal_reason == "budget_finalization"
+    assert result.budget_exhaustion == f"tool call limit {call_cap} reached"
+    assert engine.tool_specs == [agent.AGENT_TOOLS_SPEC, None]
+
+
+def test_tool_budget_exhaustion_preserves_incomplete_quality_report(
+    monkeypatch,
+    tmp_path,
+):
+    target = tmp_path / "stats.py"
+    target.write_text("VALUE = 1\n", encoding="utf-8")
+    monkeypatch.setattr(
+        agent,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+    state = _enable_quality_gate(_state(tmp_path))
+    state["execution_budget"] = agent.AgentExecutionBudget(
+        max_rounds=3,
+        max_tool_calls=1,
+    )
+    engine = _ScriptedEngine(
+        [
+            _tool_call("edit", path="stats.py", old="VALUE = 1", new="VALUE = 2")
+            + _tool_call("validate", argv='["python3", "-m", "pytest", "-q"]'),
+            "The edit was made, but validation could not run within budget.",
+        ]
+    )
+
+    result = agent._process_user_input(
+        "Change VALUE to 2 and validate it.",
+        engine,
+        _Manager(),
+        MioConfig.default(),
+        state,
+    )
+
+    assert target.read_text(encoding="utf-8") == "VALUE = 2\n"
+    assert result.tool_calls == 1
+    assert result.budget_exhaustion == "tool call limit 1 reached"
+    assert result.terminal_reason == "quality_incomplete"
+    assert result.quality_gate is not None
+    assert result.quality_gate["decision"] == "incomplete"
+    assert state["quality_gate_pending"] is True
+
+
+def test_completion_budget_is_cumulative_and_stops_before_later_dispatch(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(
+        agent,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+    dispatched: list[str] = []
+    state = _state(tmp_path)
+    state["execution_budget"] = agent.AgentExecutionBudget(
+        max_rounds=4,
+        max_tool_calls=4,
+        max_output_tokens=5,
+    )
+    state["tool_registry"] = {
+        "read": {
+            "fn": lambda path, *, policy: dispatched.append(path) or "ok",
+            "args": ["path"],
+            "permission": agent.AgentToolPermission.READ,
+        }
+    }
+    engine = _MetricScriptedEngine(
+        [_tool_call("read", path="first.txt"), _tool_call("read", path="second.txt")],
+        prompt_tokens=[10, 12],
+        completion_tokens=[3, 2],
+    )
+
+    result = agent._process_user_input(
+        "Use the bounded token budget.",
+        engine,
+        _Manager(),
+        MioConfig.default(),
+        state,
+    )
+
+    assert dispatched == ["first.txt"]
+    assert result.tool_calls == 1
+    assert result.completion_tokens == 5
+    assert result.budget_exhaustion == "completion token limit 5 reached"
+    assert result.terminal_reason == "budget_exhausted"
+    assert len(result.rounds) == 2
+    assert engine.max_token_limits == [5, 2]
+
+
+def test_completion_budget_never_raises_engine_configured_output_limit(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(
+        agent,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+    state = _state(tmp_path)
+    state["execution_budget"] = agent.AgentExecutionBudget(max_output_tokens=100)
+    engine = _MetricScriptedEngine(
+        ["Finished within the engine ceiling."],
+        prompt_tokens=[10],
+        completion_tokens=[4],
+    )
+    engine.tier_config = SimpleNamespace(max_output_tokens=4)
+
+    result = agent._process_user_input(
+        "Respect both limits.",
+        engine,
+        _Manager(),
+        MioConfig.default(),
+        state,
+    )
+
+    assert engine.max_token_limits == [4]
+    assert result.completion_tokens == 4
+    assert result.terminal_reason == "model_final"
+
+
+def test_context_budget_uses_reported_prompt_plus_completion_without_dispatch(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(
+        agent,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+    state = _state(tmp_path)
+    state["execution_budget"] = agent.AgentExecutionBudget(max_context_tokens=8)
+    engine = _MetricScriptedEngine(
+        [_tool_call("read", path="never.txt")],
+        prompt_tokens=[7],
+        completion_tokens=[1],
+    )
+
+    result = agent._process_user_input(
+        "Do not exceed context budget.",
+        engine,
+        _Manager(),
+        MioConfig.default(),
+        state,
+    )
+
+    assert result.tool_calls == 0
+    assert result.budget_exhaustion == "context token limit 8 reached"
+    assert result.terminal_reason == "budget_exhausted"
+
+
+def test_wall_deadline_reduces_injected_command_timeout_and_blocks_next_call(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(
+        agent,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+    clock = {"now": 0.0}
+    monkeypatch.setattr(agent.time, "perf_counter", lambda: clock["now"])
+    observed_timeouts: list[float] = []
+
+    def bounded_bash(command, *, policy):
+        observed_timeouts.append(policy.command_timeout_s)
+        clock["now"] = 0.6
+        return command
+
+    state = _state(tmp_path)
+    state["execution_budget"] = agent.AgentExecutionBudget(
+        max_rounds=4,
+        max_tool_calls=4,
+        max_wall_seconds=0.5,
+    )
+    state["tool_registry"] = {
+        "bash": {
+            "fn": bounded_bash,
+            "args": ["command"],
+            "permission": agent.AgentToolPermission.SHELL,
+        }
+    }
+    engine = _ScriptedEngine([_tool_call("bash", command="first") + _tool_call("bash", command="second")])
+
+    result = agent._process_user_input(
+        "Run only within the caller deadline.",
+        engine,
+        _Manager(),
+        MioConfig.default(),
+        state,
+    )
+
+    assert observed_timeouts == [0.5]
+    assert result.tool_calls == 1
+    assert result.wall_time_s == pytest.approx(0.6)
+    assert result.budget_exhaustion == "wall time limit 0.5s reached"
+    assert result.terminal_reason == "budget_exhausted"
+
+
+def test_execution_budget_state_rejects_untrusted_mapping(tmp_path):
+    state = _state(tmp_path)
+    state["execution_budget"] = {"max_tool_calls": 10_000}
+
+    with pytest.raises(TypeError, match="AgentExecutionBudget"):
+        agent._process_user_input(
+            "Ignore model-selected budgets.",
+            _ScriptedEngine(["unused"]),
+            _Manager(),
+            MioConfig.default(),
+            state,
+        )
 
 
 def test_quality_gate_reprompts_after_edit_until_trusted_validation(

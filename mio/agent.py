@@ -52,6 +52,45 @@ _FINALIZE_TOOL_LOOP = (
 
 
 @dataclass(frozen=True)
+class AgentExecutionBudget:
+    """Trusted, per-turn resource budget for the native agent loop.
+
+    The caller constructs this object and injects it through ``run_agent`` or
+    ``state["execution_budget"]``.  It is deliberately absent from the model's
+    tool schemas, so generated arguments can never relax these ceilings.
+
+    The completion ceiling is also passed to the engine's existing
+    ``max_tokens`` argument on every round; post-generation metrics remain the
+    authoritative cumulative ledger.  Context usage is only observable after
+    generation, so reaching that optional ceiling prevents every subsequent
+    round and tool call.
+    """
+
+    max_rounds: int = _MAX_AGENT_ROUNDS_PER_TURN
+    max_tool_calls: int = _MAX_TOOL_CALLS_PER_TURN
+    max_output_tokens: int | None = None
+    max_wall_seconds: float | None = None
+    max_context_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.max_rounds, bool) or not isinstance(self.max_rounds, int) or self.max_rounds < 1:
+            raise ValueError("max_rounds must be an integer >= 1")
+        if isinstance(self.max_tool_calls, bool) or not isinstance(self.max_tool_calls, int) or self.max_tool_calls < 0:
+            raise ValueError("max_tool_calls must be an integer >= 0")
+        for name in ("max_output_tokens", "max_context_tokens"):
+            value = getattr(self, name)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 1):
+                raise ValueError(f"{name} must be None or an integer >= 1")
+        if self.max_wall_seconds is not None and (
+            isinstance(self.max_wall_seconds, bool)
+            or not isinstance(self.max_wall_seconds, (int, float))
+            or not math.isfinite(float(self.max_wall_seconds))
+            or float(self.max_wall_seconds) <= 0
+        ):
+            raise ValueError("max_wall_seconds must be None or a finite number > 0")
+
+
+@dataclass(frozen=True)
 class AgentRoundTrace:
     """Content-free generation metrics for one model round."""
 
@@ -95,6 +134,8 @@ class AgentTurnResult:
     tool_result_chars: int
     wall_time_s: float
     quality_gate: dict[str, object] | None = None
+    completion_tokens: int = 0
+    budget_exhaustion: str | None = None
 
 
 def _round_trace(round_index: int, metrics: object) -> AgentRoundTrace:
@@ -1649,11 +1690,15 @@ def run_agent(
     tool_policy: AgentToolPolicy | None = None,
     coding_effort: str = "medium",
     quality_gate_enabled: bool = True,
+    execution_budget: AgentExecutionBudget | None = None,
 ) -> None:
     """Run the interactive coding agent."""
     # Library callers that omit a policy are intentionally read-only. The
     # native CLI passes its named coding policy explicitly at the trust edge.
     declared_tool_policy = tool_policy or _default_read_policy()
+    declared_execution_budget = AgentExecutionBudget() if execution_budget is None else execution_budget
+    if not isinstance(declared_execution_budget, AgentExecutionBudget):
+        raise TypeError("execution_budget must be an AgentExecutionBudget")
     if coding_effort not in CODING_EFFORT_LEVELS:
         raise ValueError(f"coding_effort must be one of: {', '.join(CODING_EFFORT_LEVELS)}")
     state = {
@@ -1662,6 +1707,7 @@ def run_agent(
         "tool_policy": declared_tool_policy,
         "coding_effort": coding_effort,
         "quality_gate_enabled": bool(quality_gate_enabled),
+        "execution_budget": declared_execution_budget,
         "messages": [],
     }
 
@@ -1728,6 +1774,18 @@ def _process_user_input(
     text and the file would never actually be written.
     """
     turn_started = time.perf_counter()
+    raw_execution_budget = state.get("execution_budget")
+    if raw_execution_budget is None:
+        execution_budget = AgentExecutionBudget()
+    elif isinstance(raw_execution_budget, AgentExecutionBudget):
+        execution_budget = raw_execution_budget
+    else:
+        raise TypeError("state.execution_budget must be an AgentExecutionBudget")
+    wall_deadline = (
+        turn_started + float(execution_budget.max_wall_seconds)
+        if execution_budget.max_wall_seconds is not None
+        else None
+    )
     current_tier = state.get("tier", "large-moe")
     if current_tier in manager.loaded_tiers():
         engine = manager.get_engine(current_tier)
@@ -1798,13 +1856,22 @@ def _process_user_input(
     tool_result_chars = 0
     forced_finalization_reason: str | None = None
     terminal_reason = "model_final"
+    completion_tokens_used = 0
+    budget_exhaustion: str | None = None
     round_traces: list[AgentRoundTrace] = []
     tool_event_traces: list[AgentToolTrace] = []
 
-    for _round_idx in range(_MAX_AGENT_ROUNDS_PER_TURN):
+    for _round_idx in range(execution_budget.max_rounds):
+        if wall_deadline is not None and time.perf_counter() >= wall_deadline:
+            budget_exhaustion = f"wall time limit {execution_budget.max_wall_seconds:g}s reached"
+            terminal_reason = "budget_exhausted"
+            terminal_assistant_text = (
+                f"Agent execution stopped: {budget_exhaustion}. No additional model round or tool call was executed."
+            )
+            break
         finalization_reason = forced_finalization_reason
-        if finalization_reason is None and _round_idx == _MAX_AGENT_ROUNDS_PER_TURN - 1:
-            finalization_reason = f"model round limit {_MAX_AGENT_ROUNDS_PER_TURN} reached"
+        if finalization_reason is None and _round_idx == execution_budget.max_rounds - 1:
+            finalization_reason = f"model round limit {execution_budget.max_rounds} reached"
         finalization_only = finalization_reason is not None
         generation_messages = current_messages
         generation_tools = tool_specs
@@ -1824,7 +1891,35 @@ def _process_user_input(
         full_text = ""
         visible_parts: list[str] = []
         display_parser = StreamingToolCallParser()
-        for chunk, metrics in engine.generate_stream(generation_messages, tools=generation_tools):
+        if execution_budget.max_output_tokens is None:
+            generation_stream = engine.generate_stream(
+                generation_messages,
+                tools=generation_tools,
+            )
+        else:
+            remaining_output_tokens = execution_budget.max_output_tokens - completion_tokens_used
+            configured_output_tokens = getattr(
+                getattr(engine, "tier_config", None),
+                "max_output_tokens",
+                None,
+            )
+            if (
+                not isinstance(configured_output_tokens, bool)
+                and isinstance(configured_output_tokens, int)
+                and configured_output_tokens > 0
+            ):
+                # A budget is a ceiling, never authority to raise the model's
+                # configured generation limit.
+                remaining_output_tokens = min(
+                    remaining_output_tokens,
+                    configured_output_tokens,
+                )
+            generation_stream = engine.generate_stream(
+                generation_messages,
+                tools=generation_tools,
+                max_tokens=max(1, remaining_output_tokens),
+            )
+        for chunk, metrics in generation_stream:
             full_text += chunk
             # Keep native tool XML for parsing, but never expose it as ordinary
             # assistant prose in the terminal. The incremental parser also
@@ -1841,7 +1936,9 @@ def _process_user_input(
 
         # Metrics line
         m = engine.last_metrics
-        round_traces.append(_round_trace(_round_idx, m))
+        trace = _round_trace(_round_idx, m)
+        round_traces.append(trace)
+        completion_tokens_used += max(0, trace.completion_tokens)
         if m.generation_tps > 0:
             console.print(
                 f"[dim]  {m.generation_tps:.1f} tok/s · {m.completion_tokens} tokens · {m.total_time_s:.2f}s[/dim]"
@@ -1860,8 +1957,22 @@ def _process_user_input(
         # An unterminated tool block is neither shown nor smuggled into future
         # conversation history as assistant content.
         visible_text = "".join(visible_parts).strip()
+        post_generation_exhaustion: str | None = None
+        if wall_deadline is not None and time.perf_counter() >= wall_deadline:
+            post_generation_exhaustion = f"wall time limit {execution_budget.max_wall_seconds:g}s reached"
+        elif (
+            execution_budget.max_output_tokens is not None
+            and completion_tokens_used >= execution_budget.max_output_tokens
+        ):
+            post_generation_exhaustion = f"completion token limit {execution_budget.max_output_tokens} reached"
+        elif (
+            execution_budget.max_context_tokens is not None
+            and max(0, trace.prompt_tokens) + max(0, trace.completion_tokens) >= execution_budget.max_context_tokens
+        ):
+            post_generation_exhaustion = f"context token limit {execution_budget.max_context_tokens} reached"
         if finalization_only:
             terminal_reason = "budget_finalization"
+            budget_exhaustion = post_generation_exhaustion or finalization_reason
             if tool_calls:
                 # A model can still emit memorized XML after the schema is
                 # removed. It is never dispatched on the reserved final round.
@@ -1886,6 +1997,16 @@ def _process_user_input(
                     text for text in (terminal_assistant_text, quality_notice) if text
                 )
                 terminal_reason = "quality_incomplete"
+            break
+
+        if post_generation_exhaustion is not None:
+            budget_exhaustion = post_generation_exhaustion
+            terminal_reason = "budget_exhausted"
+            notice = (
+                f"Agent execution stopped: {post_generation_exhaustion}. No tool call from this round was executed."
+            )
+            console.print(notice, style="yellow")
+            terminal_assistant_text = "\n\n".join(text for text in (visible_text, notice) if text)
             break
 
         if not tool_calls:
@@ -1935,28 +2056,63 @@ def _process_user_input(
         for tc, name, args in invocations:
             spec = tool_registry.get(name)
             audit_start = len(audit_events)
-            gate_before = (
-                quality_gate.before_tool(name, args) if quality_gate is not None and spec is not None else None
-            )
-            tool_calls_used += 1
-            if tool_calls_used > _MAX_TOOL_CALLS_PER_TURN:
+            gate_before = None
+            call_policy = execution_policy
+            remaining_wall_seconds: float | None = None
+            if wall_deadline is not None:
+                remaining_wall_seconds = wall_deadline - time.perf_counter()
+
+            admitted = True
+            if remaining_wall_seconds is not None and remaining_wall_seconds <= 0:
+                admitted = False
+                result = "(wall time budget exhausted for this turn)"
+                forced_finalization_reason = f"wall time limit {execution_budget.max_wall_seconds:g}s reached"
+            elif tool_calls_used >= execution_budget.max_tool_calls:
+                admitted = False
                 result = "(tool call budget exhausted for this turn)"
-                forced_finalization_reason = f"tool call limit {_MAX_TOOL_CALLS_PER_TURN} reached"
+                forced_finalization_reason = f"tool call limit {execution_budget.max_tool_calls} reached"
             elif tool_result_chars >= _MAX_TOOL_RESULT_CHARS_PER_TURN:
+                admitted = False
                 result = "(tool result budget exhausted for this turn)"
                 forced_finalization_reason = f"tool result limit {_MAX_TOOL_RESULT_CHARS_PER_TURN} characters reached"
-            elif not spec:
-                result = f"(unknown tool: {name})"
-            else:
-                try:
-                    kwargs = {k: args[k] for k in spec["args"] if k in args}
-                    if "permission" in spec or spec.get("inject_policy"):
-                        kwargs["policy"] = execution_policy
-                    result = spec["fn"](**kwargs)
-                except Exception as e:
-                    result = f"(tool error: {type(e).__name__}: {e})"
+            if admitted:
+                gate_before = (
+                    quality_gate.before_tool(name, args) if quality_gate is not None and spec is not None else None
+                )
+                if wall_deadline is not None:
+                    # Snapshotting the workspace for the quality gate can take
+                    # measurable time. Recheck immediately before admission so
+                    # that work done by the gate cannot make a stale deadline
+                    # authorize one more command.
+                    remaining_wall_seconds = wall_deadline - time.perf_counter()
+                    if remaining_wall_seconds <= 0:
+                        admitted = False
+                        result = "(wall time budget exhausted for this turn)"
+                        forced_finalization_reason = f"wall time limit {execution_budget.max_wall_seconds:g}s reached"
+                    else:
+                        call_policy = replace(
+                            execution_policy,
+                            command_timeout_s=min(
+                                execution_policy.command_timeout_s,
+                                remaining_wall_seconds,
+                            ),
+                        )
+            if admitted:
+                tool_calls_used += 1
+                if not spec:
+                    result = f"(unknown tool: {name})"
+                else:
+                    try:
+                        kwargs = {k: args[k] for k in spec["args"] if k in args}
+                        if "permission" in spec or spec.get("inject_policy"):
+                            kwargs["policy"] = call_policy
+                        result = spec["fn"](**kwargs)
+                    except Exception as e:
+                        result = f"(tool error: {type(e).__name__}: {e})"
+                if tool_calls_used >= execution_budget.max_tool_calls:
+                    forced_finalization_reason = f"tool call limit {execution_budget.max_tool_calls} reached"
             invocation_audits = audit_events[audit_start:]
-            if quality_gate is not None and spec is not None and gate_before is not None:
+            if admitted and quality_gate is not None and spec is not None and gate_before is not None:
                 quality_gate.after_tool(
                     name,
                     args,
@@ -1977,7 +2133,9 @@ def _process_user_input(
             )
             tool_result_chars += len(result)
             if tool_result_chars >= _MAX_TOOL_RESULT_CHARS_PER_TURN:
-                forced_finalization_reason = f"tool result limit {_MAX_TOOL_RESULT_CHARS_PER_TURN} characters reached"
+                forced_finalization_reason = forced_finalization_reason or (
+                    f"tool result limit {_MAX_TOOL_RESULT_CHARS_PER_TURN} characters reached"
+                )
             preview = ", ".join(k for k in (spec["args"] if spec else []) if k in args)
             console.print(
                 f"  ◆ {name}({preview}) → {str(result)[:120]}",
@@ -2049,4 +2207,6 @@ def _process_user_input(
         tool_result_chars=tool_result_chars,
         wall_time_s=time.perf_counter() - turn_started,
         quality_gate=quality_report,
+        completion_tokens=completion_tokens_used,
+        budget_exhaustion=budget_exhaustion,
     )
