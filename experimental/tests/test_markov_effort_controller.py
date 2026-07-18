@@ -19,6 +19,7 @@ from experimental.markov_effort_controller import (
     TransitionEstimate,
     Trigger,
     ValidationOutcome,
+    deterministic_generation_seed,
     trace_metrics,
 )
 
@@ -166,6 +167,29 @@ def test_direct_fast_path_is_stable_and_needs_no_calibration() -> None:
     finished = first.finish(state_a, terminal)
     assert finished.selected_node_id == 0
     assert finished.terminal is True
+
+
+def test_direct_seed_is_context_and_tier_independent_and_replayable() -> None:
+    low = controller(tier="low")
+    ultra = controller(tier="ultra")
+    low_state = low.initial_state("matched-request", context_bucket="low-routing")
+    ultra_state = ultra.initial_state(
+        "matched-request",
+        context_bucket="ultra-routing",
+    )
+
+    low_decision = low.decide(low_state)
+    ultra_decision = ultra.decide(ultra_state)
+    expected_seed = deterministic_generation_seed(
+        seed_salt="mio-markov-effort-v1",
+        request_id="matched-request",
+        node_id=0,
+        action=ControllerAction.GENERATE_DIRECT,
+    )
+
+    assert low_decision.seed == ultra_decision.seed == expected_seed
+    assert low.decide(low_state) == low_decision
+    assert ultra.decide(ultra_state) == ultra_decision
 
 
 @pytest.mark.parametrize(
@@ -583,8 +607,8 @@ def test_trace_reports_backend_rates_and_effective_cost_separately() -> None:
     assert metrics.baseline_prefill_tokens_per_second == pytest.approx(1000.0)
     assert metrics.aggregate_prefill_tokens_per_second == pytest.approx(1000.0)
     assert metrics.prefill_speed_ratio == pytest.approx(1.0)
-    assert metrics.baseline_decode_tokens_per_second == pytest.approx(100.0)
-    assert metrics.aggregate_decode_tokens_per_second == pytest.approx(100.0)
+    assert metrics.baseline_decode_tokens_per_second == pytest.approx(95.0)
+    assert metrics.aggregate_decode_tokens_per_second == pytest.approx(95.0)
     assert metrics.decode_speed_ratio == pytest.approx(1.0)
     assert metrics.generation_latency_ratio == pytest.approx(0.7 / 0.3)
     assert metrics.e2e_latency_ratio == pytest.approx(0.76 / 0.325)
@@ -592,6 +616,23 @@ def test_trace_reports_backend_rates_and_effective_cost_separately() -> None:
     assert metrics.controller_overhead_fraction == pytest.approx(0.01 / 0.76)
     assert metrics.validation_overhead_fraction == pytest.approx(0.05 / 0.76)
     assert metrics.evaluation_delta == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(
+    ("output_tokens", "timed_decode_tokens"),
+    [(0, 0), (1, 0), (2, 1), (20, 19)],
+)
+def test_generation_metrics_count_only_timed_decode_tokens(
+    output_tokens: int,
+    timed_decode_tokens: int,
+) -> None:
+    metrics = GenerationMetrics(
+        prompt_tokens=1,
+        output_tokens=output_tokens,
+        prefill_seconds=0.1,
+        decode_seconds=0.1,
+    )
+    assert metrics.timed_decode_tokens == timed_decode_tokens
 
 
 def test_deadline_overshoot_is_visible_instead_of_hidden() -> None:

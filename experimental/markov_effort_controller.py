@@ -221,6 +221,17 @@ class GenerationMetrics:
     def total_seconds(self) -> float:
         return self.prefill_seconds + self.decode_seconds + self.other_seconds
 
+    @property
+    def timed_decode_tokens(self) -> int:
+        """Tokens whose production is covered by ``decode_seconds``.
+
+        The backend records ``decode_seconds`` after the first token has been
+        produced, so only tokens after that first token belong in the matching
+        throughput numerator.
+        """
+
+        return max(self.output_tokens - 1, 0)
+
 
 @dataclass(frozen=True)
 class CandidateEvidence:
@@ -460,6 +471,29 @@ def _best_node(nodes: tuple[CandidateNode, ...]) -> CandidateNode:
     return max(nodes, key=rank)
 
 
+def deterministic_generation_seed(
+    *,
+    seed_salt: str,
+    request_id: str,
+    node_id: int,
+    action: ControllerAction,
+) -> int:
+    """Derive a replayable generation seed independent of routing context.
+
+    Routing buckets and effort tiers may alter policy lookup, but must not
+    alter a candidate shared across matched experimental conditions.
+    """
+
+    if not seed_salt or not request_id:
+        raise ValueError("seed_salt and request_id must not be empty")
+    if type(node_id) is not int or node_id < 0:
+        raise ValueError("node_id must be a non-negative integer")
+    if not isinstance(action, ControllerAction) or not action.generates_candidate:
+        raise ValueError("action must generate a candidate")
+    payload = f"{seed_salt}\0{request_id}\0{node_id}\0{action.value}".encode()
+    return int.from_bytes(hashlib.blake2s(payload, digest_size=4).digest(), "big")
+
+
 class MarkovTreeEffortController:
     """Finite-state greedy Markov policy over a bounded candidate tree.
 
@@ -507,11 +541,12 @@ class MarkovTreeEffortController:
         return ControllerState(request_id, context_bucket, self.tier)
 
     def _seed(self, state: ControllerState, action: ControllerAction, node_id: int) -> int:
-        payload = (
-            f"{self.seed_salt}\0{state.request_id}\0{state.context_bucket}\0"
-            f"{node_id}\0{action.value}"
-        ).encode()
-        return int.from_bytes(hashlib.blake2s(payload, digest_size=4).digest(), "big")
+        return deterministic_generation_seed(
+            seed_salt=self.seed_salt,
+            request_id=state.request_id,
+            node_id=node_id,
+            action=action,
+        )
 
     def _terminal_decision(
         self,
@@ -755,7 +790,9 @@ def trace_metrics(
     baseline_evidence = state.nodes[0].evidence
     all_metrics = [node.evidence.metrics for node in state.nodes]
     prompt_tokens = sum(metrics.prompt_tokens for metrics in all_metrics)
-    output_tokens = sum(metrics.output_tokens for metrics in all_metrics)
+    timed_decode_tokens = sum(
+        metrics.timed_decode_tokens for metrics in all_metrics
+    )
     prefill_seconds = sum(metrics.prefill_seconds for metrics in all_metrics)
     decode_seconds = sum(metrics.decode_seconds for metrics in all_metrics)
     generation_seconds = sum(metrics.total_seconds for metrics in all_metrics)
@@ -772,8 +809,11 @@ def trace_metrics(
         baseline.prefill_seconds,
     )
     aggregate_prefill_tps = _safe_rate(prompt_tokens, prefill_seconds)
-    baseline_decode_tps = _safe_rate(baseline.output_tokens, baseline.decode_seconds)
-    aggregate_decode_tps = _safe_rate(output_tokens, decode_seconds)
+    baseline_decode_tps = _safe_rate(
+        baseline.timed_decode_tokens,
+        baseline.decode_seconds,
+    )
+    aggregate_decode_tps = _safe_rate(timed_decode_tokens, decode_seconds)
 
     selected_id = state.selected_node_id
     selected = (
