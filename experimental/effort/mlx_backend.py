@@ -523,6 +523,7 @@ class MLXEffortGenerator:
         model_id: str,
         *,
         revision: str | None = None,
+        audited_model_id: str | None = None,
         adapter_path: str | None = None,
         lazy: bool = False,
         settings: MLXSamplerSettings | None = None,
@@ -537,11 +538,15 @@ class MLXEffortGenerator:
             adapter_path=adapter_path,
             lazy=lazy,
         )
-        audited_model_id = f"{model_id}@{revision}" if revision else model_id
+        resolved_audit_id = (
+            audited_model_id
+            if audited_model_id is not None
+            else (f"{model_id}@{revision}" if revision else model_id)
+        )
         return cls(
             model,
             tokenizer,
-            model_id=audited_model_id,
+            model_id=resolved_audit_id,
             settings=settings,
         )
 

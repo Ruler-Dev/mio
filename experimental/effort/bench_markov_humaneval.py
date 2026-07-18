@@ -66,6 +66,11 @@ from experimental.effort.markov_runner import (
     PublicGenerationFeedback,
     run_markov_effort,
 )
+from experimental.effort.model_identity import (
+    ModelIdentityError,
+    ResolvedModelReference,
+    resolve_model_reference,
+)
 from experimental.effort.statistics_v2 import (
     EffortStatisticsRow,
     PreregisteredGatePolicy,
@@ -1833,13 +1838,13 @@ def _package_version(name: str) -> str:
 
 def _runtime_identity(
     *,
-    model: str,
-    model_revision: str,
+    resolved_model: ResolvedModelReference,
     initial_max_output_tokens: int,
     renormalize_uncertainty_logprobs: bool = False,
     uncertainty_logprob_stride: int = 1,
 ) -> CalibrationIdentity:
-    # Importing the adapter is cheap; model weights and MLX itself remain lazy.
+    # Importing the adapter is cheap; model loading happens only after this
+    # content-bound identity has been constructed from the shared resolution.
     from experimental.effort.mlx_backend import (
         MLXSamplerSettings,
         PROMPT_REVISION,
@@ -1851,7 +1856,7 @@ def _runtime_identity(
         uncertainty_logprob_stride=uncertainty_logprob_stride,
     )
     return CalibrationIdentity(
-        model=f"{model}@{model_revision}",
+        model=resolved_model.canonical_model_id,
         config=_canonical_sha256(
             {
                 "protocol": PROTOCOL_REVISION,
@@ -1871,8 +1876,7 @@ def _runtime_identity(
 
 
 def _build_generator(
-    model: str,
-    model_revision: str,
+    resolved_model: ResolvedModelReference,
     *,
     renormalize_uncertainty_logprobs: bool = False,
     uncertainty_logprob_stride: int = 1,
@@ -1880,9 +1884,10 @@ def _build_generator(
     from experimental.effort.mlx_backend import MLXEffortGenerator, MLXSamplerSettings
 
     return MLXEffortGenerator.from_pretrained(
-        model,
-        revision=model_revision,
-        lazy=True,
+        resolved_model.load_model_id,
+        revision=resolved_model.load_revision,
+        audited_model_id=resolved_model.canonical_model_id,
+        lazy=False,
         settings=MLXSamplerSettings(
             renormalize_uncertainty_logprobs=renormalize_uncertainty_logprobs,
             uncertainty_logprob_stride=uncertainty_logprob_stride,
@@ -1898,6 +1903,7 @@ def _source_hashes() -> dict[str, str]:
         "runner": Path(__file__).with_name("markov_runner.py"),
         "humaneval": Path(__file__).with_name("humaneval.py"),
         "mlx_backend": Path(__file__).with_name("mlx_backend.py"),
+        "model_identity": Path(__file__).with_name("model_identity.py"),
         "statistics": Path(__file__).with_name("statistics_v2.py"),
         "verifier_parity_certificate": VERIFIER_PARITY_CERTIFICATE_PATH,
     }
@@ -1986,7 +1992,11 @@ def _base_parser() -> argparse.ArgumentParser:
 
     calibrate = subparsers.add_parser("calibrate", help="fit frozen calibration artifacts")
     calibrate.add_argument("--model", default=DEFAULT_MODEL)
-    calibrate.add_argument("--model-revision", required=True)
+    calibrate.add_argument(
+        "--model-revision",
+        required=True,
+        help="full Hugging Face commit or local-sha256-v1:<digest>",
+    )
     calibrate.add_argument("--corpus", type=Path)
     calibrate.add_argument("--output", type=Path, required=True)
     calibrate.add_argument("--initial-max-output-tokens", type=int, default=256)
@@ -2008,7 +2018,11 @@ def _base_parser() -> argparse.ArgumentParser:
 
     evaluate = subparsers.add_parser("evaluate", help="run paired five-tier evaluation")
     evaluate.add_argument("--model", default=DEFAULT_MODEL)
-    evaluate.add_argument("--model-revision", required=True)
+    evaluate.add_argument(
+        "--model-revision",
+        required=True,
+        help="must exactly match the frozen full commit or local fingerprint",
+    )
     evaluate.add_argument("--corpus", type=Path)
     evaluate.add_argument("--artifact", type=Path, required=True)
     evaluate.add_argument("--output", type=Path, required=True)
@@ -2034,19 +2048,27 @@ def _base_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _base_parser().parse_args(argv)
+    parity_identity = verifier_parity_certificate_identity()
+    if args.validator_timeout != parity_identity["timeout_seconds_per_task"]:
+        raise SystemExit(
+            "--validator-timeout must match the certified verifier timeout "
+            f"({parity_identity['timeout_seconds_per_task']:g} seconds)"
+        )
+    try:
+        resolved_model = resolve_model_reference(args.model, args.model_revision)
+    except ModelIdentityError as exc:
+        raise SystemExit(f"model identity error: {exc}") from exc
     corpus_path = args.corpus or fetch_humaneval()
     all_cases = load_humaneval(corpus_path)
     identity = _runtime_identity(
-        model=args.model,
-        model_revision=args.model_revision,
+        resolved_model=resolved_model,
         initial_max_output_tokens=args.initial_max_output_tokens,
         renormalize_uncertainty_logprobs=args.renormalize_uncertainty_logprobs,
         uncertainty_logprob_stride=args.uncertainty_logprob_stride,
     )
     if args.phase == "calibrate":
         generator = _build_generator(
-            args.model,
-            args.model_revision,
+            resolved_model,
             renormalize_uncertainty_logprobs=args.renormalize_uncertainty_logprobs,
             uncertainty_logprob_stride=args.uncertainty_logprob_stride,
         )
@@ -2061,7 +2083,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         manifest = corpus_manifest(cases)
         provenance = _make_provenance(
-            model_revision=args.model_revision,
+            model_revision=resolved_model.canonical_model_id,
             manifest=manifest,
             policy={"phase": "calibrate", "config": asdict(config)},
             split="calibration",
@@ -2094,8 +2116,7 @@ def main(argv: list[str] | None = None) -> int:
         expected_identity=identity,
     )
     generator = _build_generator(
-        args.model,
-        args.model_revision,
+        resolved_model,
         renormalize_uncertainty_logprobs=args.renormalize_uncertainty_logprobs,
         uncertainty_logprob_stride=args.uncertainty_logprob_stride,
     )
@@ -2103,7 +2124,7 @@ def main(argv: list[str] | None = None) -> int:
     manifest = corpus_manifest(cases)
     limited = args.limit is not None
     provenance = _make_provenance(
-        model_revision=args.model_revision,
+        model_revision=resolved_model.canonical_model_id,
         manifest=manifest,
         policy={
             "phase": "evaluate",

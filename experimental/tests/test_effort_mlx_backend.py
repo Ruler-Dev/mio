@@ -313,6 +313,34 @@ def test_generator_rejects_full_case_before_touching_runtime() -> None:
     assert generator.audit_records == ()
 
 
+def test_from_pretrained_uses_one_resolved_load_target_and_audit_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import mlx_lm.utils
+
+    calls: list[dict[str, object]] = []
+
+    def fake_load(model_id: str, **kwargs):
+        calls.append({"model_id": model_id, **kwargs})
+        return object(), _Tokenizer()
+
+    monkeypatch.setattr(mlx_lm.utils, "load", fake_load)
+    generator = MLXEffortGenerator.from_pretrained(
+        "/resolved/model",
+        revision=None,
+        audited_model_id="local-mlx@local-sha256-v1:abc",
+        lazy=False,
+    )
+
+    assert generator.model_id == "local-mlx@local-sha256-v1:abc"
+    assert calls == [{
+        "model_id": "/resolved/model",
+        "revision": None,
+        "adapter_path": None,
+        "lazy": False,
+    }]
+
+
 def test_optional_fp32_renormalization_recovers_bfloat16_zero_collapse() -> None:
     event = _Event(
         "return 1",
