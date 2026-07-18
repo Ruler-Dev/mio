@@ -1083,6 +1083,212 @@ def test_native_executor_resets_cache_conversation_and_injects_exact_budget(
     assert all(budget.max_wall_seconds == 1_800 for budget in budgets)
 
 
+def _raw_target_round(index: int, completion_tokens: int = 2, **changes):
+    values = {
+        "round_index": index,
+        "generation_backend": "baseline",
+        "fallback_ar": False,
+        "drafter_requested": "target_ar",
+        "drafter_selected": "baseline",
+        "drafter_ref": None,
+        "timing_source": "runtime_raw_ns",
+        "prefill_ns": 100,
+        "decode_ns": 200,
+        "model_total_ns": 300,
+        "completion_tokens": completion_tokens,
+        "physical_decode_tokens": completion_tokens + 1,
+    }
+    values.update(changes)
+    return SimpleNamespace(**values)
+
+
+def _raw_target_result():
+    return SimpleNamespace(
+        terminal_reason="model_final",
+        rounds=(_raw_target_round(0, 2), _raw_target_round(1, 3)),
+        completion_tokens=5,
+        quality_gate=None,
+        tool_calls=2,
+        tool_events=(
+            SimpleNamespace(sequence=0, telemetry_complete=True),
+            SimpleNamespace(sequence=1, telemetry_complete=True),
+        ),
+        tool_telemetry_complete=True,
+        wall_time_s=0.5,
+    )
+
+
+def _raw_target_native_request(tmp_path: Path):
+    from mio.agent_policy import AgentToolPolicy
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    registry, specs, _digest = runner.build_identical_tool_surface(_agent_module())
+    return runner.ArmRunRequest(
+        entry=protocol.ScheduleEntry(
+            pair_index=0,
+            execution_index=0,
+            instance_id="owner__repository-1",
+            instance_digest=protocol._instance_digest("owner__repository-1"),
+            condition="gate_off",
+            position_in_pair=0,
+        ),
+        instruction="safe public task",
+        workspace=workspace,
+        cache_directory=cache,
+        tool_registry=registry,
+        tool_specs=specs,
+        tool_policy=AgentToolPolicy.coding_workspace(workspace, allow_network=False),
+        quality_gate_enabled=False,
+        coding_effort="medium",
+        seed=1,
+    )
+
+
+def test_native_raw_target_telemetry_admits_complete_contiguous_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mio import agent
+
+    engine = SimpleNamespace(
+        tier_config=_tier(),
+        _draft_model=None,
+        _dspark_runtime=None,
+        _prefix_cache={},
+        _last_prompt_tokens=[],
+        _pending_assistant_prefill="",
+        _prefix_cache_invalidate=lambda: None,
+    )
+    native = runner.NativeMioArmExecutor(
+        engine=engine,
+        manager=object(),
+        config=object(),
+        tier="large",
+        require_raw_target_telemetry=True,
+    )
+    result = _raw_target_result()
+    monkeypatch.setattr(agent, "_process_user_input", lambda *_args, **_kwargs: result)
+
+    outcome = native(_raw_target_native_request(tmp_path))
+
+    assert outcome.status == "completed"
+    assert outcome.output_tokens == 5
+    assert outcome.tool_calls == 2
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    (
+        ("empty_rounds", "at least one model round"),
+        ("noncontiguous_rounds", "zero-based and contiguous"),
+        ("backend", "target_ar/baseline/no-drafter"),
+        ("requested", "target_ar/baseline/no-drafter"),
+        ("selected", "target_ar/baseline/no-drafter"),
+        ("drafter_ref", "target_ar/baseline/no-drafter"),
+        ("timing_source", "runtime_raw_ns"),
+        ("phase_sum", "prefill plus decode"),
+        ("physical_decode", "physical decode work"),
+        ("tool_incomplete", "tool telemetry is incomplete"),
+        ("tool_count", "exactly one trace per tool call"),
+        ("tool_sequence", "tool traces must be zero-based and contiguous"),
+        ("tool_trace_incomplete", "tool trace is incomplete"),
+        ("delivered_total", "delivered-token total"),
+    ),
+)
+def test_native_raw_target_telemetry_rejects_incomplete_or_mismatched_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    message: str,
+) -> None:
+    from mio import agent
+
+    engine = SimpleNamespace(
+        tier_config=_tier(),
+        _draft_model=None,
+        _dspark_runtime=None,
+        _prefix_cache={},
+        _last_prompt_tokens=[],
+        _pending_assistant_prefill="",
+        _prefix_cache_invalidate=lambda: None,
+    )
+    native = runner.NativeMioArmExecutor(
+        engine=engine,
+        manager=object(),
+        config=object(),
+        tier="large",
+        require_raw_target_telemetry=True,
+    )
+    result = _raw_target_result()
+    if case == "empty_rounds":
+        result.rounds = ()
+    elif case == "noncontiguous_rounds":
+        result.rounds = (result.rounds[0], _raw_target_round(2, 3))
+    elif case == "backend":
+        result.rounds[0].generation_backend = "dflash"
+    elif case == "requested":
+        result.rounds[0].drafter_requested = "auto"
+    elif case == "selected":
+        result.rounds[0].drafter_selected = "dflash"
+    elif case == "drafter_ref":
+        result.rounds[0].drafter_ref = "local-draft"
+    elif case == "timing_source":
+        result.rounds[0].timing_source = "derived_legacy_us"
+    elif case == "phase_sum":
+        result.rounds[0].model_total_ns = 301
+    elif case == "physical_decode":
+        result.rounds[0].physical_decode_tokens = 1
+    elif case == "tool_incomplete":
+        result.tool_telemetry_complete = False
+    elif case == "tool_count":
+        result.tool_events = result.tool_events[:1]
+    elif case == "tool_sequence":
+        result.tool_events[1].sequence = 2
+    elif case == "tool_trace_incomplete":
+        result.tool_events[0].telemetry_complete = False
+    elif case == "delivered_total":
+        result.completion_tokens = 6
+    monkeypatch.setattr(agent, "_process_user_input", lambda *_args, **_kwargs: result)
+
+    with pytest.raises(protocol.ProtocolError, match=message):
+        native(_raw_target_native_request(tmp_path))
+
+
+def test_native_raw_target_telemetry_rejects_unstructured_model_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mio import agent
+
+    engine = SimpleNamespace(
+        tier_config=_tier(),
+        _draft_model=None,
+        _dspark_runtime=None,
+        _prefix_cache={},
+        _last_prompt_tokens=[],
+        _pending_assistant_prefill="",
+        _prefix_cache_invalidate=lambda: None,
+    )
+    native = runner.NativeMioArmExecutor(
+        engine=engine,
+        manager=object(),
+        config=object(),
+        tier="large",
+        require_raw_target_telemetry=True,
+    )
+    monkeypatch.setattr(
+        agent,
+        "_process_user_input",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("model failed")),
+    )
+
+    with pytest.raises(protocol.ProtocolError, match="without a structured result"):
+        native(_raw_target_native_request(tmp_path))
+
+
 def test_native_model_exception_is_sealed_as_nonretryable_outcome(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

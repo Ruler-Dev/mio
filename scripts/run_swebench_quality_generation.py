@@ -805,6 +805,8 @@ def _executor_model_binding_document(
         "engine_loaded": True,
         "configured_and_loaded_model_paths_identical": True,
         "model_identity": binding.model_identity,
+        "raw_target_telemetry_required": executor.require_raw_target_telemetry,
+        "raw_target_telemetry_receipt_bound": False,
     }
 
 
@@ -1796,14 +1798,88 @@ def verify_generation_receipt(
 
 
 class NativeMioArmExecutor:
-    """Adapter for one loaded target-only Mio engine with fresh state per arm."""
+    """Adapter for one loaded target-only Mio engine with fresh state per arm.
 
-    def __init__(self, *, engine: Any, manager: Any, config: Any, tier: str) -> None:
+    ``require_raw_target_telemetry`` is opt-in so existing non-benchmark callers
+    remain compatible.  When enabled, every arm must expose contiguous,
+    content-free raw round/tool traces before an outcome can be returned.  The
+    v1 checkpoint and receipt do not persist those traces, so this runtime
+    admission check does not make a smoke result confirmatory evidence.
+    """
+
+    def __init__(
+        self,
+        *,
+        engine: Any,
+        manager: Any,
+        config: Any,
+        tier: str,
+        require_raw_target_telemetry: bool = False,
+    ) -> None:
+        if not isinstance(require_raw_target_telemetry, bool):
+            raise protocol.ProtocolError("raw target telemetry flag must be boolean")
         validate_target_only_tier(getattr(engine, "tier_config", None))
         self.engine = engine
         self.manager = manager
         self.config = config
         self.tier = tier
+        self.require_raw_target_telemetry = require_raw_target_telemetry
+
+    @staticmethod
+    def _trace_nonnegative_int(trace: Any, name: str) -> int:
+        value = getattr(trace, name, None)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise protocol.ProtocolError(f"raw target round {name} must be a non-negative integer")
+        return value
+
+    def _validate_raw_target_result(self, result: Any) -> None:
+        if not self.require_raw_target_telemetry:
+            return
+        rounds = tuple(getattr(result, "rounds", ()) or ())
+        if not rounds:
+            raise protocol.ProtocolError("raw target telemetry requires at least one model round")
+        for expected_index, trace in enumerate(rounds):
+            if getattr(trace, "round_index", None) != expected_index:
+                raise protocol.ProtocolError("raw target round indexes must be zero-based and contiguous")
+            if (
+                getattr(trace, "generation_backend", None) != "baseline"
+                or getattr(trace, "fallback_ar", None) is not False
+                or getattr(trace, "drafter_requested", None) != "target_ar"
+                or getattr(trace, "drafter_selected", None) != "baseline"
+                or getattr(trace, "drafter_ref", None) is not None
+            ):
+                raise protocol.ProtocolError("raw target round differs from target_ar/baseline/no-drafter")
+            if getattr(trace, "timing_source", None) != "runtime_raw_ns":
+                raise protocol.ProtocolError("raw target round timing source is not runtime_raw_ns")
+            prefill_ns = self._trace_nonnegative_int(trace, "prefill_ns")
+            decode_ns = self._trace_nonnegative_int(trace, "decode_ns")
+            model_total_ns = self._trace_nonnegative_int(trace, "model_total_ns")
+            completion_tokens = self._trace_nonnegative_int(trace, "completion_tokens")
+            physical_decode_tokens = self._trace_nonnegative_int(trace, "physical_decode_tokens")
+            if model_total_ns != prefill_ns + decode_ns:
+                raise protocol.ProtocolError("raw target model time differs from prefill plus decode")
+            if physical_decode_tokens < completion_tokens:
+                raise protocol.ProtocolError("raw target physical decode work is below delivered completion tokens")
+
+        tool_calls = getattr(result, "tool_calls", None)
+        if isinstance(tool_calls, bool) or not isinstance(tool_calls, int) or tool_calls < 0:
+            raise protocol.ProtocolError("raw target tool-call count is invalid")
+        tool_events = tuple(getattr(result, "tool_events", ()) or ())
+        if getattr(result, "tool_telemetry_complete", None) is not True:
+            raise protocol.ProtocolError("raw target tool telemetry is incomplete")
+        if len(tool_events) != tool_calls:
+            raise protocol.ProtocolError("raw target telemetry requires exactly one trace per tool call")
+        for sequence, trace in enumerate(tool_events):
+            if getattr(trace, "sequence", None) != sequence:
+                raise protocol.ProtocolError("raw target tool traces must be zero-based and contiguous")
+            if getattr(trace, "telemetry_complete", None) is not True:
+                raise protocol.ProtocolError("raw target tool trace is incomplete")
+
+        delivered = getattr(result, "completion_tokens", None)
+        if isinstance(delivered, bool) or not isinstance(delivered, int) or delivered < 0:
+            raise protocol.ProtocolError("raw target delivered-token count is invalid")
+        if delivered != sum(self._trace_nonnegative_int(trace, "completion_tokens") for trace in rounds):
+            raise protocol.ProtocolError("raw target delivered-token total differs from round completion tokens")
 
     def _assert_manager_engine_identity(self) -> None:
         loaded_tiers = getattr(self.manager, "loaded_tiers", None)
@@ -1876,6 +1952,10 @@ class NativeMioArmExecutor:
                     raise protocol.ProtocolError(
                         "model exception exceeded the frozen wall cap; v2 overrun adjudication is required"
                     ) from None
+                if self.require_raw_target_telemetry:
+                    raise protocol.ProtocolError(
+                        "raw target telemetry-required arm ended without a structured result"
+                    ) from None
                 return ArmRunOutcome(
                     status="model_error",
                     quality_gate_decision=("incomplete" if request.quality_gate_enabled else "not_applicable"),
@@ -1883,6 +1963,7 @@ class NativeMioArmExecutor:
                 )
         finally:
             agent.console = previous_console
+        self._validate_raw_target_result(result)
         rounds = tuple(getattr(result, "rounds", ()) or ())
         output_tokens = int(
             getattr(result, "completion_tokens", 0)
