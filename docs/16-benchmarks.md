@@ -295,6 +295,11 @@ Currently supported:
   parity and warrants stronger validation;
 - the two-pair Qwen 3.6 27B Verified smoke resolved 0/2 for both Plain and
   Quality; Quality produced the only non-empty patch, but it was unresolved.
+- Quality Gate v2 closes the two procedural failures diagnosed from that smoke:
+  unchanged/reverted change tasks are incomplete, and the last bounded round
+  can use a restricted `validate` recovery without increasing the 12-round
+  ceiling. This is an implementation claim, not evidence of higher task
+  quality.
 
 Not currently supported:
 
@@ -305,6 +310,9 @@ Not currently supported:
 - TurboQuant memory savings on long context;
 - improved coding-agent quality from MCP, skills, Caveman, Ponytail, or
   Headroom or the Quality gate;
+- either an intrinsic tok/s loss or speedup from Quality v2. It uses the same
+  MLX backend, while extra prompts and validation can change end-to-end agent
+  wall time and must be reported separately;
 - a scientific breakthrough.
 
 ## Adding a result

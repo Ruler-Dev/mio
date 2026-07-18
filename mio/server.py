@@ -719,7 +719,8 @@ _TOOL_ACTION_REMINDER = (
     "\n\nReminder: respond ONLY with a single <tool_call>...</tool_call> block "
     "as specified above. Do not narrate what you will do. Do not write "
     "'Now I'll ...' or similar prose. Emit the tool call directly. To modify "
-    "files use write/edit tools; to run commands use bash. Empty prose without "
+    "files use write/edit tools; for validation use validate when provided, and "
+    "use bash only for other shell commands. Empty prose without "
     "a tool call is always incorrect when tools are available."
 )
 

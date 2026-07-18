@@ -58,7 +58,7 @@ from scripts.bench_coding_quality import (  # noqa: E402
 
 
 _PUBLIC_TOOL_NAMES = ("bash", "read", "write", "edit")
-_GATE_TOOL_NAMES = (*_PUBLIC_TOOL_NAMES, "validate")
+_GATE_TOOL_NAMES = ("validate", *_PUBLIC_TOOL_NAMES)
 
 RESULT_ENVELOPE_SCHEMA = "mio.coding-quality-result-envelope.v1"
 SOURCE_LOCK_SCHEMA = "mio.coding-quality-source-lock.v1"
@@ -87,9 +87,17 @@ FROZEN_SOFTWARE_VERSIONS = (
     ("mlx-vlm", "0.6.5"),
     ("transformers", "5.14.1"),
 )
-GATE_PROFILE_SCHEMA = "mio.coding-quality-effort-profiles.v1"
+GATE_PROFILE_SCHEMA = "mio.coding-quality-effort-profiles.v2"
 _GATE_PROFILE_MANIFEST = {
     "schema": GATE_PROFILE_SCHEMA,
+    "completion_contract": {
+        "gate_off": "none",
+        "gate_on": "net_workspace_change",
+    },
+    "validation_evidence_tool": "validate",
+    "gate_on_tool_order": list(_GATE_TOOL_NAMES),
+    "max_model_rounds": 12,
+    "last_round_quality_recovery": True,
     "profiles": {
         "low": {"code": ["any_validation"], "docs": ["any_validation"]},
         "medium": {"code": ["test_or_build"], "docs": ["diff"]},
@@ -108,7 +116,7 @@ _COMPUTED_GATE_PROFILE_SHA256 = hashlib.sha256(
         separators=(",", ":"),
     ).encode("utf-8")
 ).hexdigest()
-GATE_PROFILE_SHA256 = "f522ac26d7b49c55e0c048e119e42802ff4b35da7223bf12b1f5e200fbb5208b"
+GATE_PROFILE_SHA256 = "aa5b24c3d98e5f7d294d4329e76a3259c9d6134b4addd9d2ac6b326a9c8a5585"
 
 # These are every behavior- or timing-affecting environment override consulted
 # by the native DFlash path.  A scientific run uses the checked-in defaults;
@@ -387,6 +395,14 @@ def _assert_gate_profile_seal() -> None:
             observed_profiles[effort][change_kind] = list(required)
     observed_manifest = {
         "schema": GATE_PROFILE_SCHEMA,
+        "completion_contract": {
+            "gate_off": "none",
+            "gate_on": "net_workspace_change",
+        },
+        "validation_evidence_tool": "validate",
+        "gate_on_tool_order": list(_GATE_TOOL_NAMES),
+        "max_model_rounds": 12,
+        "last_round_quality_recovery": True,
         "profiles": observed_profiles,
     }
     observed_sha256 = hashlib.sha256(
@@ -1194,9 +1210,9 @@ def protocol_suite_sha256(
 # Explicit private-protocol seals.  Updating a hidden oracle, edit scope,
 # timeout, schedule seed, or analysis threshold requires a reviewed protocol
 # revision and new constants before any generation can start.
-SMOKE_PROTOCOL_SHA256 = "3d595244487a82471a1ac596fd0f29be495bf3b0e63d8a42e1cfad0985553cf3"
-DEVELOPMENT_PROTOCOL_SHA256 = "f93ca2da59a4e1a3f4cd74bc146b508dfbb68e3e1b4c96eecca5880dcd0ccd0f"
-ALL_PROTOCOL_SHA256 = "4077241ce159be68f755c5d083f5e4d99f7d786c075c2e5de23a24ff304b147d"
+SMOKE_PROTOCOL_SHA256 = "d5a65bdea7edd992976aee5f1a39794b21dc94072cf73a45f9f2f359ac8c6140"
+DEVELOPMENT_PROTOCOL_SHA256 = "7580199fc4535a79d44e9cfda6a51b01cc38db5295ebfc6a0fdb55c64168edef"
+ALL_PROTOCOL_SHA256 = "dc12b7f06312e4128d3276504099ed4b98aa1a5e87fce8e240490f392c53f0e4"
 
 
 def sealed_protocol_sha256(cases: Sequence[CorpusCase]) -> str:
@@ -1360,6 +1376,7 @@ class NativeAgentTurnExecutor:
             "tool_specs": tuple(tool_specs),
             "messages": [],
             "quality_gate_enabled": quality_gate_enabled,
+            "quality_gate_require_change": quality_gate_enabled,
             "coding_effort": effort,
         }
         previous_console = agent.console

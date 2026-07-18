@@ -151,6 +151,53 @@ regression test, restored the exact pre-run base manifest, and reran into a new
 output root. The successful receipt proves the base-prefix digest remained
 `975423477c9a5ebfe0e900fd92feae23cb44b29c10ff3169af09b50601ba5239`.
 
+### Post-smoke diagnosis and Quality Gate v2
+
+The null smoke is retained as pre-v2 evidence and is not reinterpreted. Its
+content-free trace exposed two generic failures: one Quality arm produced no
+mutation yet serialized as satisfied, while the other edited late, attempted
+validation through Bash, and reached a tool-free final round with zero trusted
+`validate` attempts.
+
+Quality Gate v2 changes the intervention before any confirmatory run:
+
+- a trusted change contract requires a real net workspace delta;
+- an identical write or edit followed by revert remains incomplete and cannot
+  pass after validation;
+- no-delta obligations are reported for the current turn but are not persisted
+  into a later turn, avoiding pressure to create cosmetic edits;
+- `validate` precedes Bash in the tool surface, and Bash output remains worth
+  zero validation credit;
+- the final round is tool-capable. When Quality is dirty, its schema is
+  restricted to `validate`; after a failed validation it may use bounded
+  read/edit/write/validate recovery. A final tool call receives deterministic
+  budget status and no thirteenth model round;
+- v2 reports validate invocations, recognized validation attempts and narrowly
+  detected validation commands misrouted through Bash as separate counters.
+
+This scheduler keeps the same maximum model rounds, but it does not promise
+equal wall time: extra Quality feedback and real tests consume prompt, model
+and tool time. It does not change the MLX prefill/decode implementation, so raw
+tok/s must be measured independently from end-to-end agent latency.
+
+Before another 27B smoke, the public/synthetic MioCodeBench `smoke` split is
+the calibration set (4 pairs) and `development` is a one-use internal holdout
+(8 pairs). Neither is large enough for a scientific quality claim. The
+precommitted go/no-go limits are:
+
+| criterion | calibration | internal holdout |
+|---|---:|---:|
+| Quality task pass | at least 3/4 | at least 6/8 |
+| Plain-only paired wins | 0 | 0 |
+| Quality pass rate | at least Plain | at least Plain |
+| Quality/Plain wall ratio | at most 1.30 | at most 1.25 |
+| Quality/Plain model-seconds ratio | at most 1.25 | at most 1.25 |
+| Quality/Plain output-token ratio | at most 1.15 | at most 1.10 |
+
+A fresh 27B non-evidence smoke proceeds only if those correctness and cost
+gates pass. The 500-pair Verified run remains the only planned confirmatory
+quality study.
+
 The primary outcome is the official harness `resolved` result. The primary
 estimand is:
 

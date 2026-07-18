@@ -617,6 +617,18 @@ quality nor a speed improvement is supported. The source-free result is
 [`benchmarks/results/swebench-quality-27b-smoke-0fd8389.json`](benchmarks/results/swebench-quality-27b-smoke-0fd8389.json);
 the mandatory 500-pair study remains outstanding.
 
+The smoke also exposed two generic agent-loop defects, now addressed by the
+Quality Gate v2 implementation. A trusted change task can no longer finish as
+“satisfied” with an unchanged tree, and a write-identical/edit-revert sequence
+cannot manufacture completion: certification requires a net workspace delta.
+The final bounded model round remains tool-capable for a restricted
+`validate` recovery, `validate` is listed before Bash, and telemetry separates
+validate invocations, recognized evidence, and validation-like commands sent
+to Bash. These changes do not alter MLX prefill or decode kernels, so they do
+not intrinsically reduce tok/s; they can add agent-level prompt/tool wall time.
+Their quality/cost effect is not yet established and will be calibrated on the
+paired MioCodeBench smoke/development splits before another 27B run.
+
 Mio has not yet measured general edit correctness, tool-call accuracy,
 Caveman/Ponytail quality, long-context scaling, or multi-user throughput. A
 result will be called a breakthrough only if independent reruns show a Pareto

@@ -491,7 +491,7 @@ def test_tool_surfaces_exclude_mcp_and_skills_and_only_gate_on_gets_validate() -
     on_registry, on_specs = build_agent_tool_surface(GATE_ON, fake_agent)
 
     assert tuple(off_registry) == ("bash", "read", "write", "edit")
-    assert tuple(on_registry) == ("bash", "read", "write", "edit", "validate")
+    assert tuple(on_registry) == ("validate", "bash", "read", "write", "edit")
     assert [item["function"]["name"] for item in off_specs] == list(off_registry)
     assert [item["function"]["name"] for item in on_specs] == list(on_registry)
 
@@ -576,7 +576,7 @@ def test_real_runner_resets_identical_fixture_bytes_and_disables_network(tmp_pat
     assert [call["quality_gate_enabled"] for call in calls] == [False, True]
     assert [tuple(call["tool_registry"]) for call in calls] == [
         ("bash", "read", "write", "edit"),
-        ("bash", "read", "write", "edit", "validate"),
+        ("validate", "bash", "read", "write", "edit"),
     ]
     assert all("network" not in {permission.value for permission in call["tool_policy"].permissions} for call in calls)
 

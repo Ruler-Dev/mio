@@ -54,6 +54,39 @@ _FINALIZE_TOOL_LOOP = (
     "Give a concise, evidence-based status with files changed, latest validation "
     "or test outcome, and any unfinished work or limitation."
 )
+_LAST_MODEL_ROUND = (
+    "This is the final model round allowed by the trusted execution budget. "
+    "If work or coding-quality evidence is still missing, call every necessary "
+    "tool now; use the dedicated validate tool, never bash, for test/build/static/diff "
+    "evidence. No later model round can inspect these tool results. Otherwise give the "
+    "final evidence-based status now."
+)
+_QUALITY_CLOSURE = (
+    "Coding-quality closure window: finish any justified workspace change now and "
+    "reserve the final round for direct-argv validate evidence. Do not spend the "
+    "remaining budget on repeated observation or bash-based validation."
+)
+
+
+def _tool_schema_name(spec: object) -> str | None:
+    if not isinstance(spec, Mapping):
+        return None
+    function = spec.get("function")
+    if not isinstance(function, Mapping):
+        return None
+    name = function.get("name")
+    return name if isinstance(name, str) and name else None
+
+
+def _quality_recovery_tool_specs(
+    tool_specs: list | tuple,
+    *,
+    phase: str,
+) -> tuple[dict, ...]:
+    allowed = {"read", "edit", "write", "validate"}
+    if phase == "dirty":
+        allowed = {"validate"}
+    return tuple(spec for spec in tool_specs if _tool_schema_name(spec) in allowed)
 
 
 @dataclass(frozen=True)
@@ -432,7 +465,8 @@ If you encounter an error, fix it and retry.
 Use tools without narrating obvious steps or echoing tool-call XML. Do not repeat an
 identical tool call unless its inputs or relevant state changed, or the previous
 result explains why a retry can succeed. After edits, run the narrowest relevant
-validation. Finish with changed files, observed test/command outcome, and any real
+check with the dedicated validate tool; do not use bash as validation evidence.
+Finish with changed files, observed test/command outcome, and any real
 limitation; do not paste full code or command output unless the user asks.
 File tools are confined to declared workspace roots. Write, edit, and shell
 tools work only when the trusted caller explicitly granted their capability."""
@@ -1848,20 +1882,6 @@ AGENT_TOOLS_SPEC = [
     {
         "type": "function",
         "function": {
-            "name": "bash",
-            "description": "Run a zsh command (including pipes, redirections, and scripts) in an inherited workspace sandbox. Requires the caller's shell grant; network needs a separate caller grant; output and runtime are capped.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "command": {"type": "string", "description": "Shell command to run"},
-                },
-                "required": ["command"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "validate",
             "description": (
                 "Run a recognized test, static check, build, or workspace-hygiene check as direct argv. "
@@ -1882,6 +1902,20 @@ AGENT_TOOLS_SPEC = [
                     },
                 },
                 "required": ["argv"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": "Run a zsh command (including pipes, redirections, and scripts) in an inherited workspace sandbox. Bash output never counts as coding-quality validation evidence. Requires the caller's shell grant; network needs a separate caller grant; output and runtime are capped.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Shell command to run"},
+                },
+                "required": ["command"],
             },
         },
     },
@@ -2354,10 +2388,12 @@ def _process_user_input(
 ) -> AgentTurnResult:
     """Process a user message: build prompt, generate, run any tool calls
     the model emits, feed the results back, and repeat until the model
-    stops calling tools. The last bounded model round is reserved for a
-    no-tools status synthesis when execution has not converged. Without this
-    loop the model would just emit <tool_call>…</tool_call> tags as literal
-    text and the file would never actually be written.
+    stops calling tools. Forced resource exhaustion still reserves a no-tools
+    status synthesis when possible; the ordinary last model round remains
+    tool-capable so a late quality obligation can be closed without increasing
+    the trusted round cap. Without this loop the model would just emit
+    <tool_call>…</tool_call> tags as literal text and the file would never
+    actually be written.
     """
     turn_started = time.perf_counter()
     raw_execution_budget = state.get("execution_budget")
@@ -2402,6 +2438,10 @@ def _process_user_input(
     if bool(state.get("quality_gate_enabled", False)):
         from mio.coding_quality import CodingQualityGate
 
+        require_change = state.get("quality_gate_require_change")
+        if require_change is not None and not isinstance(require_change, bool):
+            raise TypeError("state.quality_gate_require_change must be boolean or None")
+
         pending_gate = state.get("_quality_gate")
         pending_roots_match = isinstance(pending_gate, CodingQualityGate) and tuple(pending_gate.roots) == tuple(
             execution_policy.workspace_roots
@@ -2411,7 +2451,7 @@ def _process_user_input(
             # workspace mutation was still landing. Reconcile before deciding
             # that the stored certificate can be discarded.
             pending_gate.refresh()
-        if pending_roots_match and not pending_gate.decision().satisfied:
+        if pending_roots_match and pending_gate.should_persist():
             quality_gate = pending_gate
         else:
             quality_gate = CodingQualityGate.start(
@@ -2419,6 +2459,7 @@ def _process_user_input(
                 user_input,
                 effort=str(state.get("coding_effort", "medium")),
                 enabled=True,
+                require_net_workspace_change=require_change,
             )
         # Persist the live object before model execution.  Tool mutations update
         # it in place, so an interrupt or generation exception cannot erase an
@@ -2462,12 +2503,13 @@ def _process_user_input(
                 f"Agent execution stopped: {budget_exhaustion}. No additional model round or tool call was executed."
             )
             break
+        last_model_round = _round_idx == execution_budget.max_rounds - 1
+        remaining_model_rounds = execution_budget.max_rounds - _round_idx
         finalization_reason = forced_finalization_reason
-        if finalization_reason is None and _round_idx == execution_budget.max_rounds - 1:
-            finalization_reason = f"model round limit {execution_budget.max_rounds} reached"
         finalization_only = finalization_reason is not None
         generation_messages = current_messages
         generation_tools = tool_specs
+        restricted_quality_tool_names: frozenset[str] | None = None
         if finalization_only:
             generation_messages = list(current_messages) + [
                 {
@@ -2479,6 +2521,28 @@ def _process_user_input(
             # tool schema prevents one more mutation from silently exceeding
             # the model-round, call-count, or result-size budget.
             generation_tools = None
+        elif last_model_round:
+            generation_messages = list(current_messages) + [
+                {"role": "user", "content": _LAST_MODEL_ROUND}
+            ]
+            if quality_gate is not None and not quality_gate.decision().satisfied:
+                generation_tools = _quality_recovery_tool_specs(
+                    tool_specs,
+                    phase=quality_gate.decision().phase,
+                )
+                restricted_quality_tool_names = frozenset(
+                    name
+                    for spec in generation_tools
+                    if (name := _tool_schema_name(spec)) is not None
+                )
+        elif (
+            remaining_model_rounds == 2
+            and quality_gate is not None
+            and not quality_gate.decision().satisfied
+        ):
+            generation_messages = list(current_messages) + [
+                {"role": "user", "content": _QUALITY_CLOSURE}
+            ]
 
         configured_output_tokens = getattr(
             getattr(engine, "tier_config", None),
@@ -2647,6 +2711,19 @@ def _process_user_input(
                 quality_gate.refresh()
                 state["quality_gate_pending"] = not quality_gate.decision().satisfied
             if quality_gate is not None and not quality_gate.decision().satisfied:
+                if last_model_round:
+                    budget_exhaustion = f"model round limit {execution_budget.max_rounds} reached"
+                    quality_notice = (
+                        "Coding-quality gate: INCOMPLETE. The final model round did not "
+                        "supply the requested net change or trusted validation; no success "
+                        "is certified."
+                    )
+                    console.print(quality_notice, style="yellow")
+                    terminal_assistant_text = "\n\n".join(
+                        text for text in (visible_text, quality_notice) if text
+                    )
+                    terminal_reason = "quality_incomplete"
+                    break
                 quality_signature = quality_gate.feedback_signature()
                 if quality_signature in no_tool_reprompted_signatures:
                     quality_notice = (
@@ -2699,7 +2776,12 @@ def _process_user_input(
         ]
 
         for tc, name, args in invocations:
-            spec = tool_registry.get(name)
+            registered_spec = tool_registry.get(name)
+            restricted_tool_call = bool(
+                restricted_quality_tool_names is not None
+                and name not in restricted_quality_tool_names
+            )
+            spec = None if restricted_tool_call else registered_spec
             audit_start = len(audit_events)
             gate_before = None
             call_policy = execution_policy
@@ -2752,7 +2834,11 @@ def _process_user_input(
                 invocation_started_ns = time.perf_counter_ns()
                 try:
                     if not spec:
-                        result = f"(unknown tool: {name})"
+                        result = (
+                            f"(tool unavailable during coding-quality recovery: {name})"
+                            if restricted_tool_call
+                            else f"(unknown tool: {name})"
+                        )
                         fallback_outcome = "unrecognized"
                     else:
                         kwargs = {k: args[k] for k in spec["args"] if k in args}
@@ -2958,11 +3044,11 @@ def _process_user_input(
         # A model that keeps calling tools never enters the no-tool reprompt
         # branch above. Surface the live, revision-bound obligation after each
         # tool round so a mutation can be followed by trusted validation before
-        # the reserved finalization round. This is content-free gate feedback;
+        # the hard round limit. This is content-free gate feedback;
         # tool output and workspace contents are not repeated.
         if quality_gate is not None:
             quality_decision = quality_gate.decision()
-            if quality_decision.activated and not quality_decision.satisfied:
+            if not quality_decision.satisfied:
                 quality_signature = quality_gate.feedback_signature()
                 if quality_signature != last_post_tool_quality_signature:
                     current_messages.append(
@@ -2973,12 +3059,27 @@ def _process_user_input(
                     )
                     last_post_tool_quality_signature = quality_signature
 
+        if last_model_round:
+            budget_exhaustion = forced_finalization_reason or (
+                f"model round limit {execution_budget.max_rounds} reached"
+            )
+            terminal_reason = "budget_finalization"
+            terminal_notice = (
+                "The final model round executed its requested tools within the trusted "
+                "budget. No later model synthesis was available; inspect the tool evidence "
+                "and coding-quality status above."
+            )
+            terminal_assistant_text = "\n\n".join(
+                text for text in (visible_text, terminal_notice) if text
+            )
+            break
+
     if quality_gate is not None:
         quality_gate.refresh()
         if not quality_gate.decision().satisfied and terminal_reason != "quality_incomplete":
             quality_notice = (
-                "Coding-quality gate: INCOMPLETE. The workspace changed after its latest "
-                "trusted validation; no success is certified."
+                "Coding-quality gate: INCOMPLETE. The requested net change or latest-revision "
+                "trusted validation is missing; no success is certified."
             )
             console.print(quality_notice, style="yellow")
             if quality_notice not in terminal_assistant_text:
@@ -3007,7 +3108,7 @@ def _process_user_input(
         state["messages"] = state["messages"][-40:]
 
     quality_report = quality_gate.report() if quality_gate is not None else None
-    if quality_gate is not None and not quality_gate.decision().satisfied:
+    if quality_gate is not None and quality_gate.should_persist():
         state["_quality_gate"] = quality_gate
         state["quality_gate_pending"] = True
     else:

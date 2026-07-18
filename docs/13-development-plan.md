@@ -283,8 +283,17 @@ external tool-protocol system prompts are not corrupted.
   0/2, Quality 0/2). Quality emitted one non-empty but unresolved patch. This
   validates the path, not the policy; run the frozen 500-pair study before any
   quality or promotion claim.
-- Build a local task corpus with unit-test outcomes, edit correctness, tool
-  calls, retries, elapsed time and total generated tokens.
+- **Landed after smoke diagnosis:** Quality Gate v2 requires a trusted net
+  workspace change for change tasks, rejects identical/reverted edits, keeps a
+  last-round `validate` recovery inside the same 12-round cap, prioritizes the
+  dedicated validation schema over Bash, and records misrouted validation
+  telemetry. The pre-v2 0/2 result remains unchanged and cannot validate v2.
+- **Landed:** MioCodeBench provides paired local smoke (4 tasks) and
+  development (8 tasks) corpora with hidden unit-test outcomes, edit
+  correctness, tool calls, validation, elapsed time and generated tokens.
+- Calibrate v2 on smoke, evaluate the development split once as an internal
+  holdout, then run a fresh non-evidence 27B smoke only if Quality has no paired
+  regression and stays inside preregistered wall/token/tool cost limits.
 - Compare base target, DFlash target, Caveman and Ponytail separately.
 - Include held-out repositories to avoid tuning the harness to Mio itself.
 - Report uncertainty and failures; never infer coding quality from tok/s.

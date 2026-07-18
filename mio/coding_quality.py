@@ -73,6 +73,7 @@ _INSPECT_PATTERN = re.compile(
     r"analizz\w*|controll\w*|diagnostic\w*|ispezion\w*|spieg\w*)\b",
     re.IGNORECASE,
 )
+_DIRECT_COMMAND_TEXT = re.compile(r"[A-Za-z0-9_./:=+,@%-]+(?: [A-Za-z0-9_./:=+,@%-]+)*\Z")
 _DOC_SUFFIXES = frozenset({".adoc", ".md", ".mdx", ".rst", ".txt"})
 _SOURCE_SUFFIXES = frozenset(
     {
@@ -528,6 +529,23 @@ def infer_validation_kind(argv: Sequence[str]) -> ValidationKind | None:
     if executable == "git" and args == ["diff", "--check"]:
         return ValidationKind.DIFF
     return None
+
+
+def infer_misrouted_validation_command(command: str) -> ValidationKind | None:
+    """Recognize only a lossless direct-argv command sent through ``bash``.
+
+    This is telemetry, never validation evidence.  A deliberately tiny grammar
+    excludes quoting, expansion, globbing, substitutions, redirections, and
+    shell operators so a composite command can never be mistaken for a direct
+    invocation of the trusted ``validate`` tool.
+    """
+
+    if not isinstance(command, str):
+        return None
+    normalized = command.strip()
+    if not normalized or not _DIRECT_COMMAND_TEXT.fullmatch(normalized):
+        return None
+    return infer_validation_kind(tuple(normalized.split(" ")))
 
 
 @dataclass(frozen=True)
@@ -1214,12 +1232,15 @@ class CodingQualityGate:
     effort: CodingEffort = CodingEffort.HIGH
     enabled: bool = True
     intent: RequestIntent = RequestIntent.GENERAL
+    require_net_workspace_change: bool = False
     request_sha256: str = field(default_factory=lambda: hashlib.sha256(b"").hexdigest())
     initial_snapshot: WorkspaceSnapshot | None = None
     current_snapshot: WorkspaceSnapshot | None = None
     mutation_epoch: int = 0
     changed_kinds: set[str] = field(default_factory=set)
     validations: list[ValidationEvidence] = field(default_factory=list)
+    validate_invocations: int = 0
+    misrouted_validation_commands: int = 0
     successful_reads: int = 0
     snapshot_failed_closed: bool = False
 
@@ -1227,6 +1248,8 @@ class CodingQualityGate:
         self.roots = tuple(Path(root).expanduser().resolve() for root in self.roots)
         self.effort = CodingEffort(self.effort)
         self.intent = RequestIntent(self.intent)
+        if not isinstance(self.require_net_workspace_change, bool):
+            raise TypeError("require_net_workspace_change must be boolean")
         if self.initial_snapshot is None:
             self.initial_snapshot = snapshot_workspaces(self.roots)
         if self.current_snapshot is None:
@@ -1242,13 +1265,23 @@ class CodingQualityGate:
         *,
         effort: CodingEffort | str = CodingEffort.HIGH,
         enabled: bool = True,
+        require_net_workspace_change: bool | None = None,
     ) -> CodingQualityGate:
         normalized = tuple(Path(root).expanduser().resolve() for root in roots)
+        intent = classify_request_intent(request)
+        require_change = (
+            intent is RequestIntent.CODE_CHANGE_REQUESTED
+            if require_net_workspace_change is None
+            else require_net_workspace_change
+        )
+        if not isinstance(require_change, bool):
+            raise TypeError("require_net_workspace_change must be boolean or None")
         return cls(
             roots=normalized,
             effort=CodingEffort(effort),
             enabled=bool(enabled),
-            intent=classify_request_intent(request),
+            intent=intent,
+            require_net_workspace_change=require_change,
             request_sha256=hashlib.sha256(request.encode("utf-8", errors="replace")).hexdigest(),
         )
 
@@ -1260,16 +1293,39 @@ class CodingQualityGate:
         *,
         effort: CodingEffort | str = CodingEffort.HIGH,
         enabled: bool = True,
+        require_net_workspace_change: bool | None = None,
     ) -> CodingQualityGate:
-        return cls.start(roots, request, effort=effort, enabled=enabled)
+        return cls.start(
+            roots,
+            request,
+            effort=effort,
+            enabled=enabled,
+            require_net_workspace_change=require_net_workspace_change,
+        )
+
+    @property
+    def net_workspace_changed(self) -> bool:
+        initial = self.initial_snapshot
+        current = self.current_snapshot
+        return bool(
+            initial is not None
+            and current is not None
+            and initial.revision_sha256 != current.revision_sha256
+        )
 
     @property
     def activated(self) -> bool:
-        # The preregistered intervention begins only after an observed
-        # workspace mutation. Intent classification remains advisory metadata;
-        # it can never force a needless edit or create an unresolvable pending
-        # obligation for an inspection-only response.
-        return self.mutation_epoch > 0
+        return self.mutation_epoch > 0 or self.net_workspace_changed
+
+    def should_persist(self) -> bool:
+        """Persist only revision debt, never pressure a later turn to edit."""
+
+        verdict = self.decision()
+        return bool(
+            self.enabled
+            and not verdict.satisfied
+            and (self.net_workspace_changed or self.snapshot_failed_closed)
+        )
 
     def _adopt_snapshot(
         self,
@@ -1404,6 +1460,10 @@ class CodingQualityGate:
                 )
             self.current_snapshot = before_snapshot
             return before_snapshot
+        if name == "validate":
+            self.validate_invocations += 1
+        elif name == "bash" and infer_misrouted_validation_command(str((args or {}).get("command", ""))) is not None:
+            self.misrouted_validation_commands += 1
         after_snapshot = snapshot_workspaces(self.roots)
         unsafe = name in {"bash", "call_mcp_tool", "validate", "write", "edit"}
         changed, suffixes = _snapshot_delta(before_snapshot, after_snapshot)
@@ -1539,7 +1599,7 @@ class CodingQualityGate:
                 required=(),
                 missing=(),
             )
-        if not self.activated:
+        if not self.activated and not self.require_net_workspace_change:
             return GateDecision(
                 status=GateStatus.NOT_APPLICABLE,
                 activated=False,
@@ -1548,7 +1608,21 @@ class CodingQualityGate:
                 required=(),
                 missing=(),
             )
+        if not self.net_workspace_changed:
+            missing = ["net_workspace_change"]
+            if self.snapshot_failed_closed:
+                missing.append("complete_workspace_snapshot")
+            return GateDecision(
+                status=GateStatus.INCOMPLETE,
+                activated=self.activated,
+                satisfied=False,
+                phase="no_net_change" if self.activated else "awaiting_change",
+                required=("net_workspace_change",),
+                missing=tuple(missing),
+            )
         required, missing = self._requirements()
+        if self.require_net_workspace_change:
+            required = ("net_workspace_change", *required)
         if self.snapshot_failed_closed:
             missing = tuple(dict.fromkeys((*missing, "complete_workspace_snapshot")))
         if missing:
@@ -1574,6 +1648,13 @@ class CodingQualityGate:
 
     def feedback(self) -> str:
         verdict = self.decision()
+        if verdict.phase in {"awaiting_change", "no_net_change"}:
+            return (
+                "Coding-quality gate incomplete. The requested task has no net workspace change. "
+                "Do not create a cosmetic edit or a write-then-revert merely to satisfy the gate. "
+                "Implement only a justified change; if no safe change is warranted, report that "
+                "blocker or no-change outcome honestly as uncertified."
+            )
         missing = ", ".join(verdict.missing) or "current-revision validation"
         return (
             "Coding-quality gate incomplete. Do not claim completion. "
@@ -1599,12 +1680,19 @@ class CodingQualityGate:
         return hashlib.sha256("\0".join(fields).encode("utf-8")).hexdigest()
 
     def system_instructions(self) -> str:
-        return (
+        instructions = (
             "\nMANDATORY CODING-QUALITY GATE: after every workspace mutation, use the "
             "dedicated validate tool with direct argv. Evidence is bound to the latest "
             f"revision and effort={self.effort.value}; a later edit invalidates it. "
             "Ordinary bash output cannot satisfy the gate."
         )
+        if self.require_net_workspace_change:
+            instructions += (
+                " This turn has a trusted net-change contract: an unchanged or reverted "
+                "workspace cannot be certified as completion. Never make a cosmetic edit "
+                "to satisfy the contract; report a genuine blocker/no-change outcome instead."
+            )
+        return instructions
 
     def report(self) -> dict[str, object]:
         verdict = self.decision()
@@ -1614,10 +1702,11 @@ class CodingQualityGate:
         successes = self._current_successes()
         validation_counts = {kind.value: sum(item.kind is kind for item in successes) for kind in ValidationKind}
         return {
-            "schema": "mio.coding-quality-gate.v1",
+            "schema": "mio.coding-quality-gate.v2",
             "enabled": self.enabled,
             "effort": self.effort.value,
             "intent": self.intent.value,
+            "require_net_workspace_change": self.require_net_workspace_change,
             "request_sha256": self.request_sha256,
             "decision": verdict.status.value,
             "phase": verdict.phase,
@@ -1634,5 +1723,8 @@ class CodingQualityGate:
             "missing": list(verdict.missing),
             "validation_counts": validation_counts,
             "validation_attempts": len(self.validations),
+            "validate_invocations": self.validate_invocations,
+            "recognized_validation_attempts": len(self.validations),
+            "misrouted_validation_commands": self.misrouted_validation_commands,
             "successful_reads": self.successful_reads,
         }

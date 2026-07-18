@@ -47,7 +47,7 @@ SEALED_RUNTIME_BINDING_SCHEMA = f"{GENERATION_SCHEMA}.sealed-runtime-binding.v1"
 PAIR_ARTIFACT_BINDING_SCHEMA = f"{GENERATION_SCHEMA}.pair-artifact-binding.v1"
 ARM_TELEMETRY_SCHEMA = f"{GENERATION_SCHEMA}.arm-telemetry.v1"
 TELEMETRY_MANIFEST_SCHEMA = f"{GENERATION_SCHEMA}.telemetry-manifest.v1"
-TOOL_SURFACE = ("bash", "validate", "read", "write", "edit")
+TOOL_SURFACE = ("validate", "bash", "read", "write", "edit")
 TARGET_CONTEXT_TOKENS = 32_768
 TARGET_MAX_OUTPUT_TOKENS_PER_ROUND = 4_096
 TARGET_MAX_ROUNDS = 12
@@ -214,7 +214,18 @@ _BUDGET_EXHAUSTION_KINDS = frozenset(
     {"none", "wall_time", "completion_tokens", "context_tokens", "model_rounds", "tool_calls", "tool_output"}
 )
 _QUALITY_DECISIONS = frozenset({"not_applicable", "incomplete", "pass"})
-_QUALITY_PHASES = frozenset({"disabled", "observing", "dirty", "validation_failed", "passed", "model_error"})
+_QUALITY_PHASES = frozenset(
+    {
+        "disabled",
+        "observing",
+        "awaiting_change",
+        "no_net_change",
+        "dirty",
+        "validation_failed",
+        "passed",
+        "model_error",
+    }
+)
 _QUALITY_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "ultra"})
 _QUALITY_INTENTS = frozenset({"general", "inspect", "code_change_requested"})
 _QUALITY_OBLIGATIONS = frozenset(
@@ -227,6 +238,7 @@ _QUALITY_OBLIGATIONS = frozenset(
         "static",
         "review_or_second_distinct_test",
         "complete_workspace_snapshot",
+        "net_workspace_change",
     }
 )
 _VALIDATION_KINDS = ("test", "build", "static", "diff", "review")
@@ -1297,6 +1309,7 @@ def _validate_quality_gate_report(
             "phase": "experiment_disabled",
             "activated": False,
             "satisfied": True,
+            "require_net_workspace_change": False,
             "mutation_epoch": 0,
             "request_sha256": None,
             "initial_revision_sha256": None,
@@ -1306,7 +1319,10 @@ def _validate_quality_gate_report(
             "required": [],
             "missing": [],
             "validation_counts": zero_counts,
+            "validate_invocations": 0,
+            "recognized_validation_attempts": 0,
             "validation_attempts": 0,
+            "misrouted_validation_commands": 0,
             "successful_reads": 0,
         }
     expected_keys = {
@@ -1319,6 +1335,7 @@ def _validate_quality_gate_report(
         "phase",
         "activated",
         "satisfied",
+        "require_net_workspace_change",
         "mutation_epoch",
         "changed_kinds",
         "snapshot_complete",
@@ -1329,12 +1346,15 @@ def _validate_quality_gate_report(
         "required",
         "missing",
         "validation_counts",
+        "validate_invocations",
+        "recognized_validation_attempts",
         "validation_attempts",
+        "misrouted_validation_commands",
         "successful_reads",
     }
     if not isinstance(raw, Mapping) or set(raw) != expected_keys:
         raise protocol.ProtocolError("gate_on quality report fields differ from the sealed schema")
-    if raw.get("schema") != "mio.coding-quality-gate.v1" or raw.get("enabled") is not True:
+    if raw.get("schema") != "mio.coding-quality-gate.v2" or raw.get("enabled") is not True:
         raise protocol.ProtocolError("gate_on quality report schema or enabled flag is invalid")
     effort = raw["effort"]
     intent = raw["intent"]
@@ -1344,7 +1364,7 @@ def _validate_quality_gate_report(
         raise protocol.ProtocolError("quality effort or intent differs from the frozen experiment")
     if decision not in _QUALITY_DECISIONS or phase not in _QUALITY_PHASES:
         raise protocol.ProtocolError("quality decision or phase is outside the sealed vocabulary")
-    for name in ("activated", "satisfied", "snapshot_complete"):
+    for name in ("activated", "satisfied", "require_net_workspace_change", "snapshot_complete"):
         if not isinstance(raw[name], bool):
             raise protocol.ProtocolError(f"quality {name} must be boolean")
     mutation_epoch = _nonnegative_integer(raw["mutation_epoch"], "quality mutation_epoch", maximum=128)
@@ -1384,12 +1404,31 @@ def _validate_quality_gate_report(
         name: _nonnegative_integer(counts[name], f"quality {name} validations", maximum=protocol.MAX_TOOL_CALLS_PER_ARM)
         for name in _VALIDATION_KINDS
     }
-    validation_attempts = _nonnegative_integer(
-        raw["validation_attempts"],
-        "quality validation attempts",
+    validate_invocations = _nonnegative_integer(
+        raw["validate_invocations"],
+        "quality validate invocations",
         maximum=protocol.MAX_TOOL_CALLS_PER_ARM,
     )
-    if sum(validation_counts.values()) > validation_attempts:
+    recognized_validation_attempts = _nonnegative_integer(
+        raw["recognized_validation_attempts"],
+        "quality recognized validation attempts",
+        maximum=protocol.MAX_TOOL_CALLS_PER_ARM,
+    )
+    validation_attempts = _nonnegative_integer(
+        raw["validation_attempts"],
+        "quality validation-attempt alias",
+        maximum=protocol.MAX_TOOL_CALLS_PER_ARM,
+    )
+    misrouted_validation_commands = _nonnegative_integer(
+        raw["misrouted_validation_commands"],
+        "quality misrouted validation commands",
+        maximum=protocol.MAX_TOOL_CALLS_PER_ARM,
+    )
+    if validation_attempts != recognized_validation_attempts:
+        raise protocol.ProtocolError("quality validation-attempt alias differs from recognized attempts")
+    if recognized_validation_attempts > validate_invocations:
+        raise protocol.ProtocolError("quality recognized validation attempts exceed validate invocations")
+    if sum(validation_counts.values()) > recognized_validation_attempts:
         raise protocol.ProtocolError("quality successful validation counts exceed attempts")
     successful_reads = _nonnegative_integer(
         raw["successful_reads"],
@@ -1406,13 +1445,42 @@ def _validate_quality_gate_report(
     )
     activated = raw["activated"]
     satisfied = raw["satisfied"]
-    if not activated:
-        if decision != "not_applicable" or not satisfied or phase != "observing" or mutation_epoch != 0:
+    require_net_workspace_change = raw["require_net_workspace_change"]
+    net_workspace_change = initial_revision != current_revision
+    if activated != (mutation_epoch > 0):
+        raise protocol.ProtocolError("quality activation differs from its mutation epoch")
+    if activated != bool(changed_kinds):
+        raise protocol.ProtocolError("quality changed kinds differ from its activation state")
+    if not activated and not require_net_workspace_change:
+        if decision != "not_applicable" or not satisfied or phase != "observing":
             raise protocol.ProtocolError("observing quality report semantics are inconsistent")
-        if required or missing or changed_kinds:
-            raise protocol.ProtocolError("unactivated quality report cannot carry obligations or mutations")
-        if initial_revision != current_revision:
-            raise protocol.ProtocolError("observing quality report changed revision without activation")
+        if required or missing or net_workspace_change:
+            raise protocol.ProtocolError("observing quality report cannot carry obligations or a revision delta")
+    elif not activated:
+        expected_missing = ["net_workspace_change"]
+        if not snapshot["complete"]:
+            expected_missing.append("complete_workspace_snapshot")
+        if (
+            decision != "incomplete"
+            or satisfied
+            or phase != "awaiting_change"
+            or net_workspace_change
+            or list(required) != ["net_workspace_change"]
+            or list(missing) != expected_missing
+        ):
+            raise protocol.ProtocolError("awaiting-change quality report semantics are inconsistent")
+    elif not net_workspace_change:
+        expected_missing = ["net_workspace_change"]
+        if not snapshot["complete"]:
+            expected_missing.append("complete_workspace_snapshot")
+        if (
+            decision != "incomplete"
+            or satisfied
+            or phase != "no_net_change"
+            or list(required) != ["net_workspace_change"]
+            or list(missing) != expected_missing
+        ):
+            raise protocol.ProtocolError("no-net-change quality report semantics are inconsistent")
     elif decision == "pass":
         if (
             not satisfied
@@ -1434,12 +1502,15 @@ def _validate_quality_gate_report(
             raise protocol.ProtocolError("incomplete quality report semantics are inconsistent")
     else:
         raise protocol.ProtocolError("activated quality report cannot be not_applicable")
-    if activated:
+    if activated and net_workspace_change:
         expected_required = ["diff"] if changed_kinds == ["docs"] else ["test_or_build"]
+        if require_net_workspace_change:
+            expected_required.insert(0, "net_workspace_change")
         expected_missing = []
-        if expected_required == ["diff"] and validation_counts["diff"] == 0:
+        validation_required = expected_required[-1]
+        if validation_required == "diff" and validation_counts["diff"] == 0:
             expected_missing.append("diff")
-        if expected_required == ["test_or_build"] and not (validation_counts["test"] or validation_counts["build"]):
+        if validation_required == "test_or_build" and not (validation_counts["test"] or validation_counts["build"]):
             expected_missing.append("test_or_build")
         if not snapshot["complete"]:
             expected_missing.append("complete_workspace_snapshot")
@@ -1454,6 +1525,7 @@ def _validate_quality_gate_report(
         "phase": phase,
         "activated": activated,
         "satisfied": satisfied,
+        "require_net_workspace_change": require_net_workspace_change,
         "mutation_epoch": mutation_epoch,
         "request_sha256": request_sha256,
         "initial_revision_sha256": initial_revision,
@@ -1463,7 +1535,10 @@ def _validate_quality_gate_report(
         "required": list(required),
         "missing": list(missing),
         "validation_counts": validation_counts,
+        "validate_invocations": validate_invocations,
+        "recognized_validation_attempts": recognized_validation_attempts,
         "validation_attempts": validation_attempts,
+        "misrouted_validation_commands": misrouted_validation_commands,
         "successful_reads": successful_reads,
     }
 
@@ -1480,6 +1555,7 @@ def _validate_normalized_quality_document(raw: Mapping[str, Any]) -> dict[str, A
         "phase",
         "activated",
         "satisfied",
+        "require_net_workspace_change",
         "mutation_epoch",
         "request_sha256",
         "initial_revision_sha256",
@@ -1489,7 +1565,10 @@ def _validate_normalized_quality_document(raw: Mapping[str, Any]) -> dict[str, A
         "required",
         "missing",
         "validation_counts",
+        "validate_invocations",
+        "recognized_validation_attempts",
         "validation_attempts",
+        "misrouted_validation_commands",
         "successful_reads",
     }
     if not isinstance(raw, Mapping) or set(raw) != expected or not isinstance(raw.get("enabled"), bool):
@@ -1504,6 +1583,7 @@ def _validate_normalized_quality_document(raw: Mapping[str, Any]) -> dict[str, A
             "phase": "experiment_disabled",
             "activated": False,
             "satisfied": True,
+            "require_net_workspace_change": False,
             "mutation_epoch": 0,
             "request_sha256": None,
             "initial_revision_sha256": None,
@@ -1513,7 +1593,10 @@ def _validate_normalized_quality_document(raw: Mapping[str, Any]) -> dict[str, A
             "required": [],
             "missing": [],
             "validation_counts": {name: 0 for name in _VALIDATION_KINDS},
+            "validate_invocations": 0,
+            "recognized_validation_attempts": 0,
             "validation_attempts": 0,
+            "misrouted_validation_commands": 0,
             "successful_reads": 0,
         }
         if dict(raw) != expected_disabled:
@@ -1533,6 +1616,7 @@ def _validate_normalized_quality_document(raw: Mapping[str, Any]) -> dict[str, A
             "phase": "model_error",
             "activated": False,
             "satisfied": False,
+            "require_net_workspace_change": True,
             "mutation_epoch": 0,
             "request_sha256": raw.get("request_sha256"),
             "initial_revision_sha256": None,
@@ -1542,7 +1626,10 @@ def _validate_normalized_quality_document(raw: Mapping[str, Any]) -> dict[str, A
             "required": [],
             "missing": [],
             "validation_counts": {name: 0 for name in _VALIDATION_KINDS},
+            "validate_invocations": 0,
+            "recognized_validation_attempts": 0,
             "validation_attempts": 0,
+            "misrouted_validation_commands": 0,
             "successful_reads": 0,
         }
         request_sha256 = raw.get("request_sha256")
@@ -1561,7 +1648,7 @@ def _validate_normalized_quality_document(raw: Mapping[str, Any]) -> dict[str, A
         raise protocol.ProtocolError("normalized quality effort or intent is invalid")
     if decision not in _QUALITY_DECISIONS or raw["status"] != decision or phase not in _QUALITY_PHASES:
         raise protocol.ProtocolError("normalized quality decision, status, or phase is invalid")
-    if not isinstance(raw["activated"], bool) or not isinstance(raw["satisfied"], bool):
+    if any(not isinstance(raw[name], bool) for name in ("activated", "satisfied", "require_net_workspace_change")):
         raise protocol.ProtocolError("normalized quality booleans are invalid")
     mutation_epoch = _nonnegative_integer(raw["mutation_epoch"], "quality mutation_epoch", maximum=128)
     for name in ("request_sha256", "initial_revision_sha256", "current_revision_sha256"):
@@ -1597,29 +1684,74 @@ def _validate_normalized_quality_document(raw: Mapping[str, Any]) -> dict[str, A
         name: _nonnegative_integer(counts[name], f"quality {name} validations", maximum=protocol.MAX_TOOL_CALLS_PER_ARM)
         for name in _VALIDATION_KINDS
     }
+    validate_invocations = _nonnegative_integer(
+        raw["validate_invocations"], "quality validate invocations", maximum=protocol.MAX_TOOL_CALLS_PER_ARM
+    )
+    recognized_attempts = _nonnegative_integer(
+        raw["recognized_validation_attempts"],
+        "quality recognized validation attempts",
+        maximum=protocol.MAX_TOOL_CALLS_PER_ARM,
+    )
     attempts = _nonnegative_integer(
-        raw["validation_attempts"], "quality validation attempts", maximum=protocol.MAX_TOOL_CALLS_PER_ARM
+        raw["validation_attempts"], "quality validation-attempt alias", maximum=protocol.MAX_TOOL_CALLS_PER_ARM
+    )
+    misrouted_commands = _nonnegative_integer(
+        raw["misrouted_validation_commands"],
+        "quality misrouted validation commands",
+        maximum=protocol.MAX_TOOL_CALLS_PER_ARM,
     )
     successful_reads = _nonnegative_integer(
         raw["successful_reads"], "quality successful reads", maximum=protocol.MAX_TOOL_CALLS_PER_ARM
     )
-    if sum(validated_counts.values()) > attempts:
+    if attempts != recognized_attempts:
+        raise protocol.ProtocolError("normalized validation-attempt alias differs from recognized attempts")
+    if recognized_attempts > validate_invocations:
+        raise protocol.ProtocolError("normalized recognized attempts exceed validate invocations")
+    if sum(validated_counts.values()) > recognized_attempts:
         raise protocol.ProtocolError("normalized quality successes exceed validation attempts")
     activated = raw["activated"]
     satisfied = raw["satisfied"]
-    if not activated:
+    require_net_workspace_change = raw["require_net_workspace_change"]
+    net_workspace_change = raw["initial_revision_sha256"] != raw["current_revision_sha256"]
+    if activated != (mutation_epoch > 0):
+        raise protocol.ProtocolError("normalized quality activation differs from its mutation epoch")
+    if activated != bool(changed_kinds):
+        raise protocol.ProtocolError("normalized quality changed kinds differ from activation")
+    if not activated and not require_net_workspace_change:
         if (
             decision != "not_applicable"
             or not satisfied
             or phase != "observing"
-            or mutation_epoch != 0
-            or changed_kinds
             or required
             or missing
+            or net_workspace_change
         ):
             raise protocol.ProtocolError("normalized observing quality semantics are inconsistent")
-        if raw["initial_revision_sha256"] != raw["current_revision_sha256"]:
-            raise protocol.ProtocolError("normalized observing quality revision changed without activation")
+    elif not activated:
+        expected_missing = ["net_workspace_change"]
+        if not snapshot["complete"]:
+            expected_missing.append("complete_workspace_snapshot")
+        if (
+            decision != "incomplete"
+            or satisfied
+            or phase != "awaiting_change"
+            or net_workspace_change
+            or list(required) != ["net_workspace_change"]
+            or list(missing) != expected_missing
+        ):
+            raise protocol.ProtocolError("normalized awaiting-change quality semantics are inconsistent")
+    elif not net_workspace_change:
+        expected_missing = ["net_workspace_change"]
+        if not snapshot["complete"]:
+            expected_missing.append("complete_workspace_snapshot")
+        if (
+            decision != "incomplete"
+            or satisfied
+            or phase != "no_net_change"
+            or list(required) != ["net_workspace_change"]
+            or list(missing) != expected_missing
+        ):
+            raise protocol.ProtocolError("normalized no-net-change quality semantics are inconsistent")
     elif decision == "pass":
         if (
             not satisfied
@@ -1641,12 +1773,15 @@ def _validate_normalized_quality_document(raw: Mapping[str, Any]) -> dict[str, A
             raise protocol.ProtocolError("normalized incomplete quality semantics are inconsistent")
     else:
         raise protocol.ProtocolError("normalized activated quality decision is inconsistent")
-    if activated:
+    if activated and net_workspace_change:
         expected_required = ["diff"] if changed_kinds == ["docs"] else ["test_or_build"]
+        if require_net_workspace_change:
+            expected_required.insert(0, "net_workspace_change")
         expected_missing = []
-        if expected_required == ["diff"] and validated_counts["diff"] == 0:
+        validation_required = expected_required[-1]
+        if validation_required == "diff" and validated_counts["diff"] == 0:
             expected_missing.append("diff")
-        if expected_required == ["test_or_build"] and not (validated_counts["test"] or validated_counts["build"]):
+        if validation_required == "test_or_build" and not (validated_counts["test"] or validated_counts["build"]):
             expected_missing.append("test_or_build")
         if not snapshot["complete"]:
             expected_missing.append("complete_workspace_snapshot")
@@ -1659,7 +1794,10 @@ def _validate_normalized_quality_document(raw: Mapping[str, Any]) -> dict[str, A
         "changed_kinds": list(changed_kinds),
         "required": list(required),
         "missing": list(missing),
+        "validate_invocations": validate_invocations,
+        "recognized_validation_attempts": recognized_attempts,
         "validation_attempts": attempts,
+        "misrouted_validation_commands": misrouted_commands,
         "successful_reads": successful_reads,
     }
 
@@ -1723,13 +1861,18 @@ def _validate_turn_and_topology(
             item["tool_name"] == "read" and item["allowed"] and item["outcome"] == "ok" for item in tools
         )
         validate_calls = sum(item["tool_name"] == "validate" for item in tools)
+        bash_calls = sum(item["tool_name"] == "bash" for item in tools)
         successful_validations = sum(
             item["tool_name"] == "validate" and item["allowed"] and item["outcome"] == "ok" for item in tools
         )
         if quality["successful_reads"] != successful_reads:
             raise protocol.ProtocolError("quality successful-read count differs from admitted tool telemetry")
-        if quality["validation_attempts"] > validate_calls:
-            raise protocol.ProtocolError("quality validation attempts exceed admitted validate tool calls")
+        if quality["validate_invocations"] != validate_calls:
+            raise protocol.ProtocolError("quality validate invocations differ from admitted validate tool calls")
+        if quality["recognized_validation_attempts"] > validate_calls:
+            raise protocol.ProtocolError("quality recognized attempts exceed admitted validate tool calls")
+        if quality["misrouted_validation_commands"] > bash_calls:
+            raise protocol.ProtocolError("quality misrouted validation commands exceed admitted bash tool calls")
         if sum(quality["validation_counts"].values()) > successful_validations:
             raise protocol.ProtocolError("quality validation successes exceed successful validate tool traces")
     round_total_ns = sum(math.ceil(item["total_time_s"] * 1_000_000_000) for item in rounds)
@@ -1958,6 +2101,7 @@ class ValidatedArmTelemetry:
                 "phase": "model_error",
                 "activated": False,
                 "satisfied": False,
+                "require_net_workspace_change": True,
                 "mutation_epoch": 0,
                 "request_sha256": request_sha256,
                 "initial_revision_sha256": None,
@@ -1967,7 +2111,10 @@ class ValidatedArmTelemetry:
                 "required": [],
                 "missing": [],
                 "validation_counts": {name: 0 for name in _VALIDATION_KINDS},
+                "validate_invocations": 0,
+                "recognized_validation_attempts": 0,
                 "validation_attempts": 0,
+                "misrouted_validation_commands": 0,
                 "successful_reads": 0,
             }
         else:
@@ -3745,6 +3892,7 @@ class NativeMioArmExecutor:
             "tool_specs": request.tool_specs,
             "messages": [],
             "quality_gate_enabled": request.quality_gate_enabled,
+            "quality_gate_require_change": request.quality_gate_enabled,
             "coding_effort": request.coding_effort,
             "execution_budget": agent.AgentExecutionBudget(
                 max_rounds=TARGET_MAX_ROUNDS,

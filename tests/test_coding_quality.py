@@ -18,6 +18,7 @@ from mio.coding_quality import (
     RequestIntent,
     ValidationKind,
     classify_request_intent,
+    infer_misrouted_validation_command,
     infer_validation_kind,
     snapshot_workspaces,
 )
@@ -919,7 +920,7 @@ def test_feedback_signature_changes_with_revision_epoch_phase_and_obligation(
     assert next_epoch not in {observing, dirty, failed}
 
 
-def test_requested_change_without_a_workspace_diff_remains_observational(tmp_path: Path) -> None:
+def test_requested_change_without_a_workspace_diff_is_not_certified(tmp_path: Path) -> None:
     gate = CodingQualityGate.start(
         [tmp_path],
         "Implement a parser change, then stop without editing.",
@@ -929,9 +930,12 @@ def test_requested_change_without_a_workspace_diff_remains_observational(tmp_pat
     decision = gate.decision()
 
     assert gate.mutation_epoch == 0
-    assert decision.status is GateStatus.NOT_APPLICABLE
-    assert decision.phase == "observing"
-    assert decision.missing == ()
+    assert decision.status is GateStatus.INCOMPLETE
+    assert decision.activated is False
+    assert decision.phase == "awaiting_change"
+    assert decision.required == ("net_workspace_change",)
+    assert decision.missing == ("net_workspace_change",)
+    assert gate.should_persist() is False
 
 
 def test_successful_edit_audit_activates_gate_even_when_snapshot_has_no_delta(
@@ -951,7 +955,51 @@ def test_successful_edit_audit_activates_gate_even_when_snapshot_has_no_delta(
 
     assert gate.mutation_epoch == 1
     assert gate.decision().status is GateStatus.INCOMPLETE
-    assert gate.decision().missing == ("any_validation",)
+    assert gate.decision().phase == "no_net_change"
+    assert gate.decision().missing == ("net_workspace_change",)
+
+
+def test_edit_then_revert_cannot_pass_with_stale_validation(tmp_path: Path) -> None:
+    target = tmp_path / "module.py"
+    target.write_text("VALUE = 1\n", encoding="utf-8")
+    gate = CodingQualityGate.start(
+        [tmp_path],
+        "Change module.py.",
+        effort=CodingEffort.LOW,
+        require_net_workspace_change=True,
+    )
+
+    _record_edit(gate, target, "VALUE = 2\n")
+    _record_validation(gate, ValidationKind.TEST, ("pytest", "-q"))
+    _record_edit(gate, target, "VALUE = 1\n")
+    _record_validation(gate, ValidationKind.TEST, ("pytest", "-q"))
+
+    decision = gate.decision()
+    assert gate.mutation_epoch == 2
+    assert gate.net_workspace_changed is False
+    assert decision.status is GateStatus.INCOMPLETE
+    assert decision.phase == "no_net_change"
+    assert decision.missing == ("net_workspace_change",)
+    assert gate.should_persist() is False
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("python3 -m pytest -q", ValidationKind.TEST),
+        ("git diff --check", ValidationKind.DIFF),
+        ("python3 -m pytest -q || true", None),
+        ("python3 -m pytest -q | tee result.txt", None),
+        ("python3 -m pytest -q > result.txt", None),
+        ("python3 -m pytest 'tests/test one.py'", None),
+        ("$(which pytest) -q", None),
+    ],
+)
+def test_misrouted_validation_classifier_is_narrow_and_never_evidence(
+    command: str,
+    expected: ValidationKind | None,
+) -> None:
+    assert infer_misrouted_validation_command(command) is expected
 
 
 def test_denied_or_failed_edit_does_not_create_a_mutation_epoch(tmp_path: Path) -> None:

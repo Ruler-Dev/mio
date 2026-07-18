@@ -252,6 +252,7 @@ class RecordingExecutor:
 
 
 def test_pair_runner_uses_balanced_order_identical_tools_and_fresh_state(tmp_path: Path) -> None:
+    assert runner.TOOL_SURFACE == ("validate", "bash", "read", "write", "edit")
     source, base_commit = _source_repo(tmp_path)
     instances = _instances(base_commit)
     document, schedule = _schedule_document(instances)
@@ -1033,6 +1034,7 @@ def test_native_executor_resets_cache_conversation_and_injects_exact_budget(
     registry, specs, _digest = runner.build_identical_tool_surface(_agent_module())
     message_lists: list[list] = []
     budgets = []
+    require_change_flags = []
 
     def fake_process(_instruction, _engine, _manager, _config, state):
         assert not engine._prefix_cache
@@ -1040,6 +1042,7 @@ def test_native_executor_resets_cache_conversation_and_injects_exact_budget(
         assert engine._pending_assistant_prefill == ""
         message_lists.append(state["messages"])
         budgets.append(state["execution_budget"])
+        require_change_flags.append(state["quality_gate_require_change"])
         return SimpleNamespace(
             terminal_reason="model_final",
             rounds=(SimpleNamespace(completion_tokens=7),),
@@ -1078,6 +1081,7 @@ def test_native_executor_resets_cache_conversation_and_injects_exact_budget(
 
     assert engine.resets == 2
     assert len(message_lists) == 2 and message_lists[0] is not message_lists[1]
+    assert require_change_flags == [False, True]
     assert all(budget.max_rounds == 12 for budget in budgets)
     assert all(budget.max_tool_calls == 32 for budget in budgets)
     assert all(budget.max_output_tokens == 24_576 for budget in budgets)
@@ -1160,7 +1164,7 @@ def _raw_target_result():
 
 def _passing_quality_report(instruction: str, initial, current) -> dict[str, object]:
     return {
-        "schema": "mio.coding-quality-gate.v1",
+        "schema": "mio.coding-quality-gate.v2",
         "enabled": True,
         "effort": "medium",
         "intent": "code_change_requested",
@@ -1169,6 +1173,7 @@ def _passing_quality_report(instruction: str, initial, current) -> dict[str, obj
         "phase": "passed",
         "activated": True,
         "satisfied": True,
+        "require_net_workspace_change": True,
         "mutation_epoch": 1,
         "changed_kinds": ["code"],
         "snapshot_complete": current.complete,
@@ -1176,17 +1181,20 @@ def _passing_quality_report(instruction: str, initial, current) -> dict[str, obj
         "snapshot_error_codes": list(current.error_codes),
         "initial_revision_sha256": initial.revision_sha256,
         "current_revision_sha256": current.revision_sha256,
-        "required": ["test_or_build"],
+        "required": ["net_workspace_change", "test_or_build"],
         "missing": [],
         "validation_counts": {"test": 1, "build": 0, "static": 0, "diff": 0, "review": 0},
+        "validate_invocations": 1,
+        "recognized_validation_attempts": 1,
         "validation_attempts": 1,
+        "misrouted_validation_commands": 0,
         "successful_reads": 1,
     }
 
 
 def _observing_quality_report(instruction: str, snapshot) -> dict[str, object]:
     return {
-        "schema": "mio.coding-quality-gate.v1",
+        "schema": "mio.coding-quality-gate.v2",
         "enabled": True,
         "effort": "medium",
         "intent": "inspect",
@@ -1195,6 +1203,7 @@ def _observing_quality_report(instruction: str, snapshot) -> dict[str, object]:
         "phase": "observing",
         "activated": False,
         "satisfied": True,
+        "require_net_workspace_change": False,
         "mutation_epoch": 0,
         "changed_kinds": [],
         "snapshot_complete": snapshot.complete,
@@ -1205,9 +1214,41 @@ def _observing_quality_report(instruction: str, snapshot) -> dict[str, object]:
         "required": [],
         "missing": [],
         "validation_counts": {"test": 1, "build": 0, "static": 0, "diff": 0, "review": 0},
+        "validate_invocations": 1,
+        "recognized_validation_attempts": 1,
         "validation_attempts": 1,
+        "misrouted_validation_commands": 0,
         "successful_reads": 1,
     }
+
+
+def _awaiting_change_quality_report(instruction: str, snapshot) -> dict[str, object]:
+    report = _observing_quality_report(instruction, snapshot)
+    report.update(
+        {
+            "intent": "code_change_requested",
+            "decision": "incomplete",
+            "phase": "awaiting_change",
+            "satisfied": False,
+            "require_net_workspace_change": True,
+            "required": ["net_workspace_change"],
+            "missing": ["net_workspace_change"],
+        }
+    )
+    return report
+
+
+def _no_net_change_quality_report(instruction: str, snapshot) -> dict[str, object]:
+    report = _awaiting_change_quality_report(instruction, snapshot)
+    report.update(
+        {
+            "phase": "no_net_change",
+            "activated": True,
+            "mutation_epoch": 1,
+            "changed_kinds": ["code"],
+        }
+    )
+    return report
 
 
 def _sealed_portable_run(
@@ -1412,7 +1453,7 @@ def test_native_raw_target_telemetry_accepts_denied_unrecognized_validate(
     assert outcome.telemetry.document()[3][-1]["outcome"] == "unrecognized"
 
 
-def test_native_gate_on_observation_is_completed_and_satisfied_without_mutation(
+def test_native_gate_on_without_change_contract_is_completed_and_satisfied_without_mutation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1458,6 +1499,119 @@ def test_native_gate_on_observation_is_completed_and_satisfied_without_mutation(
     assert quality["phase"] == "observing"
     assert quality["activated"] is False
     assert quality["satisfied"] is True
+    assert quality["require_net_workspace_change"] is False
+
+
+def test_native_gate_on_change_contract_without_mutation_is_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mio import agent
+    from mio.coding_quality import snapshot_workspaces
+
+    engine = SimpleNamespace(
+        tier_config=_tier(),
+        _draft_model=None,
+        _dspark_runtime=None,
+        _prefix_cache={},
+        _last_prompt_tokens=[],
+        _pending_assistant_prefill="",
+        _prefix_cache_invalidate=lambda: None,
+    )
+    native = runner.NativeMioArmExecutor(
+        engine=engine,
+        manager=object(),
+        config=object(),
+        tier="large",
+        require_raw_target_telemetry=True,
+    )
+    request = _raw_target_native_request(tmp_path)
+    request = replace(
+        request,
+        entry=replace(request.entry, condition="gate_on"),
+        instruction="Implement the requested code change",
+        quality_gate_enabled=True,
+    )
+    snapshot = snapshot_workspaces((request.workspace,))
+    result = _raw_target_result()
+    result.terminal_reason = "quality_incomplete"
+    result.quality_gate = _awaiting_change_quality_report(request.instruction, snapshot)
+    monkeypatch.setattr(agent, "_process_user_input", lambda *_args, **_kwargs: result)
+
+    outcome = native(request)
+    turn, quality, _rounds, _tools = outcome.telemetry.document()
+
+    assert outcome.status == "incomplete"
+    assert outcome.quality_gate_decision == "incomplete"
+    assert turn["quality_gate_decision"] == "incomplete"
+    assert quality["decision"] == "incomplete"
+    assert quality["phase"] == "awaiting_change"
+    assert quality["activated"] is False
+    assert quality["satisfied"] is False
+    assert quality["initial_revision_sha256"] == quality["current_revision_sha256"]
+    assert quality["required"] == ["net_workspace_change"]
+    assert quality["missing"] == ["net_workspace_change"]
+
+
+def test_native_gate_on_mutation_then_revert_is_fail_closed_and_cannot_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mio import agent
+    from mio.coding_quality import snapshot_workspaces
+
+    engine = SimpleNamespace(
+        tier_config=_tier(),
+        _draft_model=None,
+        _dspark_runtime=None,
+        _prefix_cache={},
+        _last_prompt_tokens=[],
+        _pending_assistant_prefill="",
+        _prefix_cache_invalidate=lambda: None,
+    )
+    native = runner.NativeMioArmExecutor(
+        engine=engine,
+        manager=object(),
+        config=object(),
+        tier="large",
+        require_raw_target_telemetry=True,
+    )
+    request = _raw_target_native_request(tmp_path)
+    request = replace(
+        request,
+        entry=replace(request.entry, condition="gate_on"),
+        instruction="Implement the requested code change",
+        quality_gate_enabled=True,
+    )
+    snapshot = snapshot_workspaces((request.workspace,))
+    result = _raw_target_result()
+    result.terminal_reason = "quality_incomplete"
+    result.quality_gate = _no_net_change_quality_report(request.instruction, snapshot)
+    monkeypatch.setattr(agent, "_process_user_input", lambda *_args, **_kwargs: result)
+
+    outcome = native(request)
+    _turn, quality, _rounds, _tools = outcome.telemetry.document()
+
+    assert outcome.status == "incomplete"
+    assert outcome.quality_gate_decision == "incomplete"
+    assert quality["phase"] == "no_net_change"
+    assert quality["activated"] is True
+    assert quality["initial_revision_sha256"] == quality["current_revision_sha256"]
+    assert quality["missing"] == ["net_workspace_change"]
+
+    forged_pass = dict(result.quality_gate)
+    forged_pass.update(
+        {
+            "decision": "pass",
+            "phase": "passed",
+            "satisfied": True,
+            "missing": [],
+        }
+    )
+    result.terminal_reason = "model_final"
+    result.quality_gate = forged_pass
+    with pytest.raises(protocol.ProtocolError, match="no-net-change"):
+        native(request)
 
 
 def test_native_budget_exhaustion_is_sealed_as_bounded_incomplete_result(
@@ -1540,7 +1694,7 @@ def test_quality_deadline_serializes_complete_wall_overhead_and_capped_checkpoin
         result.terminal_reason = "quality_incomplete"
         result.budget_exhaustion = f"wall time limit {protocol.MAX_AGENT_WALL_SECONDS}s reached"
         result.quality_gate = {
-            "schema": "mio.coding-quality-gate.v1",
+            "schema": "mio.coding-quality-gate.v2",
             "enabled": True,
             "effort": "medium",
             "intent": "code_change_requested",
@@ -1549,6 +1703,7 @@ def test_quality_deadline_serializes_complete_wall_overhead_and_capped_checkpoin
             "phase": "dirty",
             "activated": True,
             "satisfied": False,
+            "require_net_workspace_change": True,
             "mutation_epoch": 1,
             "changed_kinds": ["code"],
             "snapshot_complete": current.complete,
@@ -1556,10 +1711,13 @@ def test_quality_deadline_serializes_complete_wall_overhead_and_capped_checkpoin
             "snapshot_error_codes": list(current.error_codes),
             "initial_revision_sha256": initial.revision_sha256,
             "current_revision_sha256": current.revision_sha256,
-            "required": ["test_or_build"],
+            "required": ["net_workspace_change", "test_or_build"],
             "missing": ["test_or_build"],
             "validation_counts": {"test": 0, "build": 0, "static": 0, "diff": 0, "review": 0},
+            "validate_invocations": 0,
+            "recognized_validation_attempts": 0,
             "validation_attempts": 0,
+            "misrouted_validation_commands": 0,
             "successful_reads": 0,
         }
         return result
@@ -1626,6 +1784,59 @@ def test_native_gate_on_rejects_quality_report_without_snapshot_attestation(
     monkeypatch.setattr(agent, "_process_user_input", lambda *_args, **_kwargs: result)
 
     with pytest.raises(protocol.ProtocolError, match="quality report fields"):
+        native(request)
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    (
+        ({"validation_attempts": 0}, "alias differs from recognized"),
+        (
+            {
+                "validate_invocations": 0,
+                "recognized_validation_attempts": 0,
+                "validation_attempts": 0,
+                "validation_counts": {"test": 0, "build": 0, "static": 0, "diff": 0, "review": 0},
+            },
+            "validate invocations differ from admitted",
+        ),
+        ({"misrouted_validation_commands": 1}, "misrouted validation commands exceed admitted bash"),
+    ),
+)
+def test_native_gate_on_rejects_quality_validation_counter_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    changes: dict[str, object],
+    message: str,
+) -> None:
+    from mio import agent
+    from mio.coding_quality import snapshot_workspaces
+
+    engine = SimpleNamespace(
+        tier_config=_tier(),
+        _draft_model=None,
+        _dspark_runtime=None,
+        _prefix_cache={},
+        _last_prompt_tokens=[],
+        _pending_assistant_prefill="",
+        _prefix_cache_invalidate=lambda: None,
+    )
+    native = runner.NativeMioArmExecutor(
+        engine=engine,
+        manager=object(),
+        config=object(),
+        tier="large",
+        require_raw_target_telemetry=True,
+    )
+    request = _raw_target_native_request(tmp_path)
+    request = replace(request, entry=replace(request.entry, condition="gate_on"), quality_gate_enabled=True)
+    result = _raw_target_result()
+    report = _observing_quality_report(request.instruction, snapshot_workspaces((request.workspace,)))
+    report.update(changes)
+    result.quality_gate = report
+    monkeypatch.setattr(agent, "_process_user_input", lambda *_args, **_kwargs: result)
+
+    with pytest.raises(protocol.ProtocolError, match=message):
         native(request)
 
 
@@ -1956,8 +2167,10 @@ def test_portable_model_exceptions_complete_pair_and_preserve_workspace_patch(
         if entry.condition == "gate_on":
             assert telemetry["quality_gate"]["phase"] == "model_error"
             assert telemetry["quality_gate"]["satisfied"] is False
+            assert telemetry["quality_gate"]["require_net_workspace_change"] is True
         else:
             assert telemetry["quality_gate"]["phase"] == "experiment_disabled"
+            assert telemetry["quality_gate"]["require_net_workspace_change"] is False
 
 
 def test_portable_artifacts_support_cross_process_audit_and_separate_current_drift(

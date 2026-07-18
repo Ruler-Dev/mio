@@ -810,6 +810,21 @@ patch where Plain did not, but did not make that patch successful. The
 source-free artifact is
 [`benchmarks/results/swebench-quality-27b-smoke-0fd8389.json`](../benchmarks/results/swebench-quality-27b-smoke-0fd8389.json).
 
+Post-smoke trace analysis found that this intervention had two avoidable
+procedural failure modes. A requested change with no workspace mutation was
+treated as observational and therefore satisfied, while a late edit left only
+one tool-enabled round; the model selected Bash for a test-like command, and
+the reserved synthesis round made trusted validation impossible. Quality Gate
+v2 consequently requires a net revision delta under a trusted change contract,
+rejects identical writes and edit-revert trajectories, prioritizes `validate`
+over Bash, and makes the final bounded round a restricted recovery round. It
+keeps the 12-round ceiling and does not modify MLX inference kernels. Thus its
+expected cost, if any, is agent-level prompt/tool wall time rather than an
+intrinsic change in prefill or decode tok/s. These design corrections are not
+retroactive evidence: the v2 policy must pass paired MioCodeBench calibration
+and internal holdout cost gates before another 27B smoke, and only the frozen
+500-pair Verified experiment can support a quality claim.
+
 A proper coding study should compare at least:
 
 1. target AR with tool-free prompts;

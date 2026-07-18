@@ -1012,7 +1012,7 @@ def test_coding_agent_drops_unterminated_tool_xml_from_output_and_history(
     assert state["messages"][-1]["content"] == "I inspected the request."
 
 
-def test_coding_agent_reserves_twelfth_round_for_budget_synthesis(
+def test_coding_agent_keeps_twelfth_round_tool_capable_for_final_status(
     monkeypatch,
     tmp_path,
 ):
@@ -1038,14 +1038,13 @@ def test_coding_agent_reserves_twelfth_round_for_budget_synthesis(
     )
 
     assert len(engine.requests) == agent._MAX_AGENT_ROUNDS_PER_TURN == 12
-    assert all(spec is agent.AGENT_TOOLS_SPEC for spec in engine.tool_specs[:-1])
-    assert engine.tool_specs[-1] is None
-    assert "Tool execution must stop now (model round limit 12 reached)" in (engine.requests[-1][-1]["content"])
+    assert all(spec is agent.AGENT_TOOLS_SPEC for spec in engine.tool_specs)
+    assert "This is the final model round" in engine.requests[-1][-1]["content"]
     assert state["messages"][-1]["content"].endswith("work remains.")
     assert "<tool_call>" not in output.getvalue()
 
 
-def test_coding_agent_never_dispatches_memorized_tool_xml_on_final_round(
+def test_coding_agent_dispatches_final_round_tool_with_deterministic_status(
     monkeypatch,
     tmp_path,
 ):
@@ -1081,9 +1080,9 @@ def test_coding_agent_never_dispatches_memorized_tool_xml_on_final_round(
     )
 
     assert len(engine.requests) == 12
-    assert len(calls) == 11
-    assert engine.tool_specs[-1] is None
-    assert "no additional operation was executed" in state["messages"][-1]["content"]
+    assert len(calls) == 12
+    assert engine.tool_specs[-1] is agent.AGENT_TOOLS_SPEC
+    assert "final model round executed its requested tools" in state["messages"][-1]["content"]
     assert "<tool_call>" not in output.getvalue()
 
 
@@ -1522,6 +1521,144 @@ def test_no_tool_quality_reprompt_is_bounded_once_per_unchanged_signature(
     assert "already reprompted once" in result.assistant_text
     assert result.quality_gate is not None
     assert result.quality_gate["decision"] == "incomplete"
+
+
+def test_requested_change_without_net_diff_is_incomplete_but_not_persisted(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(
+        agent,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+    engine = _ScriptedEngine(
+        [
+            "The requested change appears unnecessary.",
+            "No justified workspace change was made; this remains uncertified.",
+        ]
+    )
+    state = _enable_quality_gate(_state(tmp_path))
+    state["quality_gate_require_change"] = True
+
+    result = agent._process_user_input(
+        "Implement the requested parser change.",
+        engine,
+        _Manager(),
+        MioConfig.default(),
+        state,
+    )
+
+    assert len(engine.requests) == 2
+    assert "no net workspace change" in engine.requests[1][-1]["content"]
+    assert result.terminal_reason == "quality_incomplete"
+    assert result.quality_gate is not None
+    assert result.quality_gate["phase"] == "awaiting_change"
+    assert result.quality_gate["decision"] == "incomplete"
+    assert result.quality_gate["require_net_workspace_change"] is True
+    assert state["quality_gate_pending"] is False
+    assert "_quality_gate" not in state
+
+
+def test_final_no_tool_quality_refusal_preserves_prose_and_reports_round_cap(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(
+        agent,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+    state = _enable_quality_gate(_state(tmp_path))
+    state["quality_gate_require_change"] = True
+    state["execution_budget"] = agent.AgentExecutionBudget(max_rounds=1)
+    engine = _ScriptedEngine(["No justified change was made."])
+
+    result = agent._process_user_input(
+        "Implement the requested change.",
+        engine,
+        _Manager(),
+        MioConfig.default(),
+        state,
+    )
+
+    assert result.terminal_reason == "quality_incomplete"
+    assert result.budget_exhaustion == "model round limit 1 reached"
+    assert result.assistant_text.startswith("No justified change was made.")
+    assert "final model round did not supply" in result.assistant_text
+
+
+def test_final_round_recovers_misrouted_bash_validation_with_validate(
+    monkeypatch,
+    tmp_path,
+):
+    target = tmp_path / "stats.py"
+    target.write_text("VALUE = 1\n", encoding="utf-8")
+    monkeypatch.setattr(
+        agent,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+
+    def failed_bash_validation(command, *, policy):
+        policy.audit(
+            operation="bash",
+            permission=agent.AgentToolPermission.SHELL,
+            target="command sha256:test-only",
+            allowed=True,
+            outcome="nonzero",
+            detail="returncode=127",
+        )
+        return f"{command}: command not found"
+
+    monkeypatch.setitem(
+        agent.AGENT_TOOLS,
+        "bash",
+        {
+            "fn": failed_bash_validation,
+            "args": ["command"],
+            "permission": agent.AgentToolPermission.SHELL,
+        },
+    )
+    monkeypatch.setitem(
+        agent.AGENT_TOOLS,
+        "validate",
+        {
+            "fn": _audited_test_validation,
+            "args": ["argv"],
+            "permission": agent.AgentToolPermission.SHELL,
+        },
+    )
+    engine = _ScriptedEngine(
+        [
+            *[_tool_call("read", path="stats.py") for _ in range(9)],
+            _tool_call("edit", path="stats.py", old="VALUE = 1", new="VALUE = 2"),
+            _tool_call("bash", command="python3 -m pytest -q"),
+            _tool_call("validate", argv='["python3", "-m", "pytest", "-q"]'),
+        ]
+    )
+    state = _enable_quality_gate(_state(tmp_path))
+    state["quality_gate_require_change"] = True
+
+    result = agent._process_user_input(
+        "Update stats.py to VALUE = 2 and validate it.",
+        engine,
+        _Manager(),
+        MioConfig.default(),
+        state,
+    )
+
+    assert target.read_text(encoding="utf-8") == "VALUE = 2\n"
+    assert len(engine.requests) == agent._MAX_AGENT_ROUNDS_PER_TURN
+    assert [agent._tool_schema_name(spec) for spec in engine.tool_specs[-1]] == ["validate"]
+    assert result.terminal_reason == "budget_finalization"
+    assert result.budget_exhaustion == "model round limit 12 reached"
+    assert result.quality_gate is not None
+    assert result.quality_gate["decision"] == "pass"
+    assert result.quality_gate["validate_invocations"] == 1
+    assert result.quality_gate["recognized_validation_attempts"] == 1
+    assert result.quality_gate["misrouted_validation_commands"] == 1
+    assert result.quality_gate["required"] == ["net_workspace_change", "test_or_build"]
 
 
 def test_builtin_reads_defer_quality_resnapshot_until_terminal_refresh(
