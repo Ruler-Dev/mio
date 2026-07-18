@@ -1,19 +1,23 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 from pathlib import Path
 import sys
 
 import pytest
 
+import experimental.effort.humaneval as humaneval_module
 from experimental.effort.humaneval import (
     HumanEvalCase,
     HumanEvalError,
     corpus_manifest,
     fetch_humaneval,
     load_humaneval,
+    load_humaneval_references,
     prepare_candidate,
+    reference_manifest,
     split_humaneval,
     validate_candidate_public,
     verify_candidate,
@@ -135,6 +139,70 @@ def test_load_rejects_archive_symlink(tmp_path: Path) -> None:
     link.symlink_to(target)
     with pytest.raises(HumanEvalError, match="archive"):
         load_humaneval(link, require_official=False)
+
+
+def test_reference_loader_requires_pinned_archive_and_hashes_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sample = case()
+    canonical_solution = "    return value + 1\n"
+    path = tmp_path / "reference.jsonl.gz"
+    write_corpus(
+        path,
+        [
+            {
+                "task_id": sample.task_id,
+                "prompt": sample.prompt,
+                "test": sample.test,
+                "entry_point": sample.entry_point,
+                "canonical_solution": canonical_solution,
+            }
+        ],
+    )
+
+    with pytest.raises(HumanEvalError, match="pinned corpus"):
+        load_humaneval_references(path)
+
+    monkeypatch.setattr(
+        humaneval_module,
+        "HUMANEVAL_SHA256",
+        hashlib.sha256(path.read_bytes()).hexdigest(),
+    )
+    references = load_humaneval_references(path)
+    assert len(references) == 1
+    assert references[0].case == sample
+    assert references[0].canonical_solution == canonical_solution
+    assert references[0].canonical_solution_sha256 == hashlib.sha256(canonical_solution.encode("utf-8")).hexdigest()
+    manifest = reference_manifest(references)
+    assert manifest["tasks"] == 1
+    assert manifest["manifest_sha256"]
+
+
+def test_reference_loader_rejects_missing_canonical_solution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sample = case()
+    path = tmp_path / "missing-reference.jsonl.gz"
+    write_corpus(
+        path,
+        [
+            {
+                "task_id": sample.task_id,
+                "prompt": sample.prompt,
+                "test": sample.test,
+                "entry_point": sample.entry_point,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        humaneval_module,
+        "HUMANEVAL_SHA256",
+        hashlib.sha256(path.read_bytes()).hexdigest(),
+    )
+    with pytest.raises(HumanEvalError, match="invalid HumanEval row"):
+        load_humaneval_references(path)
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS sandbox-exec")

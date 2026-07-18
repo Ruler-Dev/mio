@@ -94,6 +94,36 @@ class HumanEvalCase:
 
 
 @dataclass(frozen=True)
+class HumanEvalReference:
+    """Pinned reference completion paired with its hidden evaluation case.
+
+    This type is intentionally separate from :class:`PublicHumanEvalCase` so
+    reference completions cannot accidentally enter model prompts or routing
+    code.  It is only constructed by the official-corpus loader below.
+    """
+
+    case: HumanEvalCase
+    canonical_solution: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.canonical_solution, str) or not self.canonical_solution:
+            raise HumanEvalError("HumanEval canonical solution must be a non-empty string")
+        fields = (
+            self.case.task_id,
+            self.case.prompt,
+            self.case.test,
+            self.case.entry_point,
+            self.canonical_solution,
+        )
+        if sum(len(value) for value in fields) > _MAX_CASE_CHARS:
+            raise HumanEvalError("HumanEval reference case exceeds the size limit")
+
+    @property
+    def canonical_solution_sha256(self) -> str:
+        return _sha256(self.canonical_solution.encode("utf-8"))
+
+
+@dataclass(frozen=True)
 class PublicHumanEvalCase:
     """HumanEval data visible to prompts, validators, and the controller."""
 
@@ -205,7 +235,14 @@ def fetch_humaneval(destination: Path | None = None) -> Path:
     return path
 
 
-def load_humaneval(path: Path, *, require_official: bool = True) -> tuple[HumanEvalCase, ...]:
+def _load_humaneval_rows(
+    path: Path,
+    *,
+    require_official: bool,
+    include_canonical_solutions: bool,
+) -> tuple[tuple[HumanEvalCase, HumanEvalReference | None], ...]:
+    """Read and validate one corpus through the shared bounded archive path."""
+
     payload = _read_archive(path.expanduser())
     if require_official and _sha256(payload) != HUMANEVAL_SHA256:
         raise HumanEvalError("HumanEval archive does not match the pinned corpus")
@@ -217,28 +254,58 @@ def load_humaneval(path: Path, *, require_official: bool = True) -> tuple[HumanE
     if len(decompressed) > _MAX_DECOMPRESSED_BYTES:
         raise HumanEvalError("decompressed HumanEval corpus exceeds the size limit")
 
-    cases: list[HumanEvalCase] = []
+    rows: list[tuple[HumanEvalCase, HumanEvalReference | None]] = []
     seen: set[str] = set()
     for line_number, raw_line in enumerate(decompressed.splitlines(), start=1):
         if not raw_line.strip():
             continue
         try:
             row = json.loads(raw_line)
+            if not isinstance(row, dict):
+                raise TypeError("HumanEval row must be an object")
             case = HumanEvalCase(
                 task_id=row["task_id"],
                 prompt=row["prompt"],
                 test=row["test"],
                 entry_point=row["entry_point"],
             )
+            reference = None
+            if include_canonical_solutions:
+                # Constructing the reference here applies the same aggregate
+                # case-size limit before any source reaches the verifier.
+                reference = HumanEvalReference(
+                    case=case,
+                    canonical_solution=row["canonical_solution"],
+                )
         except (KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise HumanEvalError(f"invalid HumanEval row {line_number}") from exc
         if case.task_id in seen:
             raise HumanEvalError(f"duplicate HumanEval task id: {case.task_id}")
         seen.add(case.task_id)
-        cases.append(case)
-    if not cases:
+        rows.append((case, reference))
+    if not rows:
         raise HumanEvalError("HumanEval corpus is empty")
-    return tuple(cases)
+    return tuple(rows)
+
+
+def load_humaneval(path: Path, *, require_official: bool = True) -> tuple[HumanEvalCase, ...]:
+    rows = _load_humaneval_rows(
+        path,
+        require_official=require_official,
+        include_canonical_solutions=False,
+    )
+    return tuple(case for case, _reference in rows)
+
+
+def load_humaneval_references(path: Path) -> tuple[HumanEvalReference, ...]:
+    """Load canonical solutions exclusively from the SHA-pinned official corpus."""
+
+    rows = _load_humaneval_rows(
+        path,
+        require_official=True,
+        include_canonical_solutions=True,
+    )
+    return tuple(reference for _case, reference in rows if reference is not None)
 
 
 def split_humaneval(
@@ -276,6 +343,26 @@ def corpus_manifest(cases: tuple[HumanEvalCase, ...]) -> dict[str, object]:
             "entry_point": case.entry_point,
         }
         for case in cases
+    ]
+    canonical = json.dumps(rows, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return {
+        "tasks": len(rows),
+        "task_ids": [row["task_id"] for row in rows],
+        "manifest_sha256": _sha256(canonical),
+    }
+
+
+def reference_manifest(
+    references: tuple[HumanEvalReference, ...],
+) -> dict[str, object]:
+    """Return a source-free manifest that binds every canonical completion."""
+
+    rows = [
+        {
+            "task_id": reference.case.task_id,
+            "canonical_solution_sha256": reference.canonical_solution_sha256,
+        }
+        for reference in references
     ]
     canonical = json.dumps(rows, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return {
