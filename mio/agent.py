@@ -2817,6 +2817,21 @@ def _process_user_input(
         if tool_timeout_terminal:
             break
 
+        # A model that keeps calling tools never enters the no-tool reprompt
+        # branch above. Surface the live, revision-bound obligation after each
+        # tool round so a mutation can be followed by trusted validation before
+        # the reserved finalization round. This is content-free gate feedback;
+        # tool output and workspace contents are not repeated.
+        if quality_gate is not None:
+            quality_decision = quality_gate.decision()
+            if quality_decision.activated and not quality_decision.satisfied:
+                current_messages.append(
+                    {
+                        "role": "user",
+                        "content": quality_gate.feedback(),
+                    }
+                )
+
     if quality_gate is not None:
         quality_gate.refresh()
         if not quality_gate.decision().satisfied and terminal_reason != "quality_incomplete":

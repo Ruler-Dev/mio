@@ -1423,7 +1423,10 @@ def test_quality_gate_reprompts_after_edit_until_trusted_validation(
 
     assert (tmp_path / "stats.py").read_text() == "VALUE = 2\n"
     assert len(engine.requests) == 4
+    assert "Coding-quality gate incomplete" in engine.requests[1][-1]["content"]
     assert "Coding-quality gate incomplete" in engine.requests[2][-1]["content"]
+    assert engine.requests[3][-1]["role"] == "tool"
+    assert "Coding-quality gate incomplete" not in engine.requests[3][-1]["content"]
     assert result.terminal_reason == "model_final"
     assert result.quality_gate is not None
     assert result.quality_gate["decision"] == "pass"
