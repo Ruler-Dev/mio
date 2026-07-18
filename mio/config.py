@@ -11,6 +11,9 @@ from mio.paths import mio_home
 from mio.persistence import atomic_write_json
 
 
+CODING_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "ultra")
+
+
 @dataclass
 class TierConfig:
     """Configuration for a single model tier."""
@@ -69,6 +72,9 @@ class MioConfig:
     tandem: bool = False
     port: int = 9090
     host: str = "127.0.0.1"
+    # Native coding-agent quality gate. This is independent from model tier,
+    # speculative backend, and Caveman/Ponytail prompt policy.
+    coding_effort: str = "medium"
     config_dir: Path = field(default_factory=mio_home)
 
     @classmethod
@@ -161,6 +167,8 @@ def load_config(path: Path | None = None) -> MioConfig:
         config.port = data["port"]
     if isinstance(data.get("host"), str) and data["host"]:
         config.host = data["host"]
+    if data.get("coding_effort") in CODING_EFFORT_LEVELS:
+        config.coding_effort = data["coding_effort"]
     return config
 
 
@@ -172,6 +180,11 @@ def save_config(config: MioConfig, path: Path) -> None:
         "tandem": config.tandem,
         "port": config.port,
         "host": config.host,
+        "coding_effort": (
+            config.coding_effort
+            if config.coding_effort in CODING_EFFORT_LEVELS
+            else "medium"
+        ),
         "tiers": {},
     }
     for name, tier in config.tiers.items():

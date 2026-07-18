@@ -44,6 +44,7 @@ def test_config_round_trip_persists_tiers_and_top_level(tmp_path):
     config.tandem = True
     config.port = 9191
     config.host = "127.0.0.1"
+    config.coding_effort = "high"
     config.tiers["small"].context_window = 65536
     config.tiers["small"].temperature = 0.7
     config.tiers["small"].drafter_backend = "dspark"
@@ -67,6 +68,7 @@ def test_config_round_trip_persists_tiers_and_top_level(tmp_path):
     assert loaded.tandem is True
     assert loaded.port == 9191
     assert loaded.host == "127.0.0.1"
+    assert loaded.coding_effort == "high"
     assert loaded.config_dir == path.parent
     assert loaded.tiers["small"].context_window == 65536
     assert loaded.tiers["small"].temperature == 0.7
@@ -113,6 +115,14 @@ def test_load_config_ignores_unknown_active_tiers(tmp_path):
     path.write_text(json.dumps({"active_tiers": ["removed-tier"]}), encoding="utf-8")
 
     assert load_config(path).active_tiers == ["large-moe"]
+
+
+def test_coding_effort_defaults_medium_and_invalid_persisted_value_is_ignored(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"coding_effort": "impossible"}), encoding="utf-8")
+
+    assert MioConfig.default().coding_effort == "medium"
+    assert load_config(path).coding_effort == "medium"
 
 
 def test_serve_uses_persisted_values_when_cli_does_not_override(tmp_path, monkeypatch):

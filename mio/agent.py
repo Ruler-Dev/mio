@@ -6,10 +6,13 @@ import hashlib
 import math
 import os
 import selectors
+import shutil
 import signal
 import subprocess
+import tempfile
 import time
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from rich.console import Console
@@ -17,10 +20,11 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Prompt
 
-from mio.config import MioConfig
+from mio.config import CODING_EFFORT_LEVELS, MioConfig
 from mio.engine import MioEngine
 from mio.model_manager import ModelManager
 from mio.agent_policy import (
+    AgentAuditEvent,
     AgentPathViolation,
     AgentPermissionDenied,
     AgentToolPermission,
@@ -43,6 +47,84 @@ _FINALIZE_TOOL_LOOP = (
     "Give a concise, evidence-based status with files changed, latest validation "
     "or test outcome, and any unfinished work or limitation."
 )
+
+
+@dataclass(frozen=True)
+class AgentRoundTrace:
+    """Content-free generation metrics for one model round."""
+
+    round_index: int
+    prompt_tokens: int
+    completion_tokens: int
+    total_time_s: float
+    prompt_tps: float
+    generation_tps: float
+    generation_backend: str
+    fallback_ar: bool
+
+
+@dataclass(frozen=True)
+class AgentToolTrace:
+    """Sanitized evidence for one dispatcher/audit event."""
+
+    round_index: int
+    tool_name: str
+    operation: str
+    permission: str
+    allowed: bool
+    outcome: str
+    target_sha256: str
+
+
+@dataclass(frozen=True)
+class AgentTurnResult:
+    """Structured turn result for benchmarks and non-console callers.
+
+    ``assistant_text`` remains available to interactive callers, but benchmark
+    artifact serializers must omit it.  All trace fields are deliberately
+    content-free and contain neither tool arguments nor tool output.
+    """
+
+    assistant_text: str
+    terminal_reason: str
+    rounds: tuple[AgentRoundTrace, ...]
+    tool_events: tuple[AgentToolTrace, ...]
+    tool_calls: int
+    tool_result_chars: int
+    wall_time_s: float
+    quality_gate: dict[str, object] | None = None
+
+
+def _round_trace(round_index: int, metrics: object) -> AgentRoundTrace:
+    return AgentRoundTrace(
+        round_index=round_index,
+        prompt_tokens=int(getattr(metrics, "prompt_tokens", 0) or 0),
+        completion_tokens=int(getattr(metrics, "completion_tokens", 0) or 0),
+        total_time_s=float(getattr(metrics, "total_time_s", 0.0) or 0.0),
+        prompt_tps=float(getattr(metrics, "prompt_tps", 0.0) or 0.0),
+        generation_tps=float(getattr(metrics, "generation_tps", 0.0) or 0.0),
+        generation_backend=str(getattr(metrics, "generation_backend", "unknown")),
+        fallback_ar=bool(getattr(metrics, "fallback_ar", False)),
+    )
+
+
+def _tool_trace(
+    round_index: int,
+    tool_name: str,
+    event: AgentAuditEvent,
+) -> AgentToolTrace:
+    target_digest = hashlib.sha256(
+        event.target.encode("utf-8", errors="replace")
+    ).hexdigest()
+    return AgentToolTrace(
+        round_index=round_index,
+        tool_name=tool_name[:64],
+        operation=event.operation,
+        permission=event.permission,
+        allowed=event.allowed,
+        outcome=event.outcome,
+        target_sha256=target_digest,
+    )
 
 # --- System Prompts ---
 
@@ -331,6 +413,146 @@ def tool_bash(command: str, *, policy: AgentToolPolicy | None = None) -> str:
         return cap_tool_output(f"(error: {e})", active_policy.output_limit_chars)
 
 
+def _validation_argv(raw_argv: object) -> tuple[str, ...]:
+    """Validate a model-supplied direct argv without invoking a shell."""
+
+    if not isinstance(raw_argv, (list, tuple)) or not raw_argv:
+        raise ValueError("argv must be a non-empty array of strings")
+    if len(raw_argv) > 128:
+        raise ValueError("argv exceeds 128 entries")
+    argv: list[str] = []
+    total_chars = 0
+    for value in raw_argv:
+        if not isinstance(value, str) or not value or "\x00" in value:
+            raise ValueError("argv entries must be non-empty strings without NUL bytes")
+        if len(value) > 4096:
+            raise ValueError("an argv entry exceeds 4096 characters")
+        total_chars += len(value)
+        if total_chars > 32_768:
+            raise ValueError("argv exceeds 32768 characters")
+        argv.append(value)
+    return tuple(argv)
+
+
+def _audit_target_for_argv(argv: tuple[str, ...], kind: str = "unrecognized") -> str:
+    rendered = "\x00".join(argv)
+    digest = hashlib.sha256(rendered.encode("utf-8", errors="replace")).hexdigest()[:32]
+    executable = Path(argv[0]).name if argv else "invalid"
+    return f"{kind}:{executable} sha256:{digest}"
+
+
+def tool_validate(
+    argv: list[str] | tuple[str, ...],
+    *,
+    policy: AgentToolPolicy | None = None,
+) -> str:
+    """Run one recognized validation as direct argv and audit its true status.
+
+    This tool intentionally supports no shell grammar, wrappers, inline code,
+    pipes, redirections, or success-masking operators. Coding-quality verdicts
+    consume its structured audit event rather than interpreting command text.
+    """
+
+    active_policy = _policy_or_read_only(policy)
+    target = "unrecognized:invalid sha256:" + hashlib.sha256(b"").hexdigest()[:32]
+    try:
+        active_policy.require(AgentToolPermission.SHELL)
+        normalized = _validation_argv(argv)
+        from mio.coding_quality import infer_validation_kind
+
+        kind = infer_validation_kind(normalized)
+        if kind is None:
+            target = _audit_target_for_argv(normalized)
+            active_policy.audit(
+                operation="validate",
+                permission=AgentToolPermission.SHELL,
+                target=target,
+                allowed=False,
+                outcome="unrecognized",
+                detail="direct argv is not a recognized validation command",
+            )
+            return _capped(
+                active_policy,
+                "(validation rejected: use a direct supported test, static, build, or git diff --check argv)",
+            )
+
+        kind_name = str(getattr(kind, "value", kind))
+        target = _audit_target_for_argv(normalized, kind_name)
+        sandboxed_argv, command_env = sandboxed_command(list(normalized), active_policy)
+        scratch = Path(
+            tempfile.mkdtemp(
+                prefix=".mio-validation-",
+                dir=active_policy.primary_workspace,
+            )
+        )
+        command_env = dict(command_env)
+        command_env.update(
+            {
+                "HOME": str(scratch),
+                "TMPDIR": str(scratch),
+                "XDG_CACHE_HOME": str(scratch / "cache"),
+                "PYTHONPYCACHEPREFIX": str(scratch / "pycache"),
+                "PYTHONDONTWRITEBYTECODE": "1",
+            }
+        )
+        started = time.perf_counter()
+        try:
+            result = _run_bounded_process(
+                sandboxed_argv,
+                cwd=active_policy.primary_workspace,
+                env=command_env,
+                timeout_s=active_policy.command_timeout_s,
+                output_limit_chars=active_policy.output_limit_chars,
+            )
+        finally:
+            # The unique trusted scratch root prevents test caches/temp files
+            # from becoming workspace mutations or leaking between checks.
+            shutil.rmtree(scratch, ignore_errors=True)
+        duration_s = time.perf_counter() - started
+        response = _command_response(result, active_policy)
+        outcome = "ok" if result.returncode == 0 else "nonzero"
+        if result.timed_out:
+            outcome = "timeout"
+        elif result.output_exceeded:
+            outcome = "output_limit"
+        active_policy.audit(
+            operation="validate",
+            permission=AgentToolPermission.SHELL,
+            target=target,
+            allowed=True,
+            outcome=outcome,
+            detail=(
+                f"kind={kind_name}; returncode={result.returncode}; "
+                f"duration_ms={duration_s * 1000:.3f}; output_chars={len(response)}"
+            ),
+        )
+        verdict = "PASS" if outcome == "ok" else "FAIL"
+        return _capped(
+            active_policy,
+            f"(validation {kind_name}: {verdict}; returncode={result.returncode})\n{response}",
+        )
+    except (AgentPermissionDenied, AgentPathViolation) as exc:
+        active_policy.audit(
+            operation="validate",
+            permission=AgentToolPermission.SHELL,
+            target=target,
+            allowed=False,
+            outcome="denied",
+            detail=str(exc),
+        )
+        return _capped(active_policy, f"(permission denied: {exc})")
+    except Exception as exc:
+        active_policy.audit(
+            operation="validate",
+            permission=AgentToolPermission.SHELL,
+            target=target,
+            allowed=True,
+            outcome="error",
+            detail=f"{type(exc).__name__}: {exc}",
+        )
+        return _capped(active_policy, f"(validation error: {exc})")
+
+
 def tool_read(path: str, *, policy: AgentToolPolicy | None = None) -> str:
     """Read a file and return its contents."""
     active_policy = _policy_or_read_only(policy)
@@ -586,6 +808,11 @@ AGENT_TOOLS = {
         "args": ["command"],
         "permission": AgentToolPermission.SHELL,
     },
+    "validate": {
+        "fn": tool_validate,
+        "args": ["argv"],
+        "permission": AgentToolPermission.SHELL,
+    },
     "read": {
         "fn": tool_read,
         "args": ["path"],
@@ -625,6 +852,23 @@ AGENT_TOOLS_SPEC = [
         "parameters": {"type": "object", "properties": {
             "command": {"type": "string", "description": "Shell command to run"},
         }, "required": ["command"]},
+    }},
+    {"type": "function", "function": {
+        "name": "validate",
+        "description": (
+            "Run a recognized test, static check, build, or git diff --check as direct argv. "
+            "Use this instead of bash for evidence after any edit. No shell, pipes, redirections, "
+            "wrappers, or inline code are accepted; the true exit status is audited."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "argv": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "maxItems": 128,
+                "description": "Direct executable and arguments, e.g. [\"python3\", \"-m\", \"pytest\", \"-q\"]",
+            },
+        }, "required": ["argv"]},
     }},
     {"type": "function", "function": {
         "name": "read",
@@ -809,6 +1053,7 @@ def handle_slash_command(
             "- `/context [8k|16k|32k|64k|128k|256k] [tq2|tq3|tq4|off]` - Set context + TQ\n"
             "- `/caveman [off|lite|full|ultra]` - Set communication mode\n"
             "- `/ponytail [off|lite|full|ultra]` - Set engineering policy\n"
+            "- `/effort [low|medium|high|xhigh|ultra]` - Set mandatory coding-quality gate\n"
             "- `/tq` - Show TurboQuant status\n"
             "- `/status` - Show engine status\n"
             "- `/models` - List available models\n"
@@ -869,6 +1114,27 @@ def handle_slash_command(
             return f"Prompt policy: **{state['prompt_policy'].label}**"
         policy = state.get("prompt_policy", PromptPolicy())
         return f"Prompt policy: **{policy.label}**. Usage: `/ponytail off|lite|full|ultra`"
+
+    elif command == "/effort":
+        current = str(state.get("coding_effort", "medium"))
+        if args:
+            level = args[0].lower()
+            if level not in CODING_EFFORT_LEVELS:
+                return (
+                    f"Unknown effort: {level}. Options: "
+                    + ", ".join(CODING_EFFORT_LEVELS)
+                )
+            if state.get("quality_gate_pending"):
+                return (
+                    "Cannot change effort while a coding-quality obligation is pending. "
+                    "Complete or explicitly report the current validation first."
+                )
+            state["coding_effort"] = level
+            return f"Coding-quality effort: **{level}** (mandatory)"
+        return (
+            f"Coding-quality effort: **{current}** (mandatory). Usage: "
+            "`/effort low|medium|high|xhigh|ultra`"
+        )
 
     elif command == "/context":
         tier = state.get("tier", "large-moe")
@@ -945,22 +1211,32 @@ def run_agent(
     initial_prompt: str | None = None,
     prompt_policy: PromptPolicy | None = None,
     tool_policy: AgentToolPolicy | None = None,
+    coding_effort: str = "medium",
+    quality_gate_enabled: bool = True,
 ) -> None:
     """Run the interactive coding agent."""
     # Library callers that omit a policy are intentionally read-only. The
     # native CLI passes its named coding policy explicitly at the trust edge.
     declared_tool_policy = tool_policy or _default_read_policy()
+    if coding_effort not in CODING_EFFORT_LEVELS:
+        raise ValueError(
+            f"coding_effort must be one of: {', '.join(CODING_EFFORT_LEVELS)}"
+        )
     state = {
         "tier": tier,
         "prompt_policy": prompt_policy or PromptPolicy(),
         "tool_policy": declared_tool_policy,
+        "coding_effort": coding_effort,
+        "quality_gate_enabled": bool(quality_gate_enabled),
         "messages": [],
     }
 
     # Banner
     console.print(Panel(
         "[bold cyan]Mio Agent[/bold cyan]\n"
-        f"[dim]Tier: {tier} | Prompt: {state['prompt_policy'].label} | /help for commands[/dim]",
+        f"[dim]Tier: {tier} | Prompt: {state['prompt_policy'].label} | "
+        f"Quality: {coding_effort + ' (mandatory)' if quality_gate_enabled else 'off (benchmark control)'} "
+        "| /help for commands[/dim]",
         border_style="cyan",
     ))
     console.print()
@@ -1007,7 +1283,7 @@ def _process_user_input(
     manager: ModelManager,
     config: MioConfig,
     state: dict,
-) -> None:
+) -> AgentTurnResult:
     """Process a user message: build prompt, generate, run any tool calls
     the model emits, feed the results back, and repeat until the model
     stops calling tools. The last bounded model round is reserved for a
@@ -1015,6 +1291,7 @@ def _process_user_input(
     loop the model would just emit <tool_call>…</tool_call> tags as literal
     text and the file would never actually be written.
     """
+    turn_started = time.perf_counter()
     current_tier = state.get("tier", "large-moe")
     if current_tier in manager.loaded_tiers():
         engine = manager.get_engine(current_tier)
@@ -1024,7 +1301,38 @@ def _process_user_input(
     tool_policy = state.get("tool_policy")
     if not isinstance(tool_policy, AgentToolPolicy):
         tool_policy = _default_read_policy()
+    audit_events: list[AgentAuditEvent] = []
+
+    def capture_audit(event: AgentAuditEvent) -> None:
+        audit_events.append(event)
+        tool_policy.audit_sink(event)
+
+    # Capture the exact structured outcomes without changing the authority or
+    # resource limits of the caller-declared policy. The original sink still
+    # receives every event for operational audit logging.
+    execution_policy = replace(tool_policy, audit_sink=capture_audit)
     system_prompt = AGENT_SYSTEM_PROMPT
+    tool_registry = state.get("tool_registry", AGENT_TOOLS)
+    tool_specs = state.get("tool_specs", AGENT_TOOLS_SPEC)
+    if not isinstance(tool_registry, Mapping):
+        raise TypeError("state.tool_registry must be a frozen dispatcher mapping")
+    if not isinstance(tool_specs, (list, tuple)):
+        raise TypeError("state.tool_specs must be a tool-schema sequence")
+    quality_gate = None
+    if bool(state.get("quality_gate_enabled", False)):
+        from mio.coding_quality import CodingQualityGate
+
+        pending_gate = state.get("_quality_gate")
+        if isinstance(pending_gate, CodingQualityGate) and not pending_gate.decision().satisfied:
+            quality_gate = pending_gate
+        else:
+            quality_gate = CodingQualityGate.start(
+                execution_policy.workspace_roots,
+                user_input,
+                effort=str(state.get("coding_effort", "medium")),
+                enabled=True,
+            )
+        system_prompt += quality_gate.system_instructions()
 
     # Initial messages
     current_messages = apply_prompt_policy(
@@ -1043,6 +1351,9 @@ def _process_user_input(
     tool_calls_used = 0
     tool_result_chars = 0
     forced_finalization_reason: str | None = None
+    terminal_reason = "model_final"
+    round_traces: list[AgentRoundTrace] = []
+    tool_event_traces: list[AgentToolTrace] = []
 
     for _round_idx in range(_MAX_AGENT_ROUNDS_PER_TURN):
         finalization_reason = forced_finalization_reason
@@ -1050,7 +1361,7 @@ def _process_user_input(
             finalization_reason = f"model round limit {_MAX_AGENT_ROUNDS_PER_TURN} reached"
         finalization_only = finalization_reason is not None
         generation_messages = current_messages
-        generation_tools = AGENT_TOOLS_SPEC
+        generation_tools = tool_specs
         if finalization_only:
             generation_messages = list(current_messages) + [{
                 "role": "user",
@@ -1082,6 +1393,7 @@ def _process_user_input(
 
         # Metrics line
         m = engine.last_metrics
+        round_traces.append(_round_trace(_round_idx, m))
         if m.generation_tps > 0:
             console.print(
                 f"[dim]  {m.generation_tps:.1f} tok/s · "
@@ -1102,6 +1414,7 @@ def _process_user_input(
         # conversation history as assistant content.
         visible_text = "".join(visible_parts).strip()
         if finalization_only:
+            terminal_reason = "budget_finalization"
             if tool_calls:
                 # A model can still emit memorized XML after the schema is
                 # removed. It is never dispatched on the reserved final round.
@@ -1114,10 +1427,31 @@ def _process_user_input(
             terminal_assistant_text = "\n\n".join(
                 text for text in (visible_text, notice if tool_calls else "") if text
             )
+            if quality_gate is not None and not quality_gate.decision().satisfied:
+                quality_notice = (
+                    "Coding-quality gate: INCOMPLETE. The latest workspace revision "
+                    "does not have the required trusted validation evidence; no success "
+                    "is certified."
+                )
+                console.print(quality_notice, style="yellow")
+                terminal_assistant_text = "\n\n".join(
+                    text for text in (terminal_assistant_text, quality_notice) if text
+                )
+                terminal_reason = "quality_incomplete"
             break
 
         if not tool_calls:
+            if quality_gate is not None and not quality_gate.decision().satisfied:
+                feedback = quality_gate.feedback()
+                console.print(feedback, style="yellow")
+                current_messages = list(current_messages) + [
+                    {"role": "assistant", "content": visible_text or None},
+                    {"role": "user", "content": feedback},
+                ]
+                terminal_reason = "quality_reprompt"
+                continue
             terminal_assistant_text = visible_text
+            terminal_reason = "model_final"
             break  # model stopped calling tools
 
         # Re-render the previous turn through the tokenizer's native structured
@@ -1146,7 +1480,13 @@ def _process_user_input(
         }]
 
         for tc, name, args in invocations:
-            spec = AGENT_TOOLS.get(name)
+            spec = tool_registry.get(name)
+            audit_start = len(audit_events)
+            gate_before = (
+                quality_gate.before_tool(name, args)
+                if quality_gate is not None and spec is not None
+                else None
+            )
             tool_calls_used += 1
             if tool_calls_used > _MAX_TOOL_CALLS_PER_TURN:
                 result = "(tool call budget exhausted for this turn)"
@@ -1164,10 +1504,22 @@ def _process_user_input(
                 try:
                     kwargs = {k: args[k] for k in spec["args"] if k in args}
                     if "permission" in spec or spec.get("inject_policy"):
-                        kwargs["policy"] = tool_policy
+                        kwargs["policy"] = execution_policy
                     result = spec["fn"](**kwargs)
                 except Exception as e:
                     result = f"(tool error: {type(e).__name__}: {e})"
+            invocation_audits = audit_events[audit_start:]
+            if quality_gate is not None and spec is not None and gate_before is not None:
+                quality_gate.after_tool(
+                    name,
+                    args,
+                    before=gate_before,
+                    audit_events=invocation_audits,
+                )
+            tool_event_traces.extend(
+                _tool_trace(_round_idx, name, event)
+                for event in invocation_audits
+            )
             remaining_result_chars = max(
                 0,
                 _MAX_TOOL_RESULT_CHARS_PER_TURN - tool_result_chars,
@@ -1217,3 +1569,22 @@ def _process_user_input(
     # Trim history (keep last 40 entries — ~20 exchanges)
     if len(state["messages"]) > 40:
         state["messages"] = state["messages"][-40:]
+
+    quality_report = quality_gate.report() if quality_gate is not None else None
+    if quality_gate is not None and not quality_gate.decision().satisfied:
+        state["_quality_gate"] = quality_gate
+        state["quality_gate_pending"] = True
+    else:
+        state.pop("_quality_gate", None)
+        state["quality_gate_pending"] = False
+
+    return AgentTurnResult(
+        assistant_text=terminal_assistant_text or "(tool-only turn)",
+        terminal_reason=terminal_reason,
+        rounds=tuple(round_traces),
+        tool_events=tuple(tool_event_traces),
+        tool_calls=tool_calls_used,
+        tool_result_chars=tool_result_chars,
+        wall_time_s=time.perf_counter() - turn_started,
+        quality_gate=quality_report,
+    )

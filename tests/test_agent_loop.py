@@ -66,6 +66,28 @@ def _state(tmp_path):
     }
 
 
+def _enable_quality_gate(state: dict, effort: str = "medium") -> dict:
+    state["quality_gate_enabled"] = True
+    state["coding_effort"] = effort
+    return state
+
+
+def _audited_test_validation(argv, *, policy):
+    from mio.coding_quality import infer_validation_kind
+
+    kind = infer_validation_kind(argv)
+    assert kind is not None
+    policy.audit(
+        operation="validate",
+        permission=agent.AgentToolPermission.SHELL,
+        target=f"{kind.value}:python3 sha256:test-only",
+        allowed=True,
+        outcome="ok",
+        detail=f"kind={kind.value}; returncode=0",
+    )
+    return "(validation test: PASS; returncode=0)"
+
+
 def test_coding_agent_replays_structured_tool_transcript_and_finishes(
     monkeypatch,
     tmp_path,
@@ -102,7 +124,7 @@ def test_coding_agent_replays_structured_tool_transcript_and_finishes(
     ])
     state = _state(tmp_path)
 
-    agent._process_user_input(
+    result = agent._process_user_input(
         "Implement mean_even and run tests.",
         engine,
         _Manager(),
@@ -132,6 +154,12 @@ def test_coding_agent_replays_structured_tool_transcript_and_finishes(
         "role": "assistant",
         "content": "Implemented stats.py. Tests: 1 passed.",
     }
+    assert result.assistant_text == "Implemented stats.py. Tests: 1 passed."
+    assert result.terminal_reason == "model_final"
+    assert len(result.rounds) == 4
+    assert result.tool_calls == 3
+    assert result.tool_result_chars > 0
+    assert all(not trace.target_sha256.endswith("stats.py") for trace in result.tool_events)
 
 
 def test_coding_agent_allows_final_synthesis_after_more_than_five_tool_rounds(
@@ -300,3 +328,97 @@ def test_coding_agent_never_dispatches_memorized_tool_xml_on_final_round(
     assert engine.tool_specs[-1] is None
     assert "no additional operation was executed" in state["messages"][-1]["content"]
     assert "<tool_call>" not in output.getvalue()
+
+
+def test_quality_gate_reprompts_after_edit_until_trusted_validation(
+    monkeypatch,
+    tmp_path,
+):
+    (tmp_path / "stats.py").write_text("VALUE = 1\n", encoding="utf-8")
+    output = StringIO()
+    monkeypatch.setattr(
+        agent,
+        "console",
+        Console(file=output, force_terminal=False, color_system=None),
+    )
+    monkeypatch.setitem(
+        agent.AGENT_TOOLS,
+        "validate",
+        {
+            "fn": _audited_test_validation,
+            "args": ["argv"],
+            "permission": agent.AgentToolPermission.SHELL,
+        },
+    )
+    engine = _ScriptedEngine([
+        _tool_call("edit", path="stats.py", old="VALUE = 1", new="VALUE = 2"),
+        "Implemented and complete.",
+        _tool_call("validate", argv='["python3", "-m", "pytest", "-q"]'),
+        "Implemented stats.py. Trusted tests passed.",
+    ])
+    state = _enable_quality_gate(_state(tmp_path))
+
+    result = agent._process_user_input(
+        "Update stats.py to set VALUE to 2.",
+        engine,
+        _Manager(),
+        MioConfig.default(),
+        state,
+    )
+
+    assert (tmp_path / "stats.py").read_text() == "VALUE = 2\n"
+    assert len(engine.requests) == 4
+    assert "Coding-quality gate incomplete" in engine.requests[2][-1]["content"]
+    assert result.terminal_reason == "model_final"
+    assert result.quality_gate is not None
+    assert result.quality_gate["decision"] == "pass"
+    assert result.quality_gate["mutation_epoch"] == 1
+    assert result.quality_gate["validation_counts"]["test"] == 1
+    assert state["quality_gate_pending"] is False
+
+
+def test_quality_gate_invalidates_validation_after_a_later_edit(
+    monkeypatch,
+    tmp_path,
+):
+    (tmp_path / "stats.py").write_text("VALUE = 1\n", encoding="utf-8")
+    monkeypatch.setattr(
+        agent,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+    monkeypatch.setitem(
+        agent.AGENT_TOOLS,
+        "validate",
+        {
+            "fn": _audited_test_validation,
+            "args": ["argv"],
+            "permission": agent.AgentToolPermission.SHELL,
+        },
+    )
+    test_call = _tool_call("validate", argv='["python3", "-m", "pytest", "-q"]')
+    engine = _ScriptedEngine([
+        _tool_call("edit", path="stats.py", old="VALUE = 1", new="VALUE = 2"),
+        test_call,
+        _tool_call("edit", path="stats.py", old="VALUE = 2", new="VALUE = 3"),
+        "Everything is done.",
+        test_call,
+        "VALUE is 3 and the current revision passed tests.",
+    ])
+    state = _enable_quality_gate(_state(tmp_path))
+
+    result = agent._process_user_input(
+        "Change VALUE to 3 and test it.",
+        engine,
+        _Manager(),
+        MioConfig.default(),
+        state,
+    )
+
+    assert len(engine.requests) == 6
+    assert "Coding-quality gate incomplete" in engine.requests[4][-1]["content"]
+    assert result.quality_gate is not None
+    assert result.quality_gate["decision"] == "pass"
+    assert result.quality_gate["mutation_epoch"] == 2
+    assert result.quality_gate["validation_attempts"] == 2
+    assert result.quality_gate["validation_counts"]["test"] == 1

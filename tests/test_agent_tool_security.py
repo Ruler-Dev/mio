@@ -197,8 +197,64 @@ def test_agent_registry_declares_trusted_policy_injection():
     assert agent.AGENT_TOOLS["write"]["permission"] is AgentToolPermission.WRITE
     assert agent.AGENT_TOOLS["edit"]["permission"] is AgentToolPermission.WRITE
     assert agent.AGENT_TOOLS["bash"]["permission"] is AgentToolPermission.SHELL
+    assert agent.AGENT_TOOLS["validate"]["permission"] is AgentToolPermission.SHELL
     assert agent.AGENT_TOOLS["list_mcp_tools"]["inject_policy"] is True
     assert agent.AGENT_TOOLS["call_mcp_tool"]["inject_policy"] is True
+
+
+def test_validate_uses_direct_argv_and_true_nonzero_status(tmp_path, monkeypatch):
+    events: list[AgentAuditEvent] = []
+    policy = _policy(
+        tmp_path,
+        {AgentToolPermission.READ, AgentToolPermission.WRITE, AgentToolPermission.SHELL},
+        events,
+    )
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured.update(kwargs)
+        return agent._BoundedCommandResult(output="1 failed", returncode=1)
+
+    monkeypatch.setattr(agent, "_run_bounded_process", fake_run)
+
+    result = agent.tool_validate(
+        ["python3", "-m", "pytest", "-q", "tests/test_unit.py"],
+        policy=policy,
+    )
+
+    assert "validation test: FAIL; returncode=1" in result
+    assert captured["argv"][-5:] == [
+        "python3",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/test_unit.py",
+    ]
+    assert captured["env"]["TMPDIR"].startswith(str(tmp_path.resolve() / ".mio-validation-"))
+    assert not list(tmp_path.glob(".mio-validation-*"))
+    assert events[-1].operation == "validate"
+    assert events[-1].allowed is True
+    assert events[-1].outcome == "nonzero"
+    assert "tests/test_unit.py" not in events[-1].target
+    assert events[-1].target.startswith("test:python3 sha256:")
+
+
+def test_validate_rejects_shell_wrappers_without_execution(tmp_path, monkeypatch):
+    events: list[AgentAuditEvent] = []
+    policy = _policy(tmp_path, {AgentToolPermission.SHELL}, events)
+    monkeypatch.setattr(
+        agent,
+        "_run_bounded_process",
+        lambda *_args, **_kwargs: pytest.fail("rejected validation must not execute"),
+    )
+
+    result = agent.tool_validate(["bash", "-c", "pytest -q || true"], policy=policy)
+
+    assert "validation rejected" in result
+    assert events[-1].operation == "validate"
+    assert events[-1].allowed is False
+    assert events[-1].outcome == "unrecognized"
 
 
 def test_native_cli_explicitly_declares_the_coding_policy(monkeypatch, tmp_path):
@@ -251,6 +307,7 @@ def test_native_cli_explicitly_declares_the_coding_policy(monkeypatch, tmp_path)
     main_module._cmd_native_agent(args)
 
     policy = captured["tool_policy"]
+    assert captured["coding_effort"] == "medium"
     assert policy.workspace_roots == (tmp_path.resolve(),)
     assert policy.permissions == frozenset(
         {

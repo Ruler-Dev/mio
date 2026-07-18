@@ -390,6 +390,12 @@ def main() -> None:
         action="store_true",
         help="Allow /, home, or another broad system root as the agent workspace.",
     )
+    parser.add_argument(
+        "--effort",
+        choices=["low", "medium", "high", "xhigh", "ultra"],
+        default=None,
+        help="Mandatory coding-quality gate effort (default: persisted medium).",
+    )
     _add_prompt_policy_arguments(parser, dest_prefix="agent_")
     parser.add_argument("prompt", nargs="*", default=[], help="Initial prompt for agent mode")
 
@@ -850,6 +856,10 @@ def _cmd_native_agent(args) -> None:
         # Agent mode is an explicit coding trust boundary. Other run_agent()
         # callers remain read-only unless they declare their own policy.
         tool_policy=tool_policy,
+        coding_effort=(
+            getattr(args, "effort", None)
+            or getattr(config, "coding_effort", "medium")
+        ),
     )
     manager.unload_all()
 
