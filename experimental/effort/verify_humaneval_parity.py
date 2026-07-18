@@ -31,17 +31,19 @@ from experimental.effort.humaneval import (
     default_corpus_path,
     fetch_humaneval,
     load_humaneval_references,
+    prepare_candidate,
     reference_manifest,
     verify_candidate,
 )
 
 
-REPORT_SCHEMA = "mio.humaneval-verifier-parity.v2"
+REPORT_SCHEMA = "mio.humaneval-verifier-parity.v3"
 EXPECTED_HUMANEVAL_TASKS = 164
 DEFAULT_TIMEOUT_SECONDS = 10.0
 PRIMARY_VERIFIER_SOURCE = "experimental/effort/humaneval.py"
 VERIFIER_SOURCE_PATHS = (
     PRIMARY_VERIFIER_SOURCE,
+    "experimental/effort/verify_humaneval_parity.py",
     "experimental/markov_effort_controller.py",
     "mio/agent.py",
     "mio/agent_policy.py",
@@ -204,13 +206,23 @@ def build_parity_report(
             reference,
             timeout_s=timeout_s,
         )
-        task_passed = result.passed is True and result.status == "passed"
+        prepared_source_sha256 = prepare_candidate(
+            reference.case.public,
+            reference.canonical_solution,
+        ).source_sha256
+        prepared_source_match = result.source_sha256 == prepared_source_sha256
+        task_passed = (
+            result.passed is True
+            and result.status == "passed"
+            and prepared_source_match
+        )
         passed += int(task_passed)
         tasks.append(
             {
                 "task_id": reference.case.task_id,
                 "status": result.status,
                 "passed": task_passed,
+                "prepared_source_match": prepared_source_match,
                 "elapsed_seconds": round(result.elapsed_seconds, 9),
                 "canonical_solution_sha256": reference.canonical_solution_sha256,
                 "verified_source_sha256": result.source_sha256,
@@ -239,7 +251,7 @@ def build_parity_report(
     cases = tuple(reference.case for reference in references)
     return {
         "schema": REPORT_SCHEMA,
-        "schema_version": 1,
+        "schema_version": 2,
         "claim": {
             "eligible": claim_eligible,
             "parity": parity,

@@ -96,6 +96,7 @@ def test_report_is_source_free_and_claim_requires_clean_exact_parity() -> None:
         "task_id",
         "status",
         "passed",
+        "prepared_source_match",
         "elapsed_seconds",
         "canonical_solution_sha256",
         "verified_source_sha256",
@@ -105,6 +106,38 @@ def test_report_is_source_free_and_claim_requires_clean_exact_parity() -> None:
         "mio/agent.py": "c" * 64,
     }
     assert len(report["verifier"]["source_bundle_sha256"]) == 64
+
+
+def test_report_rejects_pass_when_verifier_hashes_a_different_source() -> None:
+    def mismatched_source_verifier(
+        case: HumanEvalCase,
+        solution: str,
+        *,
+        timeout_s: float,
+    ) -> VerificationResult:
+        result = passing_verifier(case, solution, timeout_s=timeout_s)
+        return VerificationResult(
+            passed=result.passed,
+            status=result.status,
+            feedback=result.feedback,
+            elapsed_seconds=result.elapsed_seconds,
+            source_sha256="f" * 64,
+            output_sha256=result.output_sha256,
+            output_chars=result.output_chars,
+        )
+
+    report = build_parity_report(
+        (reference(),),
+        timeout_s=10.0,
+        git_state=GitState(revision="a" * 40, dirty=False),
+        verifier_sha256="b" * 64,
+        verifier=mismatched_source_verifier,
+        expected_tasks=1,
+    )
+
+    assert report["tasks"][0]["prepared_source_match"] is False
+    assert report["tasks"][0]["passed"] is False
+    assert report["claim"]["eligible"] is False
 
 
 def test_report_rejects_mismatched_or_malformed_source_bundle() -> None:
@@ -135,6 +168,7 @@ def test_real_source_bundle_is_relative_complete_and_self_consistent() -> None:
     source_files = verifier_source_hashes()
     assert set(source_files) == {
         PRIMARY_VERIFIER_SOURCE,
+        "experimental/effort/verify_humaneval_parity.py",
         "experimental/markov_effort_controller.py",
         "mio/agent.py",
         "mio/agent_policy.py",
