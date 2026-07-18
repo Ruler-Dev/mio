@@ -108,7 +108,10 @@ class MioEngine:
             self._prefix_cache_max_entries = 4
             self._prefix_cache_token_budget = ctx * 4
         print(f"Loading {tc.name} tier: {tc.target_model}")
-        print(f"  Draft: {tc.draft_model}")
+        if tc.drafter_backend == "target_ar":
+            print("  Draft: disabled (target_ar baseline)")
+        else:
+            print(f"  Draft: {tc.draft_model}")
         print(
             f"  Prefix cache: max {self._prefix_cache_max_entries} entries, "
             f"{self._prefix_cache_token_budget:,}-token budget",
@@ -222,6 +225,11 @@ class MioEngine:
         self._drafter_strict = plan.strict
         self._drafter_policy = []
         self._dspark_prefix_status = {}
+
+        if plan.primary_backend == "target_ar":
+            self._drafter_policy.append("target_only_autoregressive")
+            self._log_drafter_selection()
+            return
 
         if plan.primary_backend == "dspark":
             tq_bits = self._resolved_tq_bits()
@@ -339,6 +347,8 @@ class MioEngine:
             self._log_drafter_selection()
             return
 
+        if plan.primary_ref is None:
+            raise RuntimeError("drafter plan is missing its primary checkpoint")
         try:
             resolved_ref = self._load_dflash(plan.primary_ref)
         except Exception as error:

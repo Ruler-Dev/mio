@@ -15,11 +15,14 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from mio.config import normalise_drafter_backend
+
 
 class DrafterKind(str, Enum):
     DSPARK = "dspark"
     DFLASH = "dflash"
     HYBRID_DFLASH_MARKOV = "hybrid_dflash_markov"
+    NOT_INSPECTED = "not_inspected"
     UNKNOWN = "unknown"
 
 
@@ -36,7 +39,7 @@ class DrafterPlan:
     requested: str
     detected: DrafterKind
     primary_backend: str
-    primary_ref: str
+    primary_ref: str | None
     fallback_ref: str | None
     strict: bool
     reason: str
@@ -244,9 +247,21 @@ def strict_drafter_mode(configured: bool) -> bool:
 def plan_drafter(tier: Any, target_config: dict[str, Any]) -> DrafterPlan:
     """Resolve the requested backend and its independently compatible fallback."""
 
-    requested = str(getattr(tier, "drafter_backend", "auto") or "auto").lower()
-    if requested not in {"auto", "dspark", "dflash"}:
-        raise ValueError("drafter_backend must be one of: auto, dspark, dflash")
+    requested = normalise_drafter_backend(getattr(tier, "drafter_backend", "auto"))
+    if requested == "target_ar":
+        # This must remain ahead of every draft-model field access, metadata
+        # inspection, cache scan, compatibility check, and strict-mode lookup.
+        # It is the reproducible target-only control arm for matched benchmarks.
+        return DrafterPlan(
+            requested=requested,
+            detected=DrafterKind.NOT_INSPECTED,
+            primary_backend="target_ar",
+            primary_ref=None,
+            fallback_ref=None,
+            strict=False,
+            reason="explicit_target_ar",
+        )
+
     primary_ref = str(tier.draft_model)
     descriptor = inspect_drafter(primary_ref)
     strict = strict_drafter_mode(bool(getattr(tier, "drafter_strict", False)))

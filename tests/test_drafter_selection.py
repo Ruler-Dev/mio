@@ -236,3 +236,31 @@ def test_explicit_remote_dflash_fallback_remains_allowed(tmp_path, monkeypatch):
     plan = plan_drafter(tier, {})
 
     assert plan.fallback_ref == "org/pure-dflash"
+
+
+def test_target_ar_plan_performs_no_drafter_lookup(monkeypatch):
+    class TargetOnlyTier:
+        drafter_backend = "target_ar"
+
+        @property
+        def draft_model(self):
+            pytest.fail("target_ar must not even read the configured draft reference")
+
+    monkeypatch.setattr(
+        "mio.drafter_selection.inspect_drafter",
+        lambda *_args, **_kwargs: pytest.fail("target_ar must not inspect a drafter"),
+    )
+    monkeypatch.setattr(
+        "mio.drafter_selection.find_compatible_dflash",
+        lambda **_kwargs: pytest.fail("target_ar must not discover a fallback"),
+    )
+
+    plan = plan_drafter(TargetOnlyTier(), {"model_type": "qwen3_5"})
+
+    assert plan.requested == "target_ar"
+    assert plan.detected is DrafterKind.NOT_INSPECTED
+    assert plan.primary_backend == "target_ar"
+    assert plan.primary_ref is None
+    assert plan.fallback_ref is None
+    assert plan.strict is False
+    assert plan.reason == "explicit_target_ar"

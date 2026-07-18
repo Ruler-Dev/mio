@@ -86,6 +86,74 @@ def test_engine_loads_metadata_selected_dspark(monkeypatch):
     assert captured["lookup_drafts"] is True
 
 
+def test_target_ar_load_skips_every_draft_loader_and_reports_baseline(monkeypatch):
+    tier = _tier(drafter_backend="target_ar", drafter_strict=True)
+    engine = MioEngine(tier)
+    target_model = object()
+    tokenizer = _Tokenizer()
+
+    def load_target(_tier_config):
+        engine._target_model = target_model
+        engine._tokenizer = tokenizer
+        engine._target_meta = {"config": {"model_type": "qwen3_5"}}
+
+    monkeypatch.setattr(engine, "_detect_paro", lambda _ref: False)
+    monkeypatch.setattr(engine, "_load_target_standard", load_target)
+    monkeypatch.setattr(
+        "mio.drafter_selection.inspect_drafter",
+        lambda *_args, **_kwargs: pytest.fail("target_ar must not inspect draft metadata"),
+    )
+    monkeypatch.setattr(
+        "mio.drafter_selection.find_compatible_dflash",
+        lambda **_kwargs: pytest.fail("target_ar must not discover DFlash"),
+    )
+    monkeypatch.setattr(
+        "mio.dspark_runtime.DSparkRuntime.load",
+        lambda **_kwargs: pytest.fail("target_ar must not load DSpark"),
+    )
+    monkeypatch.setattr(
+        engine,
+        "_load_dflash",
+        lambda _ref: pytest.fail("target_ar must not load DFlash"),
+    )
+
+    engine.load()
+
+    assert engine.is_loaded is True
+    assert engine._target_model is target_model
+    assert engine._draft_model is None
+    assert engine._dspark_runtime is None
+    assert engine.drafter_status == {
+        "requested": "target_ar",
+        "detected": "not_inspected",
+        "selected": "baseline",
+        "reason": "explicit_target_ar",
+        "ref": None,
+        "fallback_used": False,
+        "strict": False,
+        "capability_policy": ["target_only_autoregressive"],
+        "dspark": {
+            "max_draft_tokens": 2,
+            "lookup_drafts": True,
+            "prefix_cache": {},
+        },
+    }
+    metrics = engine._metrics_from_result(
+        {
+            "generation_tokens": 1,
+            "prompt_token_count": 2,
+            "elapsed_us": 20,
+            "prefill_us": 10,
+        }
+    )
+    assert metrics.drafter_requested == "target_ar"
+    assert metrics.drafter_detected == "not_inspected"
+    assert metrics.drafter_selected == "baseline"
+    assert metrics.drafter_fallback_used is False
+    assert metrics.fallback_ar is False
+    assert metrics.generation_backend == "baseline"
+
+
 def test_dspark_load_failure_uses_distinct_dflash_with_telemetry(monkeypatch):
     monkeypatch.setattr("mio.drafter_selection.plan_drafter", lambda *_args: _dspark_plan())
     monkeypatch.setattr(

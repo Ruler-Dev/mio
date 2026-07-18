@@ -12,6 +12,17 @@ from mio.persistence import atomic_write_json
 
 
 CODING_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "ultra")
+DRAFTER_BACKENDS = ("auto", "dspark", "dflash", "target_ar")
+
+
+def normalise_drafter_backend(value: Any) -> str:
+    """Return one canonical drafter backend or reject invalid configuration."""
+
+    backend = str(value or "auto").strip().lower()
+    if backend not in DRAFTER_BACKENDS:
+        choices = ", ".join(DRAFTER_BACKENDS)
+        raise ValueError(f"drafter_backend must be one of: {choices}")
+    return backend
 
 
 @dataclass
@@ -24,9 +35,10 @@ class TierConfig:
     context_window: int
     max_output_tokens: int
     # Drafter selection is metadata-driven by default. ``dspark`` and
-    # ``dflash`` force the requested backend; ``MIO_DRAFTER_STRICT=1`` or the
-    # persisted strict flag turns every load fallback into a hard error for
-    # benchmark/research runs.
+    # ``dflash`` force the requested backend; ``target_ar`` explicitly skips
+    # every drafter lookup/load and runs the target-only autoregressive
+    # baseline. ``MIO_DRAFTER_STRICT=1`` or the persisted strict flag turns
+    # every speculative load fallback into a hard error for benchmark runs.
     drafter_backend: str = "auto"
     draft_fallback_model: str | None = None
     drafter_strict: bool = False
@@ -61,6 +73,9 @@ class TierConfig:
     temperature: float = 0.0
     top_p: float = 0.95
     top_k: int = 20
+
+    def __post_init__(self) -> None:
+        self.drafter_backend = normalise_drafter_backend(self.drafter_backend)
 
 
 @dataclass

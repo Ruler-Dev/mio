@@ -8,6 +8,7 @@ from types import ModuleType
 from types import SimpleNamespace
 
 import huggingface_hub
+import pytest
 
 from mio.config import MioConfig, TierConfig, default_config_path, load_config, save_config
 from mio.configure import _estimate_kv_cache_gb, _resolve_tq_selection
@@ -79,6 +80,25 @@ def test_config_round_trip_persists_tiers_and_top_level(tmp_path):
     assert loaded.tiers["small"].dspark_lookup_drafts is False
     assert loaded.tiers["small"].dspark_prefix_cache is False
     assert loaded.tiers["custom"].target_model == "example/target"
+
+
+def test_target_ar_backend_is_validated_and_persisted(tmp_path):
+    path = tmp_path / "config.json"
+    config = MioConfig.default()
+    config.tiers["small"].drafter_backend = "target_ar"
+
+    save_config(config, path)
+
+    assert load_config(path).tiers["small"].drafter_backend == "target_ar"
+    with pytest.raises(ValueError, match="target_ar"):
+        TierConfig(
+            name="invalid",
+            target_model="target",
+            draft_model="draft",
+            context_window=4096,
+            max_output_tokens=64,
+            drafter_backend="not-a-backend",
+        )
 
 
 def test_load_config_reads_canonical_path_without_argument(tmp_path, monkeypatch):
