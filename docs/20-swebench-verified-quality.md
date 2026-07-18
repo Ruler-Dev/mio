@@ -159,6 +159,13 @@ completely invisible to the model and every model-facing tool. Trusted commit
 and diff capture runs in a separate, non-model-visible namespace; it is never
 exposed through the agent shell, even read-only.
 
+The adapter now supports this boundary directly: `capture_git_patch` accepts a
+private external Git directory, requires it outside the model workspace with
+`0700` permissions, rejects any case-insensitive `.git` entry created under the
+visible tree, and invokes Git with explicit `--git-dir`/`--work-tree` paths.
+The model-facing runner that provisions those directories and proves their
+tool-level invisibility is still pending.
+
 All gold, full, and private artifacts live outside the Mio repository root.
 Symlinked path components are rejected. Private directories use mode `0700`
 and private files use `0600` where the producing tool permits it. Every official

@@ -543,7 +543,11 @@ def _run_git(
     *,
     timeout_s: float = 60.0,
     allowed_returncodes: frozenset[int] = frozenset({0}),
+    git_directory: Path | None = None,
+    work_tree: Path | None = None,
 ) -> bytes:
+    if (git_directory is None) != (work_tree is None):
+        raise ProtocolError("external Git commands require both git_directory and work_tree")
     environment = {
         "HOME": "/var/empty",
         "LANG": "C",
@@ -556,7 +560,24 @@ def _run_git(
         "GIT_OPTIONAL_LOCKS": "0",
         "GIT_PAGER": "cat",
         "GIT_TERMINAL_PROMPT": "0",
+        "GIT_NO_REPLACE_OBJECTS": "1",
     }
+    location = ["-C", str(repo)]
+    if git_directory is not None and work_tree is not None:
+        private_git = require_private_directory(git_directory)
+        resolved_tree = work_tree.resolve(strict=True)
+        if (
+            not resolved_tree.is_dir()
+            or _is_within(private_git, resolved_tree)
+            or _is_within(resolved_tree, private_git)
+        ):
+            raise ProtocolError("external Git metadata and worktree must be separate directories")
+        location = [
+            "-C",
+            str(resolved_tree),
+            f"--git-dir={private_git}",
+            f"--work-tree={resolved_tree}",
+        ]
     result = subprocess.run(
         [
             _trusted_git(),
@@ -566,8 +587,9 @@ def _run_git(
             "core.hooksPath=/dev/null",
             "-c",
             "diff.external=",
-            "-C",
-            str(repo),
+            "-c",
+            "submodule.recurse=false",
+            *location,
             *argv,
         ],
         stdin=subprocess.DEVNULL,
@@ -588,6 +610,7 @@ def capture_git_patch(
     *,
     expected_base_commit: str,
     max_patch_bytes: int = 32 * 1024 * 1024,
+    external_git_directory: Path | None = None,
 ) -> str:
     """Capture a patch from an isolated checkout, including untracked files.
 
@@ -596,17 +619,45 @@ def capture_git_patch(
     """
 
     root = workspace.resolve(strict=True)
-    git_directory = root / ".git"
-    if git_directory.is_symlink() or not git_directory.is_dir():
-        raise ProtocolError("generation workspace is not an isolated Git checkout")
-    top_level = _run_git(root, ["rev-parse", "--show-toplevel"]).decode().strip()
+    embedded_git = root / ".git"
+    git_options: dict[str, Path] = {}
+    if external_git_directory is None:
+        if embedded_git.is_symlink() or not embedded_git.is_dir():
+            raise ProtocolError("generation workspace is not an isolated Git checkout")
+    else:
+        traversal_errors: list[OSError] = []
+        entry_count = 0
+        for directory, dirnames, filenames in os.walk(
+            root,
+            followlinks=False,
+            onerror=traversal_errors.append,
+        ):
+            entry_count += len(dirnames) + len(filenames)
+            if entry_count > 100_000:
+                raise ProtocolError("generation workspace traversal exceeded its entry bound")
+            names = {*dirnames, *filenames}
+            if any(name.casefold() == ".git" for name in names):
+                raise ProtocolError("model-visible generation workspace contains forbidden Git metadata")
+            if len(Path(directory).relative_to(root).parts) > 256:
+                raise ProtocolError("generation workspace traversal exceeded its depth bound")
+        if traversal_errors:
+            raise ProtocolError("generation workspace Git-metadata scan was incomplete")
+        private_git = require_private_directory(external_git_directory)
+        if _is_within(private_git, root) or _is_within(root, private_git):
+            raise ProtocolError("external Git metadata must be outside the model-visible workspace")
+        git_options = {"git_directory": private_git, "work_tree": root}
+    top_level = _run_git(root, ["rev-parse", "--show-toplevel"], **git_options).decode().strip()
     if Path(top_level).resolve(strict=True) != root:
         raise ProtocolError("generation workspace Git root differs from the isolated checkout")
-    head = _run_git(root, ["rev-parse", "HEAD"]).decode().strip()
+    head = _run_git(root, ["rev-parse", "HEAD"], **git_options).decode().strip()
     if head != expected_base_commit:
         raise ProtocolError("generation workspace HEAD differs from dataset base_commit")
 
-    untracked_raw = _run_git(root, ["ls-files", "--others", "--exclude-standard", "-z", "--"])
+    untracked_raw = _run_git(
+        root,
+        ["ls-files", "--others", "--exclude-standard", "-z", "--"],
+        **git_options,
+    )
     patch_parts = [
         _run_git(
             root,
@@ -619,6 +670,7 @@ def capture_git_patch(
                 "HEAD",
                 "--",
             ],
+            **git_options,
         )
     ]
     for raw_name in (value for value in untracked_raw.split(b"\0") if value):
@@ -638,6 +690,7 @@ def capture_git_patch(
                     name,
                 ],
                 allowed_returncodes=frozenset({0, 1}),
+                **git_options,
             )
         )
     patch_bytes = b"".join(patch_parts)

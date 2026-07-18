@@ -341,7 +341,7 @@
     "immutable_checkpoints_and_resume": "implemented",
     "attempt_ledger_primitive": "implemented",
     "generation_runner_retry_ledger_integration": "pending_blocks_confirmatory",
-    "sanitized_patch_capture": "implemented",
+    "sanitized_patch_capture": "implemented_with_private_external_git_metadata_support",
     "official_harness_evaluation_seal_and_receipt_adapter": "implemented_but_confirmatory_entrypoints_hard_blocked",
     "model_facing_isolated_generation_runner": "pending_blocks_confirmatory",
     "generation_attestation_and_receipt": "pending_blocks_confirmatory",

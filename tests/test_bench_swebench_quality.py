@@ -275,6 +275,77 @@ def test_patch_adapter_fails_on_wrong_base_commit(tmp_path: Path) -> None:
         benchmark.capture_git_patch(repo, expected_base_commit="f" * 40)
 
 
+def test_patch_adapter_uses_external_git_metadata_invisible_to_model_workspace(
+    tmp_path: Path,
+) -> None:
+    source, base_commit = _init_repo(tmp_path)
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    workspace = private / "workspace"
+    subprocess.run(
+        ["git", "clone", "--quiet", "--no-hardlinks", str(source), str(workspace)],
+        check=True,
+    )
+    metadata = private / "git-metadata"
+    (workspace / ".git").rename(metadata)
+    metadata.chmod(0o700)
+    (workspace / "module.py").write_text("VALUE = 3\n", encoding="utf-8")
+    (workspace / "new_file.py").write_text("NEW = 'external'\n", encoding="utf-8")
+
+    patch = benchmark.capture_git_patch(
+        workspace,
+        expected_base_commit=base_commit,
+        external_git_directory=metadata,
+    )
+
+    assert not (workspace / ".git").exists()
+    assert "VALUE = 3" in patch
+    assert "NEW = 'external'" in patch
+
+
+def test_external_patch_capture_rejects_model_created_git_metadata(tmp_path: Path) -> None:
+    source, base_commit = _init_repo(tmp_path)
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    workspace = private / "workspace"
+    subprocess.run(
+        ["git", "clone", "--quiet", "--no-hardlinks", str(source), str(workspace)],
+        check=True,
+    )
+    metadata = private / "git-metadata"
+    (workspace / ".git").rename(metadata)
+    metadata.chmod(0o700)
+    (workspace / "nested" / ".git").mkdir(parents=True)
+
+    with pytest.raises(benchmark.ProtocolError, match="forbidden Git metadata"):
+        benchmark.capture_git_patch(
+            workspace,
+            expected_base_commit=base_commit,
+            external_git_directory=metadata,
+        )
+
+
+def test_external_patch_capture_requires_private_metadata_permissions(tmp_path: Path) -> None:
+    source, base_commit = _init_repo(tmp_path)
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    workspace = private / "workspace"
+    subprocess.run(
+        ["git", "clone", "--quiet", "--no-hardlinks", str(source), str(workspace)],
+        check=True,
+    )
+    metadata = private / "git-metadata"
+    (workspace / ".git").rename(metadata)
+    metadata.chmod(0o755)
+
+    with pytest.raises(benchmark.ProtocolError, match="0700"):
+        benchmark.capture_git_patch(
+            workspace,
+            expected_base_commit=base_commit,
+            external_git_directory=metadata,
+        )
+
+
 def test_patch_capture_ignores_host_git_redirects_and_repo_commands(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
