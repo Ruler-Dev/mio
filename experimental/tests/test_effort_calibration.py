@@ -144,6 +144,39 @@ def test_transition_builder_produces_one_sided_cluster_bounds() -> None:
     assert estimate.bootstrap.method == "task-cluster-percentile-one-sided-v1"
 
 
+def test_transition_builder_counts_regressions_in_net_quality_lcb() -> None:
+    rows = [
+        TransitionCalibrationObservation(
+            task_cluster_id=f"net-{index}",
+            context_bucket="coding",
+            trigger=Trigger.CALIBRATED_UNCERTAINTY,
+            depth=1,
+            action=ControllerAction.GENERATE_ALTERNATIVE,
+            rescued=index < 6,
+            quality_delta=1.0 if index < 6 else -1.0,
+            extra_output_tokens=20,
+            direct_e2e_seconds=1.0,
+            extra_e2e_seconds=0.3,
+        )
+        for index in range(12)
+    ]
+    model = build_frozen_transition_model(
+        IDENTITY,
+        rows,
+        resamples=1_000,
+        seed=41,
+    )
+    estimate, _ = model.lookup(
+        context_bucket="coding",
+        trigger=Trigger.CALIBRATED_UNCERTAINTY,
+        depth=1,
+        action=ControllerAction.GENERATE_ALTERNATIVE,
+    )
+    assert estimate is not None
+    assert estimate.conservative_success_lcb > 0.0
+    assert estimate.quality_gain_lcb < 0.0
+
+
 def test_transition_builder_is_seeded_and_input_order_independent() -> None:
     rows = transition_rows()
     shuffled = rows.copy()
@@ -178,6 +211,16 @@ def test_transition_model_json_round_trip_preserves_bounds_and_identity() -> Non
     restored = frozen_transition_model_from_mapping(payload)
     assert restored.identity == fitted.identity == IDENTITY
     assert restored.estimates == fitted.estimates
+
+    legacy = json.loads(json.dumps(payload))
+    legacy["schema"] = "mio.markov-transition-calibration.v1"
+    for row in legacy["estimates"]:
+        row.pop("conservative_quality_gain_lcb")
+    restored_legacy = frozen_transition_model_from_mapping(legacy)
+    assert all(
+        estimate.conservative_quality_gain_lcb is None
+        for estimate in restored_legacy.estimates
+    )
 
 
 def test_transition_builder_fails_closed_for_cluster_pseudoreplication() -> None:

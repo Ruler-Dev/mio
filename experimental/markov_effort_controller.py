@@ -133,6 +133,7 @@ class EffortProfile:
     min_task_clusters: int = 8
     min_success_lcb: float = 0.10
     allowed_actions: tuple[ControllerAction, ...] = EXTRA_ACTIONS
+    min_quality_gain_lcb: float = 0.01
 
     def __post_init__(self) -> None:
         if self.max_candidates < 1:
@@ -155,6 +156,8 @@ class EffortProfile:
             raise ValueError("allowed_actions may contain only extra-generation actions")
         if len(set(self.allowed_actions)) != len(self.allowed_actions):
             raise ValueError("allowed_actions must not contain duplicates")
+        if not -1.0 <= self.min_quality_gain_lcb <= 1.0:
+            raise ValueError("min_quality_gain_lcb must be in [-1, 1]")
 
 
 EFFORT_PROFILES: Mapping[EffortTier, EffortProfile] = MappingProxyType(
@@ -288,6 +291,7 @@ class TransitionEstimate:
     extra_output_tokens_ucb: float
     extra_e2e_latency_ratio_ucb: float
     bootstrap: BootstrapMetadata
+    conservative_quality_gain_lcb: float | None = None
 
     def __post_init__(self) -> None:
         if not self.context_bucket:
@@ -306,6 +310,19 @@ class TransitionEstimate:
             self.extra_e2e_latency_ratio_ucb
         ):
             raise ValueError("extra_e2e_latency_ratio_ucb must be finite and positive")
+        if self.conservative_quality_gain_lcb is not None and (
+            not math.isfinite(self.conservative_quality_gain_lcb)
+            or not -1.0 <= self.conservative_quality_gain_lcb <= 1.0
+        ):
+            raise ValueError("conservative_quality_gain_lcb must be in [-1, 1]")
+
+    @property
+    def quality_gain_lcb(self) -> float:
+        """Net hidden quality gain LCB, with schema-v1 rescue compatibility."""
+
+        if self.conservative_quality_gain_lcb is None:
+            return self.conservative_success_lcb
+        return self.conservative_quality_gain_lcb
 
 
 class FrozenTransitionModel:
@@ -389,6 +406,7 @@ class Decision:
     seed: int | None = None
     transition_source: str | None = None
     predicted_success_lcb: float | None = None
+    predicted_quality_gain_lcb: float | None = None
 
 
 @dataclass(frozen=True)
@@ -620,6 +638,7 @@ class MarkovTreeEffortController:
             if estimate is None or source is None:
                 continue
             success_lcb = estimate.conservative_success_lcb
+            quality_gain_lcb = estimate.quality_gain_lcb
             predicted_e2e_seconds = (
                 baseline_e2e_seconds * estimate.extra_e2e_latency_ratio_ucb
             )
@@ -630,12 +649,16 @@ class MarkovTreeEffortController:
                 continue
             if success_lcb < self.profile.min_success_lcb:
                 continue
+            if quality_gain_lcb < self.profile.min_quality_gain_lcb:
+                continue
             if estimate.extra_output_tokens_ucb > token_allocation:
                 continue
             if predicted_e2e_seconds > remaining_e2e_seconds:
                 continue
-            # Maximize conservative quality gain per unit of extra latency.
-            utility = success_lcb / estimate.extra_e2e_latency_ratio_ucb
+            # Maximize conservative net quality gain per unit of extra latency.
+            # Unlike rescue probability, net gain explicitly counts selection
+            # regressions observed during offline calibration.
+            utility = quality_gain_lcb / estimate.extra_e2e_latency_ratio_ucb
             eligible.append(
                 (
                     -utility,
@@ -654,7 +677,7 @@ class MarkovTreeEffortController:
                 force_stop=trigger is Trigger.VALIDATOR_FAILURE,
             )
 
-        _, negative_lcb, _, action, _, source = min(eligible)
+        _, negative_lcb, _, action, selected_estimate, source = min(eligible)
         best = _best_node(state.nodes)
         if action is ControllerAction.GENERATE_REPAIR:
             parent_id = state.nodes[-1].node_id
@@ -673,6 +696,7 @@ class MarkovTreeEffortController:
             seed=self._seed(state, action, node_id),
             transition_source=source,
             predicted_success_lcb=-negative_lcb,
+            predicted_quality_gain_lcb=selected_estimate.quality_gain_lcb,
         )
 
     def observe(

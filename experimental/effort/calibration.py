@@ -40,7 +40,8 @@ _IDENTITY_FIELDS = (
     "backend",
 )
 _CALIBRATOR_SCHEMA = "mio.isotonic-error-calibration.v1"
-_TRANSITION_MODEL_SCHEMA = "mio.markov-transition-calibration.v1"
+_TRANSITION_MODEL_SCHEMA = "mio.markov-transition-calibration.v2"
+_LEGACY_TRANSITION_MODEL_SCHEMA = "mio.markov-transition-calibration.v1"
 _BOOTSTRAP_METHOD = "task-cluster-percentile-one-sided-v1"
 
 
@@ -341,6 +342,7 @@ class TransitionCalibrationObservation:
     extra_output_tokens: int
     direct_e2e_seconds: float
     extra_e2e_seconds: float
+    quality_delta: float | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.task_cluster_id, str) or not self.task_cluster_id.strip():
@@ -367,10 +369,27 @@ class TransitionCalibrationObservation:
             "extra_e2e_seconds",
             _positive_number(self.extra_e2e_seconds, label="extra_e2e_seconds"),
         )
+        if self.quality_delta is not None:
+            if (
+                isinstance(self.quality_delta, bool)
+                or not isinstance(self.quality_delta, (int, float))
+                or not math.isfinite(float(self.quality_delta))
+                or not -1.0 <= float(self.quality_delta) <= 1.0
+            ):
+                raise ValueError("quality_delta must be finite and in [-1, 1]")
+            object.__setattr__(self, "quality_delta", float(self.quality_delta))
 
     @property
     def extra_e2e_latency_ratio(self) -> float:
         return self.extra_e2e_seconds / self.direct_e2e_seconds
+
+    @property
+    def effective_quality_delta(self) -> float:
+        """Net terminal quality change, with rescue-only pilot compatibility."""
+
+        if self.quality_delta is None:
+            return float(self.rescued)
+        return self.quality_delta
 
 
 _TransitionKey = tuple[str, Trigger, int, ControllerAction]
@@ -414,19 +433,30 @@ def _bootstrap_transition(
     rng = random.Random(seed)
     cluster_count = len(observations)
     rescue_samples: list[float] = []
+    quality_gain_samples: list[float] = []
     token_samples: list[float] = []
     latency_samples: list[float] = []
     for _ in range(resamples):
         sample = tuple(observations[rng.randrange(cluster_count)] for _ in observations)
         rescue_samples.append(sum(row.rescued for row in sample) / cluster_count)
+        quality_gain_samples.append(
+            sum(row.effective_quality_delta for row in sample) / cluster_count
+        )
         token_samples.append(sum(row.extra_output_tokens for row in sample) / cluster_count)
         latency_samples.append(sum(row.extra_e2e_latency_ratio for row in sample) / cluster_count)
 
     rescue_point = sum(row.rescued for row in observations) / cluster_count
+    quality_gain_point = (
+        sum(row.effective_quality_delta for row in observations) / cluster_count
+    )
     token_point = sum(row.extra_output_tokens for row in observations) / cluster_count
     latency_point = sum(row.extra_e2e_latency_ratio for row in observations) / cluster_count
     lower_tail = 1.0 - confidence_level
     rescue_lcb = min(rescue_point, _percentile(rescue_samples, lower_tail))
+    quality_gain_lcb = min(
+        quality_gain_point,
+        _percentile(quality_gain_samples, lower_tail),
+    )
     token_ucb = max(token_point, _percentile(token_samples, confidence_level))
     latency_ucb = max(latency_point, _percentile(latency_samples, confidence_level))
     context_bucket, trigger, depth, action = key
@@ -445,6 +475,7 @@ def _bootstrap_transition(
             method=_BOOTSTRAP_METHOD,
             seed=seed,
         ),
+        conservative_quality_gain_lcb=quality_gain_lcb,
     )
 
 
@@ -545,6 +576,7 @@ def frozen_transition_model_to_mapping(
                 "conservative_success_lcb": estimate.conservative_success_lcb,
                 "extra_output_tokens_ucb": estimate.extra_output_tokens_ucb,
                 "extra_e2e_latency_ratio_ucb": estimate.extra_e2e_latency_ratio_ucb,
+                "conservative_quality_gain_lcb": estimate.quality_gain_lcb,
                 "bootstrap": {
                     "task_cluster_count": estimate.bootstrap.task_cluster_count,
                     "resamples": estimate.bootstrap.resamples,
@@ -567,13 +599,16 @@ def frozen_transition_model_from_mapping(value: Any) -> FrozenTransitionModel:
     fields = {"schema", "identity", "estimates"}
     if not isinstance(value, Mapping) or set(value) != fields:
         raise ValueError("transition model fields do not match the schema")
-    if value["schema"] != _TRANSITION_MODEL_SCHEMA:
+    if value["schema"] not in {
+        _LEGACY_TRANSITION_MODEL_SCHEMA,
+        _TRANSITION_MODEL_SCHEMA,
+    }:
         raise ValueError("unsupported transition model schema")
     rows = value["estimates"]
     if not isinstance(rows, list):
         raise ValueError("transition estimates must be a list")
     estimates: list[TransitionEstimate] = []
-    estimate_fields = {
+    legacy_estimate_fields = {
         "context_bucket",
         "trigger",
         "depth",
@@ -583,6 +618,10 @@ def frozen_transition_model_from_mapping(value: Any) -> FrozenTransitionModel:
         "extra_e2e_latency_ratio_ucb",
         "bootstrap",
     }
+    estimate_fields = {
+        *legacy_estimate_fields,
+        "conservative_quality_gain_lcb",
+    }
     bootstrap_fields = {
         "task_cluster_count",
         "resamples",
@@ -591,7 +630,12 @@ def frozen_transition_model_from_mapping(value: Any) -> FrozenTransitionModel:
         "seed",
     }
     for row in rows:
-        if not isinstance(row, Mapping) or set(row) != estimate_fields:
+        expected_fields = (
+            legacy_estimate_fields
+            if value["schema"] == _LEGACY_TRANSITION_MODEL_SCHEMA
+            else estimate_fields
+        )
+        if not isinstance(row, Mapping) or set(row) != expected_fields:
             raise ValueError("transition estimate fields do not match the schema")
         bootstrap = row["bootstrap"]
         if not isinstance(bootstrap, Mapping) or set(bootstrap) != bootstrap_fields:
@@ -605,6 +649,9 @@ def frozen_transition_model_from_mapping(value: Any) -> FrozenTransitionModel:
                 conservative_success_lcb=row["conservative_success_lcb"],
                 extra_output_tokens_ucb=row["extra_output_tokens_ucb"],
                 extra_e2e_latency_ratio_ucb=row["extra_e2e_latency_ratio_ucb"],
+                conservative_quality_gain_lcb=row.get(
+                    "conservative_quality_gain_lcb"
+                ),
                 bootstrap=BootstrapMetadata(
                     **{field: bootstrap[field] for field in bootstrap_fields}
                 ),

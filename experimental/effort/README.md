@@ -82,19 +82,22 @@ The current `MarkovTreeEffortController` is deliberately narrower than a
 constrained-MDP solution. It is a deterministic, replayable, one-step greedy
 policy with a frozen offline transition table. It performs no Bellman backup,
 value iteration, rollout, look-ahead search, or online learning. Among feasible
-actions it currently maximizes the conservative rescue-probability lower bound
-per upper-bounded latency ratio:
+actions it currently maximizes a conservative lower bound on net terminal
+quality gain per upper-bounded latency ratio:
 
 ```text
-score(a | s) = rescue_probability_LCB(a | s)
+score(a | s) = net_quality_gain_LCB(a | s)
                / extra_e2e_latency_ratio_UCB(a | s)
 ```
 
 An action is feasible only when its token and latency upper bounds fit the
 remaining envelope, its calibration support meets the minimum task-cluster
-count, and its conservative rescue probability clears the profile floor.
-Missing, stale, or identity-mismatched calibration data causes the controller
-to stop rather than improvise.
+count, its conservative rescue probability clears the profile floor, and its
+net quality-gain lower bound is positive. Calibration records a rescue as
+`+1`, a selection regression as `-1`, and an unchanged terminal result as
+`0`; this prevents a high rescue rate from hiding an even higher regression
+rate. Missing, stale, or identity-mismatched calibration data causes the
+controller to stop rather than improvise.
 
 VoC-GMT is the proposed next step, not the present implementation. Its gate is
 to estimate
@@ -135,6 +138,10 @@ or create an independent alternative; `xhigh` and `ultra` additionally permit
 refinement. An action may repeat at a later tree depth only when that exact
 depth/action transition has its own calibrated row. This makes the fifth
 `ultra` candidate reachable without treating an uncalibrated retry as free.
+
+The net-gain gate is a partial Value-of-Compute implementation. The full
+VoC-GMT hypothesis still requires jointly priced latency, token, and selection
+risk terms rather than using token cost only as a feasibility constraint.
 
 The latency ratio is an end-to-end request envelope relative to the observed
 direct candidate, not a promise about decode speed. Generation, validation,

@@ -44,6 +44,7 @@ def estimate(
     success_lcb: float = 0.50,
     tokens: float = 24.0,
     latency_ratio: float = 0.4,
+    quality_gain_lcb: float | None = None,
 ) -> TransitionEstimate:
     return TransitionEstimate(
         context_bucket=context,
@@ -60,6 +61,7 @@ def estimate(
             method="task-cluster-percentile",
             seed=17,
         ),
+        conservative_quality_gain_lcb=quality_gain_lcb,
     )
 
 
@@ -326,6 +328,49 @@ def test_insufficient_task_clusters_or_offline_lcb_never_spends_compute() -> Non
     decision = ctrl.decide(state)
     assert decision.action is ControllerAction.STOP
     assert decision.reason == "no_calibrated_transition_within_budget"
+
+
+def test_high_rescue_rate_cannot_hide_negative_net_quality_gain() -> None:
+    ctrl = controller(
+        estimate(
+            ControllerAction.GENERATE_REPAIR,
+            success_lcb=0.8,
+            quality_gain_lcb=-0.1,
+        )
+    )
+    state = add_direct(
+        ctrl,
+        ctrl.initial_state("net-quality-gate"),
+        evidence(ValidationOutcome.FAIL),
+    )
+    decision = ctrl.decide(state)
+    assert decision.action is ControllerAction.STOP
+    assert decision.reason == "no_calibrated_transition_within_budget"
+
+
+def test_action_choice_uses_net_quality_gain_not_rescue_rate() -> None:
+    repair = estimate(
+        ControllerAction.GENERATE_REPAIR,
+        success_lcb=0.9,
+        quality_gain_lcb=0.1,
+        latency_ratio=0.5,
+    )
+    alternative = estimate(
+        ControllerAction.GENERATE_ALTERNATIVE,
+        success_lcb=0.4,
+        quality_gain_lcb=0.3,
+        latency_ratio=0.5,
+    )
+    ctrl = controller(repair, alternative)
+    state = add_direct(
+        ctrl,
+        ctrl.initial_state("net-quality-choice"),
+        evidence(ValidationOutcome.FAIL),
+    )
+    decision = ctrl.decide(state)
+    assert decision.action is ControllerAction.GENERATE_ALTERNATIVE
+    assert decision.predicted_success_lcb == pytest.approx(0.4)
+    assert decision.predicted_quality_gain_lcb == pytest.approx(0.3)
 
 
 def test_context_specific_transition_precedes_global_fallback() -> None:
