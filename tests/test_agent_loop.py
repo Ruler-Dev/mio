@@ -6,6 +6,7 @@ from copy import deepcopy
 from io import StringIO
 from types import SimpleNamespace
 
+import pytest
 from rich.console import Console
 
 from mio import agent
@@ -15,17 +16,8 @@ from mio.prompt_policy import PromptPolicy
 
 
 def _tool_call(name: str, **arguments: str) -> str:
-    parameters = "".join(
-        f"<parameter={key}>\n{value}\n</parameter>\n"
-        for key, value in arguments.items()
-    )
-    return (
-        "<tool_call>\n"
-        f"<function={name}>\n"
-        f"{parameters}"
-        "</function>\n"
-        "</tool_call>"
-    )
+    parameters = "".join(f"<parameter={key}>\n{value}\n</parameter>\n" for key, value in arguments.items())
+    return f"<tool_call>\n<function={name}>\n{parameters}</function>\n</tool_call>"
 
 
 class _ScriptedEngine:
@@ -111,17 +103,19 @@ def test_coding_agent_replays_structured_tool_transcript_and_finishes(
             "permission": agent.AgentToolPermission.SHELL,
         },
     )
-    engine = _ScriptedEngine([
-        _tool_call("read", path="stats.py"),
-        _tool_call(
-            "edit",
-            path="stats.py",
-            old="raise NotImplementedError('TODO')",
-            new="return sum(value for value in values if value % 2 == 0)",
-        ),
-        _tool_call("bash", command="python3 -m unittest -v"),
-        "Implemented stats.py. Tests: 1 passed.",
-    ])
+    engine = _ScriptedEngine(
+        [
+            _tool_call("read", path="stats.py"),
+            _tool_call(
+                "edit",
+                path="stats.py",
+                old="raise NotImplementedError('TODO')",
+                new="return sum(value for value in values if value % 2 == 0)",
+            ),
+            _tool_call("bash", command="python3 -m unittest -v"),
+            "Implemented stats.py. Tests: 1 passed.",
+        ]
+    )
     state = _state(tmp_path)
 
     result = agent._process_user_input(
@@ -173,8 +167,7 @@ def test_coding_agent_allows_final_synthesis_after_more_than_five_tool_rounds(
         Console(file=StringIO(), force_terminal=False, color_system=None),
     )
     engine = _ScriptedEngine(
-        [_tool_call("read", path="note.txt") for _ in range(6)]
-        + ["Final synthesis after six bounded tool rounds."],
+        [_tool_call("read", path="note.txt") for _ in range(6)] + ["Final synthesis after six bounded tool rounds."],
     )
     state = _state(tmp_path)
 
@@ -202,10 +195,12 @@ def test_coding_agent_replays_multiple_calls_as_one_structured_tool_group(
         "console",
         Console(file=StringIO(), force_terminal=False, color_system=None),
     )
-    engine = _ScriptedEngine([
-        _tool_call("read", path="one.txt") + _tool_call("read", path="two.txt"),
-        "Read both files; no changes were needed.",
-    ])
+    engine = _ScriptedEngine(
+        [
+            _tool_call("read", path="one.txt") + _tool_call("read", path="two.txt"),
+            "Read both files; no changes were needed.",
+        ]
+    )
     state = _state(tmp_path)
 
     agent._process_user_input(
@@ -234,10 +229,11 @@ def test_coding_agent_drops_unterminated_tool_xml_from_output_and_history(
         "console",
         Console(file=output, force_terminal=False, color_system=None),
     )
-    engine = _ScriptedEngine([
-        "I inspected the request.\n<tool_call>\n<function=read>\n"
-        "<parameter=path>\nsecret.txt\n",
-    ])
+    engine = _ScriptedEngine(
+        [
+            "I inspected the request.\n<tool_call>\n<function=read>\n<parameter=path>\nsecret.txt\n",
+        ]
+    )
     state = _state(tmp_path)
 
     agent._process_user_input(
@@ -282,9 +278,7 @@ def test_coding_agent_reserves_twelfth_round_for_budget_synthesis(
     assert len(engine.requests) == agent._MAX_AGENT_ROUNDS_PER_TURN == 12
     assert all(spec is agent.AGENT_TOOLS_SPEC for spec in engine.tool_specs[:-1])
     assert engine.tool_specs[-1] is None
-    assert "Tool execution must stop now (model round limit 12 reached)" in (
-        engine.requests[-1][-1]["content"]
-    )
+    assert "Tool execution must stop now (model round limit 12 reached)" in (engine.requests[-1][-1]["content"])
     assert state["messages"][-1]["content"].endswith("work remains.")
     assert "<tool_call>" not in output.getvalue()
 
@@ -350,12 +344,14 @@ def test_quality_gate_reprompts_after_edit_until_trusted_validation(
             "permission": agent.AgentToolPermission.SHELL,
         },
     )
-    engine = _ScriptedEngine([
-        _tool_call("edit", path="stats.py", old="VALUE = 1", new="VALUE = 2"),
-        "Implemented and complete.",
-        _tool_call("validate", argv='["python3", "-m", "pytest", "-q"]'),
-        "Implemented stats.py. Trusted tests passed.",
-    ])
+    engine = _ScriptedEngine(
+        [
+            _tool_call("edit", path="stats.py", old="VALUE = 1", new="VALUE = 2"),
+            "Implemented and complete.",
+            _tool_call("validate", argv='["python3", "-m", "pytest", "-q"]'),
+            "Implemented stats.py. Trusted tests passed.",
+        ]
+    )
     state = _enable_quality_gate(_state(tmp_path))
 
     result = agent._process_user_input(
@@ -397,14 +393,16 @@ def test_quality_gate_invalidates_validation_after_a_later_edit(
         },
     )
     test_call = _tool_call("validate", argv='["python3", "-m", "pytest", "-q"]')
-    engine = _ScriptedEngine([
-        _tool_call("edit", path="stats.py", old="VALUE = 1", new="VALUE = 2"),
-        test_call,
-        _tool_call("edit", path="stats.py", old="VALUE = 2", new="VALUE = 3"),
-        "Everything is done.",
-        test_call,
-        "VALUE is 3 and the current revision passed tests.",
-    ])
+    engine = _ScriptedEngine(
+        [
+            _tool_call("edit", path="stats.py", old="VALUE = 1", new="VALUE = 2"),
+            test_call,
+            _tool_call("edit", path="stats.py", old="VALUE = 2", new="VALUE = 3"),
+            "Everything is done.",
+            test_call,
+            "VALUE is 3 and the current revision passed tests.",
+        ]
+    )
     state = _enable_quality_gate(_state(tmp_path))
 
     result = agent._process_user_input(
@@ -422,3 +420,181 @@ def test_quality_gate_invalidates_validation_after_a_later_edit(
     assert result.quality_gate["mutation_epoch"] == 2
     assert result.quality_gate["validation_attempts"] == 2
     assert result.quality_gate["validation_counts"]["test"] == 1
+
+
+def test_quality_obligation_survives_generation_exception_after_edit(
+    monkeypatch,
+    tmp_path,
+):
+    (tmp_path / "stats.py").write_text("VALUE = 1\n", encoding="utf-8")
+    monkeypatch.setattr(
+        agent,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+    monkeypatch.setitem(
+        agent.AGENT_TOOLS,
+        "validate",
+        {
+            "fn": _audited_test_validation,
+            "args": ["argv"],
+            "permission": agent.AgentToolPermission.SHELL,
+        },
+    )
+    state = _enable_quality_gate(_state(tmp_path))
+    interrupted = _ScriptedEngine([_tool_call("edit", path="stats.py", old="VALUE = 1", new="VALUE = 2")])
+
+    with pytest.raises(RuntimeError, match="generator raised StopIteration"):
+        agent._process_user_input(
+            "Update stats.py to set VALUE to 2.",
+            interrupted,
+            _Manager(),
+            MioConfig.default(),
+            state,
+        )
+
+    pending = state.get("_quality_gate")
+    assert pending is not None
+    assert pending.mutation_epoch == 1
+    assert state["quality_gate_pending"] is True
+
+    resumed = _ScriptedEngine(
+        [
+            _tool_call("validate", argv='["python3", "-m", "pytest", "-q"]'),
+            "The interrupted edit is now validated.",
+        ]
+    )
+    result = agent._process_user_input(
+        "Continue and validate the pending edit.",
+        resumed,
+        _Manager(),
+        MioConfig.default(),
+        state,
+    )
+
+    assert result.quality_gate is not None
+    assert result.quality_gate["decision"] == "pass"
+    assert state["quality_gate_pending"] is False
+
+
+def test_passed_gate_is_refreshed_before_late_mutation_can_be_discarded(
+    monkeypatch,
+    tmp_path,
+):
+    from mio.coding_quality import CodingEffort, CodingQualityGate, ValidationKind
+
+    target = tmp_path / "stats.py"
+    target.write_text("VALUE = 1\n", encoding="utf-8")
+    monkeypatch.setattr(
+        agent,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+    monkeypatch.setitem(
+        agent.AGENT_TOOLS,
+        "validate",
+        {
+            "fn": _audited_test_validation,
+            "args": ["argv"],
+            "permission": agent.AgentToolPermission.SHELL,
+        },
+    )
+    gate = CodingQualityGate.start([tmp_path], "change", effort=CodingEffort.MEDIUM)
+    before = gate.before_tool("edit", {"path": "stats.py"})
+    target.write_text("VALUE = 2\n", encoding="utf-8")
+    gate.after_tool(
+        "edit",
+        {"path": "stats.py"},
+        before=before,
+        audit_events=[
+            agent.AgentAuditEvent(
+                timestamp=1.0,
+                operation="edit",
+                permission="write",
+                target="stats.py",
+                allowed=True,
+                outcome="ok",
+            )
+        ],
+    )
+    gate.record_validation(
+        ValidationKind.TEST,
+        argv=("pytest", "-q"),
+        allowed=True,
+        outcome="ok",
+    )
+    assert gate.decision().satisfied is True
+    target.write_text("VALUE = 3\n", encoding="utf-8")
+
+    state = _enable_quality_gate(_state(tmp_path))
+    state["_quality_gate"] = gate
+    state["quality_gate_pending"] = False
+    engine = _ScriptedEngine(
+        [
+            "The prior validation is still enough.",
+            _tool_call("validate", argv='["python3", "-m", "pytest", "-q"]'),
+            "The late revision is now validated.",
+        ]
+    )
+
+    result = agent._process_user_input(
+        "Continue.",
+        engine,
+        _Manager(),
+        MioConfig.default(),
+        state,
+    )
+
+    assert len(engine.requests) == 3
+    assert "Coding-quality gate incomplete" in engine.requests[1][-1]["content"]
+    assert result.quality_gate is not None
+    assert result.quality_gate["mutation_epoch"] == 2
+    assert result.quality_gate["decision"] == "pass"
+
+
+def test_terminal_refresh_overrides_budget_finalization_after_late_mutation(
+    monkeypatch,
+    tmp_path,
+):
+    from mio.coding_quality import CodingQualityGate
+
+    target = tmp_path / "note.txt"
+    target.write_text("stable\n", encoding="utf-8")
+    monkeypatch.setattr(
+        agent,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+    original_refresh = CodingQualityGate.refresh
+    refresh_calls = 0
+
+    def refresh_then_mutate(gate):
+        nonlocal refresh_calls
+        refresh_calls += 1
+        snapshot = original_refresh(gate)
+        if refresh_calls == 1:
+            target.write_text("late mutation\n", encoding="utf-8")
+        return snapshot
+
+    monkeypatch.setattr(CodingQualityGate, "refresh", refresh_then_mutate)
+    engine = _ScriptedEngine(
+        [
+            *[_tool_call("read", path="note.txt") for _ in range(11)],
+            "Final status after the bounded loop.",
+        ]
+    )
+    state = _enable_quality_gate(_state(tmp_path))
+
+    result = agent._process_user_input(
+        "Inspect repeatedly.",
+        engine,
+        _Manager(),
+        MioConfig.default(),
+        state,
+    )
+
+    assert refresh_calls == 2
+    assert result.terminal_reason == "quality_incomplete"
+    assert "Coding-quality gate: INCOMPLETE" in result.assistant_text
+    assert result.quality_gate is not None
+    assert result.quality_gate["decision"] == "incomplete"

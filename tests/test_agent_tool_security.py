@@ -62,9 +62,7 @@ def test_permissions_are_independent_and_every_operation_is_audited(tmp_path):
 
     assert "written" in agent.tool_write("note.txt", "alpha", policy=write_only)
     assert "permission denied" in agent.tool_read("note.txt", policy=write_only)
-    assert "permission denied" in agent.tool_edit(
-        "note.txt", "alpha", "beta", policy=write_only
-    )
+    assert "permission denied" in agent.tool_edit("note.txt", "alpha", "beta", policy=write_only)
     assert "permission denied" in agent.tool_bash("python3 -V", policy=write_only)
     assert (workspace / "note.txt").read_text(encoding="utf-8") == "alpha"
 
@@ -121,9 +119,7 @@ def test_symlink_components_and_final_symlinks_are_never_followed(tmp_path):
 
     assert "symlink" in agent.tool_read("secret-link.txt", policy=policy)
     assert "symlink" in agent.tool_write("escape/new.txt", "new", policy=policy)
-    assert "symlink" in agent.tool_edit(
-        "secret-link.txt", "secret", "changed", policy=policy
-    )
+    assert "symlink" in agent.tool_edit("secret-link.txt", "secret", "changed", policy=policy)
     assert secret.read_text(encoding="utf-8") == "secret"
     assert not (outside / "new.txt").exists()
 
@@ -147,9 +143,7 @@ def test_granted_file_tools_support_nested_write_edit_and_preserve_mode(tmp_path
     assert not list(workspace.rglob(".mio-agent-*.tmp"))
 
 
-def test_bash_uses_argv_without_shell_caps_output_and_redacts_audit(
-    tmp_path, monkeypatch
-):
+def test_bash_uses_argv_without_shell_caps_output_and_redacts_audit(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     events: list[AgentAuditEvent] = []
@@ -167,9 +161,7 @@ def test_bash_uses_argv_without_shell_caps_output_and_redacts_audit(
         return agent._BoundedCommandResult(output="x" * 200, returncode=0)
 
     monkeypatch.setattr(agent, "_run_bounded_process", fake_run)
-    result = agent.tool_bash(
-        "python3 -c \"print('audit-secret')\"", policy=policy
-    )
+    result = agent.tool_bash("python3 -c \"print('audit-secret')\"", policy=policy)
 
     assert captured["argv"][:2] == ["/usr/bin/sandbox-exec", "-p"]
     profile = captured["argv"][2]
@@ -217,6 +209,7 @@ def test_validate_uses_direct_argv_and_true_nonzero_status(tmp_path, monkeypatch
         return agent._BoundedCommandResult(output="1 failed", returncode=1)
 
     monkeypatch.setattr(agent, "_run_bounded_process", fake_run)
+    monkeypatch.setenv("PYTEST_ADDOPTS", "--collect-only")
 
     result = agent.tool_validate(
         ["python3", "-m", "pytest", "-q", "tests/test_unit.py"],
@@ -224,13 +217,16 @@ def test_validate_uses_direct_argv_and_true_nonzero_status(tmp_path, monkeypatch
     )
 
     assert "validation test: FAIL; returncode=1" in result
-    assert captured["argv"][-5:] == [
+    assert captured["argv"][-7:] == [
         "python3",
         "-m",
         "pytest",
         "-q",
         "tests/test_unit.py",
+        "-o",
+        "addopts=",
     ]
+    assert "PYTEST_ADDOPTS" not in captured["env"]
     assert captured["env"]["TMPDIR"].startswith(str(tmp_path.resolve() / ".mio-validation-"))
     assert not list(tmp_path.glob(".mio-validation-*"))
     assert events[-1].operation == "validate"
@@ -255,6 +251,369 @@ def test_validate_rejects_shell_wrappers_without_execution(tmp_path, monkeypatch
     assert events[-1].operation == "validate"
     assert events[-1].allowed is False
     assert events[-1].outcome == "unrecognized"
+
+
+def test_validate_rejects_workspace_controlled_runner(tmp_path, monkeypatch):
+    events: list[AgentAuditEvent] = []
+    policy = _policy(tmp_path, {AgentToolPermission.SHELL}, events)
+    workspace_bin = tmp_path / ".venv" / "bin"
+    workspace_bin.mkdir(parents=True)
+    runner = workspace_bin / "pytest"
+    runner.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    runner.chmod(runner.stat().st_mode | 0o100)
+
+    monkeypatch.setattr(
+        agent,
+        "sandboxed_command",
+        lambda argv, _policy: (["sandbox", *argv], {"PATH": str(workspace_bin)}),
+    )
+    monkeypatch.setattr(
+        agent,
+        "_run_bounded_process",
+        lambda *_args, **_kwargs: pytest.fail("workspace runner must not execute"),
+    )
+
+    result = agent.tool_validate(["pytest", "-q"], policy=policy)
+
+    assert "executable must resolve outside" in result
+    assert events[-1].allowed is False
+    assert events[-1].outcome == "untrusted_executable"
+
+
+def test_validate_rejects_static_target_outside_workspace(tmp_path, monkeypatch):
+    events: list[AgentAuditEvent] = []
+    policy = _policy(tmp_path, {AgentToolPermission.SHELL}, events)
+    monkeypatch.setattr(
+        agent,
+        "sandboxed_command",
+        lambda *_args, **_kwargs: pytest.fail("unscoped validation must not execute"),
+    )
+
+    result = agent.tool_validate(["node", "--check", "/dev/null"], policy=policy)
+
+    assert "every explicit path must remain inside" in result
+    assert events[-1].allowed is False
+    assert events[-1].outcome == "unscoped"
+
+
+def test_validate_rejects_relative_symlink_target_outside_workspace(
+    tmp_path,
+    monkeypatch,
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "outside.js").symlink_to("/dev/null")
+    events: list[AgentAuditEvent] = []
+    policy = _policy(workspace, {AgentToolPermission.SHELL}, events)
+    monkeypatch.setattr(
+        agent,
+        "sandboxed_command",
+        lambda *_args, **_kwargs: pytest.fail("unscoped validation must not execute"),
+    )
+
+    result = agent.tool_validate(["node", "--check", "outside.js"], policy=policy)
+
+    assert "every explicit path must remain inside" in result
+    assert events[-1].allowed is False
+    assert events[-1].outcome == "unscoped"
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "no tests ran in 0.01s\n",
+        "collected 0 items\n",
+        "1 test collected in 0.01s\n",
+    ],
+)
+def test_validate_rejects_pytest_success_without_executed_tests(
+    tmp_path,
+    monkeypatch,
+    output,
+):
+    events: list[AgentAuditEvent] = []
+    policy = _policy(tmp_path, {AgentToolPermission.SHELL}, events)
+    monkeypatch.setattr(
+        agent,
+        "sandboxed_command",
+        lambda argv, _policy: (["sandbox", *argv], {"PATH": "/usr/bin"}),
+    )
+    monkeypatch.setattr(
+        agent,
+        "_workspace_controls_executable",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        agent,
+        "_run_bounded_process",
+        lambda *_args, **_kwargs: agent._BoundedCommandResult(
+            output=output,
+            returncode=0,
+        ),
+    )
+
+    result = agent.tool_validate(["python3", "-m", "pytest", "-q"], policy=policy)
+
+    assert "validation test: FAIL" in result
+    assert events[-1].outcome == "no_work"
+
+
+def test_validate_overrides_pytest_collect_only_from_project_configuration(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.pytest.ini_options]\naddopts = "--collect-only"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "test_failure.py").write_text(
+        "def test_failure():\n    assert False\n",
+        encoding="utf-8",
+    )
+    events: list[AgentAuditEvent] = []
+    policy = _policy(tmp_path, {AgentToolPermission.SHELL}, events)
+
+    result = agent.tool_validate(["python3", "-m", "pytest", "-q"], policy=policy)
+
+    assert "validation test: FAIL" in result
+    assert events[-1].outcome == "nonzero"
+
+
+@pytest.mark.parametrize(
+    ("output", "expected_outcome"),
+    [
+        ("Ran 0 tests in 0.000s\n\nOK", "no_work"),
+        ("Ran 1 test in 0.001s\n\nOK", "ok"),
+    ],
+)
+def test_validate_requires_unittest_to_run_at_least_one_test(
+    tmp_path,
+    monkeypatch,
+    output,
+    expected_outcome,
+):
+    events: list[AgentAuditEvent] = []
+    policy = _policy(tmp_path, {AgentToolPermission.SHELL}, events)
+    monkeypatch.setattr(
+        agent,
+        "sandboxed_command",
+        lambda argv, _policy: (["sandbox", *argv], {"PATH": "/usr/bin"}),
+    )
+    monkeypatch.setattr(
+        agent,
+        "_workspace_controls_executable",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        agent,
+        "_run_bounded_process",
+        lambda *_args, **_kwargs: agent._BoundedCommandResult(
+            output=output,
+            returncode=0,
+        ),
+    )
+
+    result = agent.tool_validate(
+        ["python3", "-B", "-m", "unittest", "discover"],
+        policy=policy,
+    )
+
+    assert events[-1].outcome == expected_outcome
+    assert ("PASS" in result) is (expected_outcome == "ok")
+
+
+@pytest.mark.parametrize(
+    ("argv", "output"),
+    [
+        (["go", "test", "./..."], "? example/module [no test files]\n"),
+        (["go", "test", "./..."], "testing: warning: no tests to run\nPASS\n"),
+        (["ctest"], "No tests were found!!!\n"),
+    ],
+)
+def test_validate_rejects_other_runners_that_report_no_tests(
+    tmp_path,
+    monkeypatch,
+    argv,
+    output,
+):
+    events: list[AgentAuditEvent] = []
+    policy = _policy(tmp_path, {AgentToolPermission.SHELL}, events)
+    monkeypatch.setattr(
+        agent,
+        "sandboxed_command",
+        lambda values, _policy: (["sandbox", *values], {"PATH": "/usr/bin"}),
+    )
+    monkeypatch.setattr(
+        agent,
+        "_workspace_controls_executable",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        agent,
+        "_run_bounded_process",
+        lambda *_args, **_kwargs: agent._BoundedCommandResult(output=output, returncode=0),
+    )
+
+    result = agent.tool_validate(argv, policy=policy)
+
+    assert "FAIL" in result
+    assert events[-1].outcome == "no_work"
+
+
+@pytest.mark.parametrize(
+    ("argv", "output"),
+    [
+        (["ruff", "check", "empty"], "warning: No Python files found under the given path(s)\nAll checks passed!\n"),
+        (["ruff", "format", "--check", "empty"], "warning: No Python files found under the given path(s)\n"),
+        (["python3", "-m", "compileall", "empty"], "Listing 'empty'...\n"),
+    ],
+)
+def test_validate_rejects_static_success_without_checked_files(
+    tmp_path,
+    monkeypatch,
+    argv,
+    output,
+):
+    events: list[AgentAuditEvent] = []
+    policy = _policy(tmp_path, {AgentToolPermission.SHELL}, events)
+    (tmp_path / "empty").mkdir()
+    monkeypatch.setattr(
+        agent,
+        "sandboxed_command",
+        lambda values, _policy: (["sandbox", *values], {"PATH": "/usr/bin"}),
+    )
+    monkeypatch.setattr(
+        agent,
+        "_workspace_controls_executable",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        agent,
+        "_run_bounded_process",
+        lambda *_args, **_kwargs: agent._BoundedCommandResult(output=output, returncode=0),
+    )
+
+    result = agent.tool_validate(argv, policy=policy)
+
+    assert "FAIL" in result
+    assert events[-1].outcome == "no_work"
+
+
+def test_validate_diff_checks_full_plain_workspace_without_git(
+    tmp_path,
+    monkeypatch,
+):
+    events: list[AgentAuditEvent] = []
+    policy = _policy(
+        tmp_path,
+        {AgentToolPermission.READ, AgentToolPermission.SHELL},
+        events,
+    )
+    target = tmp_path / "untracked.md"
+    target.write_text("clean documentation\n", encoding="utf-8")
+    monkeypatch.setattr(
+        agent,
+        "_run_bounded_process",
+        lambda *_args, **_kwargs: pytest.fail("diff hygiene must not spawn Git"),
+    )
+
+    clean = agent.tool_validate(["git", "diff", "--check"], policy=policy)
+    target.write_text("trailing whitespace  \n", encoding="utf-8")
+    dirty = agent.tool_validate(["git", "diff", "--check"], policy=policy)
+
+    assert "validation diff: PASS" in clean
+    assert "files checked: 1" in clean
+    assert "validation diff: FAIL" in dirty
+    assert "violations: 1" in dirty
+    assert [event.outcome for event in events[-2:]] == ["ok", "nonzero"]
+
+
+def test_validate_diff_rejects_hardlinked_text_without_reading_outside_alias(
+    tmp_path,
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside-secret.md"
+    outside.write_text("outside data\n", encoding="utf-8")
+    os.link(outside, workspace / "alias.md")
+    events: list[AgentAuditEvent] = []
+    policy = _policy(
+        workspace,
+        {AgentToolPermission.READ, AgentToolPermission.SHELL},
+        events,
+    )
+
+    result = agent.tool_validate(["git", "diff", "--check"], policy=policy)
+
+    assert "validation diff: FAIL" in result
+    assert "violations: 1" in result
+    assert "outside data" not in result
+    assert events[-1].outcome == "nonzero"
+
+
+def test_validate_diff_covers_build_files_and_each_conflict_marker(tmp_path):
+    (tmp_path / "broken.py").write_text("<<<<<<<\n", encoding="utf-8")
+    (tmp_path / "module.kt").write_text(
+        "<<<<<<< ours\nleft\n=======\nright\n>>>>>>> theirs\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "BUILD").write_text("target = value  \n", encoding="utf-8")
+    events: list[AgentAuditEvent] = []
+    policy = _policy(
+        tmp_path,
+        {AgentToolPermission.READ, AgentToolPermission.SHELL},
+        events,
+    )
+
+    result = agent.tool_validate(["git", "diff", "--check"], policy=policy)
+
+    assert "validation diff: FAIL" in result
+    assert "violations: 3" in result
+    assert events[-1].outcome == "nonzero"
+
+
+def test_validate_diff_covers_unenumerated_text_formats(tmp_path):
+    (tmp_path / "schema.proto").write_text(
+        'syntax = "proto3";  \n',
+        encoding="utf-8",
+    )
+    events: list[AgentAuditEvent] = []
+    policy = _policy(
+        tmp_path,
+        {AgentToolPermission.READ, AgentToolPermission.SHELL},
+        events,
+    )
+
+    result = agent.tool_validate(["git", "diff", "--check"], policy=policy)
+
+    assert "validation diff: FAIL" in result
+    assert "violations: 1" in result
+    assert events[-1].outcome == "nonzero"
+
+
+def test_validate_diff_stops_when_file_grows_beyond_runtime_budget(
+    tmp_path,
+    monkeypatch,
+):
+    (tmp_path / "growing.py").write_text("x\n", encoding="utf-8")
+    events: list[AgentAuditEvent] = []
+    policy = _policy(
+        tmp_path,
+        {AgentToolPermission.READ, AgentToolPermission.SHELL},
+        events,
+        file_limit_chars=1_024,
+    )
+    calls = 0
+
+    def growing_read(_descriptor, _size):
+        nonlocal calls
+        calls += 1
+        return b"x" * 600
+
+    monkeypatch.setattr(agent.os, "read", growing_read)
+
+    result = agent.tool_validate(["git", "diff", "--check"], policy=policy)
+
+    assert calls == 2
+    assert "bounded coverage" in result
+    assert events[-1].outcome == "nonzero"
 
 
 def test_native_cli_explicitly_declares_the_coding_policy(monkeypatch, tmp_path):
@@ -330,9 +689,7 @@ def test_agent_workspace_prefers_vcs_root_and_rejects_broad_roots(monkeypatch, t
     assert main_module._agent_workspace_root(None, unsafe_broad=False) == project
     with pytest.raises(ValueError, match="refusing broad agent workspace"):
         main_module._agent_workspace_root(str(Path.home()), unsafe_broad=False)
-    assert main_module._agent_workspace_root(
-        str(Path.home()), unsafe_broad=True
-    ) == Path.home().resolve()
+    assert main_module._agent_workspace_root(str(Path.home()), unsafe_broad=True) == Path.home().resolve()
 
     monkeypatch.chdir(Path.home())
     assert agent._default_read_policy().permissions == frozenset()
@@ -379,7 +736,7 @@ def test_real_shell_sandbox_cannot_read_outside_workspace(tmp_path):
     policy = AgentToolPolicy.coding_workspace(workspace)
 
     output = agent.tool_bash(
-        f"python3 -c \"print(open({str(outside)!r}).read())\"",
+        f'python3 -c "print(open({str(outside)!r}).read())"',
         policy=policy,
     )
 
@@ -624,13 +981,9 @@ def test_file_limits_fifo_and_hard_links_fail_closed(tmp_path):
         file_limit_chars=1_024,
     )
 
-    assert "file-size policy limit" in agent.tool_write(
-        "large.txt", "x" * 1_025, policy=policy
-    )
+    assert "file-size policy limit" in agent.tool_write("large.txt", "x" * 1_025, policy=policy)
     (workspace / "large.txt").write_text("x" * 1_025, encoding="utf-8")
-    assert "editable-size policy limit" in agent.tool_edit(
-        "large.txt", "x", "y", policy=policy
-    )
+    assert "editable-size policy limit" in agent.tool_edit("large.txt", "x", "y", policy=policy)
 
     fifo = workspace / "input.pipe"
     os.mkfifo(fifo)

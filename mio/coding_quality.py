@@ -11,13 +11,20 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import stat
 import subprocess
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Iterable, Sequence
 
-from mio.agent_policy import AgentAuditEvent
+from mio.agent_policy import (
+    AgentAuditEvent,
+    AgentPathViolation,
+    AgentPermissionDenied,
+    AgentToolPolicy,
+    sandboxed_command,
+)
 
 
 class CodingEffort(str, Enum):
@@ -50,8 +57,15 @@ class GateStatus(str, Enum):
 
 _CHANGE_PATTERN = re.compile(
     r"\b(?:add|build|change|create|delete|edit|fix|implement|migrate|modify|patch|"
-    r"refactor|remove|rename|repair|replace|update|write|aggiung\w*|corregg\w*|"
-    r"crea\w*|implement\w*|modific\w*|rimuov\w*|scriv\w*|sostitui\w*)\b",
+    r"refactor|remove|rename|repair|replace|update|write|aggiung\w*|aggiorn\w*|"
+    r"complet\w*|configur\w*|corregg\w*|crea\w*|implement\w*|install\w*|"
+    r"miglior\w*|modific\w*|ottimizz\w*|programm\w*|rimuov\w*|scriv\w*|"
+    r"sostitui\w*)\b",
+    re.IGNORECASE,
+)
+_NEGATED_CHANGE_PATTERN = re.compile(
+    r"\b(?:do\s+not|don't|without)\s+(?:change|edit|modify|write)\b|"
+    r"\b(?:non|senza)\s+(?:cambiare|modificare|scrivere)\b",
     re.IGNORECASE,
 )
 _INSPECT_PATTERN = re.compile(
@@ -89,6 +103,7 @@ _SOURCE_SUFFIXES = frozenset(
         ".ts",
         ".tsx",
         ".vue",
+        ".proto",
         ".xml",
         ".yaml",
         ".yml",
@@ -97,12 +112,19 @@ _SOURCE_SUFFIXES = frozenset(
 _SOURCE_NAMES = frozenset(
     {
         "dockerfile",
+        "build",
+        "build.bazel",
+        "cmakelists.txt",
         "gemfile",
+        "justfile",
         "makefile",
+        "meson.build",
         "package-lock.json",
         "package.json",
+        "pom.xml",
         "pyproject.toml",
         "requirements.txt",
+        "workspace",
     }
 )
 _SKIP_DIRS = frozenset(
@@ -120,6 +142,7 @@ _SKIP_DIRS = frozenset(
         "dist",
         "models",
         "node_modules",
+        "spd",
     }
 )
 _MAX_GIT_OUTPUT_BYTES = 8 * 1024 * 1024
@@ -133,6 +156,8 @@ def classify_request_intent(text: str) -> RequestIntent:
 
     if not isinstance(text, str):
         raise TypeError("request text must be a string")
+    if _NEGATED_CHANGE_PATTERN.search(text):
+        return RequestIntent.INSPECT
     if _CHANGE_PATTERN.search(text):
         return RequestIntent.CODE_CHANGE_REQUESTED
     if _INSPECT_PATTERN.search(text):
@@ -144,9 +169,175 @@ def _argv_digest(argv: Sequence[str]) -> str:
     return hashlib.sha256("\0".join(argv).encode("utf-8", errors="replace")).hexdigest()
 
 
+def _semantic_argv_digest(argv: Sequence[str]) -> str:
+    """Hash validation scope while ignoring presentation-only verbosity."""
+
+    values = list(argv)
+    if values:
+        executable = Path(values[0]).name.lower()
+        if executable.startswith("python") or executable in {"pypy", "pypy3"}:
+            parsed = _python_module(values[1:])
+            if parsed is not None and parsed[0] in {"pytest", "unittest"}:
+                values = [parsed[0], *parsed[1]]
+        elif executable == "py.test":
+            values[0] = "pytest"
+
+    presentation_flags = {
+        "--disable-warnings",
+        "--no-header",
+        "--no-summary",
+        "--quiet",
+        "--silent",
+        "--verbose",
+    }
+    presentation_prefixes = (
+        "--color=",
+        "--durations=",
+        "--durations-min=",
+        "--show-capture=",
+        "--tb=",
+        "--verbosity=",
+    )
+    presentation_value_options = {
+        "--color",
+        "--durations",
+        "--durations-min",
+        "--show-capture",
+        "--tb",
+        "--verbosity",
+        "-r",
+    }
+    normalized: list[str] = []
+    index = 0
+    while index < len(values):
+        value = values[index]
+        lowered = value.lower()
+        if lowered in presentation_value_options:
+            index += 2
+            continue
+        if (
+            lowered in presentation_flags
+            or re.fullmatch(r"-[qv]+", lowered)
+            or re.fullmatch(r"-r[a-zA-Z]*", value)
+            or lowered.startswith(presentation_prefixes)
+        ):
+            index += 1
+            continue
+        normalized.append(value)
+        index += 1
+    if normalized and normalized[0].lower() == "pytest":
+        normalized = [value for index, value in enumerate(normalized) if index == 0 or value not in {".", "./"}]
+    return _argv_digest(normalized)
+
+
 def _contains_shell_grammar(argv: Sequence[str]) -> bool:
     operators = {"&&", "||", ";", "|", "&", ">", ">>", "<", "2>", "2>&1"}
     return any(value in operators or "\n" in value or "\r" in value for value in argv)
+
+
+def _requests_non_execution(args: Sequence[str]) -> bool:
+    blocked = {
+        "--collect-only",
+        "--co",
+        "--dry-run",
+        "--dry",
+        "--exit-zero",
+        "--env-info",
+        "--createstub",
+        "--clean",
+        "--fixtures",
+        "--fixtures-per-test",
+        "--fix-only",
+        "--help",
+        "--help-command",
+        "--help-full",
+        "--if-present",
+        "--install-only",
+        "--init",
+        "--list",
+        "--list-tests",
+        "--listfilesonly",
+        "--listenvs",
+        "--list-sessions",
+        "--listtests",
+        "--markers",
+        "--no-run",
+        "--notest",
+        "--setup-only",
+        "--setup-plan",
+        "--show-bin-path",
+        "--show-only",
+        "--show-files",
+        "--show-settings",
+        "--showconfig",
+        "--print-config",
+        "--print-labels",
+        "--passwithnotests",
+        "--stdin",
+        "--version",
+        "-",
+        "-h",
+    }
+    blocked_prefixes = (
+        "--co=",
+        "--collect-only=",
+        "--help=",
+        "--help-command=",
+        "--help-",
+        "-list=",
+        "--list-tests=",
+        "--listtests=",
+        "--show-only=",
+    )
+    if any(value in blocked or value.startswith(blocked_prefixes) for value in args):
+        return True
+    if any(value.startswith(("-dskiptests", "-dmaven.test.skip", "--exclude-task=test")) for value in args):
+        return True
+    return any(left == "-x" and right == "test" for left, right in zip(args, args[1:]))
+
+
+def _python_module(args: Sequence[str]) -> tuple[str, list[str]] | None:
+    """Return ``(module, module_args)`` after harmless interpreter flags."""
+
+    index = 0
+    flag_without_value = {
+        "-b",
+        "-B",
+        "-d",
+        "-E",
+        "-I",
+        "-O",
+        "-OO",
+        "-P",
+        "-q",
+        "-R",
+        "-s",
+        "-S",
+        "-u",
+        "-v",
+        "-x",
+    }
+    while index < len(args):
+        value = args[index]
+        if value in {"-c", "-V", "-VV", "--check-hash-based-pycs", "--version"}:
+            return None
+        if value == "-m":
+            if index + 1 >= len(args):
+                return None
+            return args[index + 1].lower(), list(args[index + 2 :])
+        if value in flag_without_value:
+            index += 1
+            continue
+        if value in {"-W", "-X"}:
+            if index + 1 >= len(args):
+                return None
+            index += 2
+            continue
+        if value.startswith(("-W", "-X")) and len(value) > 2:
+            index += 1
+            continue
+        return None
+    return None
 
 
 def infer_validation_kind(argv: Sequence[str]) -> ValidationKind | None:
@@ -166,7 +357,12 @@ def infer_validation_kind(argv: Sequence[str]) -> ValidationKind | None:
     ):
         return None
     executable = Path(argv[0]).name.lower()
-    args = [value.lower() for value in argv[1:]]
+    raw_args = list(argv[1:])
+    args = [value.lower() for value in raw_args]
+    if executable != argv[0].lower() or "/" in argv[0] or "\\" in argv[0]:
+        return None
+    if _requests_non_execution(args):
+        return None
     shells = {
         "bash",
         "cmd",
@@ -183,36 +379,74 @@ def infer_validation_kind(argv: Sequence[str]) -> ValidationKind | None:
         return None
 
     if executable.startswith("python") or executable in {"pypy", "pypy3"}:
-        if "-c" in args or len(args) < 2 or args[0] != "-m":
+        parsed_module = _python_module(raw_args)
+        if parsed_module is None:
             return None
-        module = args[1]
+        module, module_args = parsed_module
+        if _requests_non_execution(module_args):
+            return None
+        if module == "pytest" and any(re.fullmatch(r"-V+", value) for value in module_args):
+            return None
         if module in {"pytest", "unittest"}:
             return ValidationKind.TEST
-        if module in {"compileall", "mypy", "pyright", "ruff"}:
+        if module in {"compileall", "mypy", "pyright"}:
+            if module == "compileall" and any(re.fullmatch(r"-q+", value) for value in module_args):
+                return None
+            if module == "mypy" and "-V" in module_args:
+                return None
             return ValidationKind.STATIC
+        if module == "ruff":
+            lowered_module_args = [value.lower() for value in module_args]
+            if lowered_module_args and lowered_module_args[0] == "check":
+                return ValidationKind.STATIC
+            if lowered_module_args and lowered_module_args[0] == "format" and "--check" in lowered_module_args[1:]:
+                return ValidationKind.STATIC
+            return None
         if module == "build":
             return ValidationKind.BUILD
         return None
 
     if executable in {"pytest", "py.test", "tox", "nox", "ctest"}:
+        if executable in {"pytest", "py.test"} and any(re.fullmatch(r"-V+", value) for value in raw_args):
+            return None
+        if executable in {"tox", "nox"} and any(
+            value == "-l" or (executable == "tox" and re.fullmatch(r"-[a-z]*a[a-z]*", value)) for value in args
+        ):
+            return None
+        if executable == "tox" and any(value in {"config", "devenv", "exec", "list", "quickstart"} for value in args):
+            return None
+        if executable == "ctest" and any(value in {"-n", "-n=on"} for value in args):
+            return None
+        if executable == "ctest" and any(value in {"-d", "-s", "-sp", "-t"} for value in args):
+            return None
         return ValidationKind.TEST
     if executable in {"mypy", "pyright", "eslint", "tsc", "stylelint"}:
+        if (executable == "mypy" and "-V" in raw_args) or (
+            executable in {"eslint", "stylelint", "tsc"} and "-v" in args
+        ):
+            return None
         return ValidationKind.STATIC
-    if executable in {"ruff", "biome"}:
-        return ValidationKind.STATIC if args and args[0] in {"check", "format"} else None
+    if executable == "ruff":
+        if args and args[0] == "check":
+            return ValidationKind.STATIC
+        if args and args[0] == "format" and "--check" in args[1:]:
+            return ValidationKind.STATIC
+        return None
+    if executable == "biome":
+        return ValidationKind.STATIC if args and args[0] == "check" else None
     if executable in {"node", "deno"}:
         if any(value in {"-e", "--eval", "-p", "--print"} for value in args):
             return None
-        return ValidationKind.STATIC if args and args[0] in {"--check", "check"} else None
+        command = "--check" if executable == "node" else "check"
+        return ValidationKind.STATIC if len(args) >= 2 and args[0] == command and not args[1].startswith("-") else None
 
     if executable in {"npm", "pnpm", "yarn", "bun"}:
-        scripts = [value for value in args if not value.startswith("-")]
-        if not scripts:
+        if not args or args[0].startswith("-"):
             return None
-        if scripts[0] == "run" and len(scripts) > 1:
-            script = scripts[1]
+        if args[0] == "run" and len(args) > 1 and not args[1].startswith("-"):
+            script = args[1]
         else:
-            script = scripts[0]
+            script = args[0]
         if script == "test" or script.startswith("test:"):
             return ValidationKind.TEST
         if script in {"check", "lint", "typecheck", "type-check"} or script.startswith("lint:"):
@@ -222,6 +456,8 @@ def infer_validation_kind(argv: Sequence[str]) -> ValidationKind | None:
         return None
 
     if executable == "cargo" and args:
+        if "--no-run" in args or "--build-plan" in args:
+            return None
         return {
             "test": ValidationKind.TEST,
             "check": ValidationKind.STATIC,
@@ -229,17 +465,43 @@ def infer_validation_kind(argv: Sequence[str]) -> ValidationKind | None:
             "build": ValidationKind.BUILD,
         }.get(args[0])
     if executable == "go" and args:
+        if args[0] == "build" and "-n" in args[1:]:
+            return None
+        if args[0] == "test" and any(value == "-list" or value.startswith("-list=") for value in args[1:]):
+            return None
+        if args[0] == "test" and any(value in {"-c", "-exec"} or value.startswith("-exec=") for value in args[1:]):
+            return None
         return {
             "test": ValidationKind.TEST,
             "vet": ValidationKind.STATIC,
             "build": ValidationKind.BUILD,
         }.get(args[0])
     if executable in {"dotnet", "swift"} and args:
+        if executable == "dotnet" and args[0] == "test" and any(value in {"-t", "--list-tests"} for value in args[1:]):
+            return None
+        if executable == "swift" and args[0] == "test" and any(value in {"-l", "--list-tests"} for value in args[1:]):
+            return None
+        if executable == "swift" and args[:2] == ["test", "list"]:
+            return None
         return {
             "test": ValidationKind.TEST,
             "build": ValidationKind.BUILD,
         }.get(args[0])
-    if executable in {"mvn", "mvnw", "gradle", "gradlew"}:
+    if executable in {"mvn", "gradle"}:
+        if executable == "gradle" and "-m" in args:
+            return None
+        value_options = {
+            "--file",
+            "--projects",
+            "--settings",
+            "--threads",
+            "-f",
+            "-p",
+            "-s",
+            "-t",
+        }
+        if any(value in value_options for value in args):
+            return None
         tasks = {value.lstrip("./") for value in args if not value.startswith("-")}
         if tasks & {"test", "verify", "check"}:
             return ValidationKind.TEST
@@ -247,6 +509,11 @@ def infer_validation_kind(argv: Sequence[str]) -> ValidationKind | None:
             return ValidationKind.BUILD
         return None
     if executable == "make":
+        if any(
+            value in {"--just-print", "--question", "--touch"} or bool(re.fullmatch(r"-[A-Za-z]*[nqt][A-Za-z]*", value))
+            for value in args
+        ):
+            return None
         targets = {value for value in args if not value.startswith("-") and "=" not in value}
         if any(target == "test" or target.startswith("test-") for target in targets):
             return ValidationKind.TEST
@@ -255,7 +522,7 @@ def infer_validation_kind(argv: Sequence[str]) -> ValidationKind | None:
         if targets & {"build", "all"}:
             return ValidationKind.BUILD
         return None
-    if executable == "git" and len(args) >= 2 and args[0] == "diff" and "--check" in args[1:]:
+    if executable == "git" and args == ["diff", "--check"]:
         return ValidationKind.DIFF
     return None
 
@@ -280,43 +547,89 @@ class WorkspaceSnapshot:
         return {entry.path_sha256: entry for entry in self.entries}
 
 
-def _hash_file(path: Path, *, byte_budget: list[int]) -> str:
+def _hash_file(path: Path, *, root: Path, byte_budget: list[int]) -> str:
+    """Hash one path through an openat no-follow walk rooted in ``root``."""
+
     digest = hashlib.sha256()
+    relative = path.relative_to(root)
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    root_fd = os.open(root, directory_flags)
+    directory_fd = root_fd
+    descriptor = -1
     try:
-        stat_result = path.lstat()
-    except OSError as exc:
-        return hashlib.sha256(f"error:{type(exc).__name__}".encode()).hexdigest()
-    if path.is_symlink():
-        return hashlib.sha256(b"symlink-rejected").hexdigest()
-    if not path.is_file():
-        return hashlib.sha256(f"mode:{stat_result.st_mode}".encode()).hexdigest()
-    with path.open("rb") as handle:
+        for part in relative.parts[:-1]:
+            next_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+            if directory_fd != root_fd:
+                os.close(directory_fd)
+            directory_fd = next_fd
+        descriptor = os.open(
+            relative.parts[-1],
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+            dir_fd=directory_fd,
+        )
+        before_read = os.fstat(descriptor)
+        if not stat.S_ISREG(before_read.st_mode):
+            raise OSError("manifest_non_regular_file")
+        if before_read.st_nlink > 1:
+            raise OSError("manifest_hardlink_file")
         while True:
-            chunk = handle.read(1024 * 1024)
+            chunk = os.read(descriptor, 1024 * 1024)
             if not chunk:
                 break
             byte_budget[0] += len(chunk)
             if byte_budget[0] > _MAX_MANIFEST_BYTES:
                 raise OverflowError("manifest_byte_limit")
             digest.update(chunk)
-    digest.update(f"\0mode:{stat_result.st_mode & 0o777}".encode())
-    return digest.hexdigest()
+        after_read = os.fstat(descriptor)
+        if (
+            before_read.st_dev,
+            before_read.st_ino,
+            before_read.st_size,
+            before_read.st_mtime_ns,
+            before_read.st_mode,
+            before_read.st_nlink,
+        ) != (
+            after_read.st_dev,
+            after_read.st_ino,
+            after_read.st_size,
+            after_read.st_mtime_ns,
+            after_read.st_mode,
+            after_read.st_nlink,
+        ):
+            raise OSError("manifest_file_changed_during_read")
+        digest.update(f"\0mode:{before_read.st_mode & 0o777}".encode())
+        return digest.hexdigest()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if directory_fd != root_fd:
+            os.close(directory_fd)
+        os.close(root_fd)
 
 
 def _safe_suffix(path: Path) -> str:
+    if path.name.lower() in _SOURCE_NAMES:
+        return ".source"
     suffix = path.suffix.lower()
     if suffix and re.fullmatch(r"\.[a-z0-9_+-]{1,16}", suffix):
         return suffix
     return ""
 
 
-def _entry(root_index: int, relative: str, absolute: Path, byte_budget: list[int]) -> RevisionEntry:
+def _entry(
+    root_index: int,
+    relative: str,
+    absolute: Path,
+    byte_budget: list[int],
+    *,
+    root: Path,
+) -> RevisionEntry:
     normalized = f"{root_index}:{relative}"
     path_digest = hashlib.sha256(normalized.encode("utf-8", errors="replace")).hexdigest()
     if not absolute.exists() and not absolute.is_symlink():
         state_digest = hashlib.sha256(b"deleted").hexdigest()
     else:
-        state_digest = _hash_file(absolute, byte_budget=byte_budget)
+        state_digest = _hash_file(absolute, root=root, byte_budget=byte_budget)
     return RevisionEntry(
         path_sha256=path_digest,
         suffix=_safe_suffix(Path(relative)),
@@ -324,12 +637,72 @@ def _entry(root_index: int, relative: str, absolute: Path, byte_budget: list[int
     )
 
 
-def _run_git(root: Path, *args: str) -> bytes:
+def _prepare_git_probe(root: Path) -> tuple[tuple[str, ...], dict[str, str]]:
+    """Build one read-only, no-child-process Git probe for ``root``.
+
+    Repository-local Git configuration is attacker-controlled.  In particular,
+    ``core.fsmonitor`` and external diff/filter helpers can otherwise execute
+    during an apparently read-only status probe.  The inherited macOS sandbox
+    prevents writes, network access, and child processes; command-line config
+    and a minimal environment disable the corresponding Git extension points.
+    If that sandbox is unavailable, callers fall back to the subprocess-free
+    bounded manifest snapshot.
+    """
+
+    try:
+        policy = AgentToolPolicy.read_only(root)
+        wrapped, environment = sandboxed_command(
+            ["git"],
+            policy,
+            allow_process_fork=False,
+        )
+    except (AgentPathViolation, AgentPermissionDenied, ValueError) as exc:
+        raise OSError("git_sandbox_unavailable") from exc
+    sanitized = dict(environment)
+    sanitized.update(
+        {
+            "GIT_ATTR_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_PAGER": "cat",
+            "GIT_TERMINAL_PROMPT": "0",
+            "HOME": "/var/empty",
+            "LANG": "C",
+            "LC_ALL": "C",
+            "PAGER": "cat",
+        }
+    )
+    sanitized.pop("GIT_EXTERNAL_DIFF", None)
+    return tuple(wrapped), sanitized
+
+
+def _run_git(
+    root: Path,
+    *args: str,
+    probe: tuple[tuple[str, ...], dict[str, str]] | None = None,
+) -> bytes:
+    wrapped, environment = probe or _prepare_git_probe(root)
     completed = subprocess.run(
-        ["git", "-C", str(root), *args],
+        [
+            *wrapped,
+            "--no-pager",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "diff.external=",
+            "-c",
+            "submodule.recurse=false",
+            "-C",
+            str(root),
+            *args,
+        ],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
+        env=environment,
         timeout=_GIT_TIMEOUT_S,
         check=False,
     )
@@ -341,25 +714,58 @@ def _run_git(root: Path, *args: str) -> bytes:
 
 
 def _git_entries(root: Path, root_index: int, byte_budget: list[int]) -> tuple[list[RevisionEntry], bytes]:
-    inside = _run_git(root, "rev-parse", "--is-inside-work-tree").strip()
+    probe = _prepare_git_probe(root)
+    inside = _run_git(root, "rev-parse", "--is-inside-work-tree", probe=probe).strip()
     if inside != b"true":
         raise OSError("not_git_worktree")
     try:
-        head = _run_git(root, "rev-parse", "--verify", "HEAD").strip()
-        changed = _run_git(root, "diff", "--name-only", "-z", "HEAD", "--", ".")
+        head = _run_git(root, "rev-parse", "--verify", "HEAD", probe=probe).strip()
     except OSError:
         head = b"unborn"
-        changed = _run_git(root, "ls-files", "-z", "-c", "-m", "-d", "--", ".")
-    untracked = _run_git(root, "ls-files", "-z", "--others", "--exclude-standard", "--", ".")
-    ignored = _run_git(root, "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", ".")
-    status = _run_git(root, "status", "--porcelain=v2", "-z", "--untracked-files=all", "--", ".")
-    raw_paths = set((changed + untracked).split(b"\0"))
+    # Hash every tracked worktree file. ``git diff`` and status deliberately
+    # trust index hints such as assume-unchanged/skip-worktree, so using only
+    # their reported dirty paths would let repository state hide a mutation.
+    # ``ls-files --cached`` enumerates those paths even when the hints are set;
+    # duplicate modified/deleted entries are collapsed below.
+    tracked = _run_git(
+        root,
+        "ls-files",
+        "-z",
+        "--cached",
+        "--modified",
+        "--deleted",
+        "--",
+        ".",
+        probe=probe,
+    )
+    untracked = _run_git(
+        root,
+        "ls-files",
+        "-z",
+        "--others",
+        "--exclude-standard",
+        "--",
+        ".",
+        probe=probe,
+    )
+    ignored = _run_git(
+        root,
+        "ls-files",
+        "-z",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "--",
+        ".",
+        probe=probe,
+    )
+    raw_paths = set((tracked + untracked).split(b"\0"))
     for raw_path in ignored.split(b"\0"):
         if not raw_path:
             continue
         decoded = os.fsdecode(raw_path)
         candidate = Path(decoded)
-        if _safe_suffix(candidate) in _SOURCE_SUFFIXES or candidate.name.lower() in _SOURCE_NAMES:
+        if not any(part in _SKIP_DIRS for part in candidate.parts):
             raw_paths.add(raw_path)
     raw_paths.discard(b"")
     if len(raw_paths) > _MAX_MANIFEST_FILES:
@@ -376,8 +782,8 @@ def _git_entries(root: Path, root_index: int, byte_budget: list[int]) -> tuple[l
             raise OSError("git_path_escape") from exc
         if absolute.is_symlink():
             raise OSError("git_symlink_path")
-        entries.append(_entry(root_index, relative, absolute, byte_budget))
-    metadata = hashlib.sha256(head + b"\0" + status).digest()
+        entries.append(_entry(root_index, relative, absolute, byte_budget, root=root_resolved))
+    metadata = hashlib.sha256(head).digest()
     return entries, metadata
 
 
@@ -393,7 +799,7 @@ def _fallback_entries(root: Path, root_index: int, byte_budget: list[int]) -> li
             if absolute.is_symlink():
                 raise OSError("manifest_symlink_file")
             relative = absolute.relative_to(root_resolved).as_posix()
-            entries.append(_entry(root_index, relative, absolute, byte_budget))
+            entries.append(_entry(root_index, relative, absolute, byte_budget, root=root_resolved))
             if len(entries) > _MAX_MANIFEST_FILES:
                 raise OverflowError("manifest_file_limit")
     return entries
@@ -554,7 +960,40 @@ class CodingQualityGate:
 
     @property
     def activated(self) -> bool:
-        return self.intent is RequestIntent.CODE_CHANGE_REQUESTED or self.mutation_epoch > 0
+        # The preregistered intervention begins only after an observed
+        # workspace mutation. Intent classification remains advisory metadata;
+        # it can never force a needless edit or create an unresolvable pending
+        # obligation for an inspection-only response.
+        return self.mutation_epoch > 0
+
+    def _adopt_snapshot(
+        self,
+        fresh: WorkspaceSnapshot,
+        *,
+        conservative: bool,
+    ) -> WorkspaceSnapshot:
+        previous = self.current_snapshot
+        recovered_from_gap = previous is not None and not previous.complete and fresh.complete
+        if previous is not None:
+            changed, suffixes = _snapshot_delta(previous, fresh)
+            if changed or recovered_from_gap:
+                self._record_mutation(
+                    self._classify_suffixes(
+                        suffixes,
+                        conservative=conservative or recovered_from_gap,
+                    )
+                )
+        self.current_snapshot = fresh
+        self.snapshot_failed_closed = not fresh.complete
+        return fresh
+
+    def refresh(self) -> WorkspaceSnapshot:
+        """Reconcile late/background mutations before a terminal decision."""
+
+        return self._adopt_snapshot(
+            snapshot_workspaces(self.roots),
+            conservative=True,
+        )
 
     def before_tool(self, name: str, args: dict | None = None) -> WorkspaceSnapshot:
         del args
@@ -562,7 +1001,10 @@ class CodingQualityGate:
             if self.current_snapshot is None:
                 self.current_snapshot = snapshot_workspaces(self.roots)
             return self.current_snapshot
-        return snapshot_workspaces(self.roots)
+        return self._adopt_snapshot(
+            snapshot_workspaces(self.roots),
+            conservative=True,
+        )
 
     def _classify_suffixes(self, suffixes: Iterable[str], *, conservative: bool) -> set[str]:
         if conservative:
@@ -591,7 +1033,7 @@ class CodingQualityGate:
             active_snapshot = snapshot_workspaces(self.roots)
             self.current_snapshot = active_snapshot
         if command_sha256 is None:
-            command_sha256 = _argv_digest(tuple(argv or ()))
+            command_sha256 = _semantic_argv_digest(tuple(argv or ()))
         self.validations.append(
             ValidationEvidence(
                 kind=ValidationKind(kind),
@@ -649,12 +1091,15 @@ class CodingQualityGate:
         changed, suffixes = _snapshot_delta(before_snapshot, after_snapshot)
         direct_mutation = False
         for event in audit_events:
-            direct_mutation = self.record_audit_event(
-                event,
-                tool_name=name,
-                args=args,
-                snapshot=after_snapshot,
-            ) or direct_mutation
+            direct_mutation = (
+                self.record_audit_event(
+                    event,
+                    tool_name=name,
+                    args=args,
+                    snapshot=after_snapshot,
+                )
+                or direct_mutation
+            )
         if changed and not direct_mutation:
             self._record_mutation(
                 self._classify_suffixes(
@@ -662,8 +1107,23 @@ class CodingQualityGate:
                     conservative=name in {"bash", "call_mcp_tool", "validate"},
                 )
             )
-        if unsafe and (not before_snapshot.complete or not after_snapshot.complete):
-            self.snapshot_failed_closed = True
+        if not before_snapshot.complete and after_snapshot.complete and not direct_mutation:
+            # A complete snapshot after an unobservable interval recovers
+            # liveness, but the unknown interval is a new conservative code
+            # epoch and therefore invalidates every earlier certificate.
+            self._record_mutation({"code"})
+        elif (
+            unsafe
+            and name in {"bash", "call_mcp_tool", "validate"}
+            and (not before_snapshot.complete or not after_snapshot.complete)
+            and not direct_mutation
+        ):
+            # The tool may mutate paths hidden by an incomplete snapshot. Once
+            # an unsafe capability ran, fail closed with a conservative epoch
+            # instead of treating the turn as observation-only.
+            self._record_mutation({"code"})
+        if unsafe:
+            self.snapshot_failed_closed = not after_snapshot.complete
         self.current_snapshot = after_snapshot
         return after_snapshot
 
@@ -713,9 +1173,7 @@ class CodingQualityGate:
                     missing.append(kind.value)
             if self.effort is CodingEffort.ULTRA:
                 required.append("review_or_second_distinct_test")
-                distinct_tests = {
-                    item.command_sha256 for item in successes if item.kind is ValidationKind.TEST
-                }
+                distinct_tests = {item.command_sha256 for item in successes if item.kind is ValidationKind.TEST}
                 if ValidationKind.REVIEW not in kinds and len(distinct_tests) < 2:
                     missing.append("review_or_second_distinct_test")
         return tuple(required), tuple(missing)
@@ -739,22 +1197,12 @@ class CodingQualityGate:
                 required=(),
                 missing=(),
             )
-        if self.mutation_epoch == 0:
-            return GateDecision(
-                status=GateStatus.INCOMPLETE,
-                activated=True,
-                satisfied=False,
-                phase="change_required",
-                required=("workspace_mutation",),
-                missing=("workspace_mutation",),
-            )
         required, missing = self._requirements()
         if self.snapshot_failed_closed:
             missing = tuple(dict.fromkeys((*missing, "complete_workspace_snapshot")))
         if missing:
             failed = any(
-                evidence.epoch == self.mutation_epoch and evidence.outcome != "ok"
-                for evidence in self.validations
+                evidence.epoch == self.mutation_epoch and evidence.outcome != "ok" for evidence in self.validations
             )
             return GateDecision(
                 status=GateStatus.INCOMPLETE,
@@ -794,10 +1242,7 @@ class CodingQualityGate:
         verdict = self.decision()
         current = self.current_snapshot or self.initial_snapshot
         successes = self._current_successes()
-        validation_counts = {
-            kind.value: sum(item.kind is kind for item in successes)
-            for kind in ValidationKind
-        }
+        validation_counts = {kind.value: sum(item.kind is kind for item in successes) for kind in ValidationKind}
         return {
             "schema": "mio.coding-quality-gate.v1",
             "enabled": self.enabled,
@@ -811,9 +1256,7 @@ class CodingQualityGate:
             "mutation_epoch": self.mutation_epoch,
             "changed_kinds": sorted(self.changed_kinds),
             "snapshot_complete": not self.snapshot_failed_closed,
-            "initial_revision_sha256": (
-                self.initial_snapshot.revision_sha256 if self.initial_snapshot else ""
-            ),
+            "initial_revision_sha256": (self.initial_snapshot.revision_sha256 if self.initial_snapshot else ""),
             "current_revision_sha256": current.revision_sha256 if current else "",
             "required": list(verdict.required),
             "missing": list(verdict.missing),

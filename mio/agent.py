@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+import re
 import selectors
 import shutil
 import signal
+import stat
 import subprocess
 import tempfile
 import time
@@ -113,9 +115,7 @@ def _tool_trace(
     tool_name: str,
     event: AgentAuditEvent,
 ) -> AgentToolTrace:
-    target_digest = hashlib.sha256(
-        event.target.encode("utf-8", errors="replace")
-    ).hexdigest()
+    target_digest = hashlib.sha256(event.target.encode("utf-8", errors="replace")).hexdigest()
     return AgentToolTrace(
         round_index=round_index,
         tool_name=tool_name[:64],
@@ -125,6 +125,7 @@ def _tool_trace(
         outcome=event.outcome,
         target_sha256=target_digest,
     )
+
 
 # --- System Prompts ---
 
@@ -167,6 +168,7 @@ CAVEMAN_LEVELS = {
 
 
 # --- Tool Execution ---
+
 
 def _default_read_policy() -> AgentToolPolicy:
     """Compatibility boundary for direct, unprivileged read-tool callers."""
@@ -441,6 +443,323 @@ def _audit_target_for_argv(argv: tuple[str, ...], kind: str = "unrecognized") ->
     return f"{kind}:{executable} sha256:{digest}"
 
 
+def _workspace_controls_executable(
+    executable: str,
+    *,
+    path_value: str,
+    workspace_roots: tuple[Path, ...],
+) -> bool | None:
+    """Return whether PATH resolves an executable through a workspace entry.
+
+    ``None`` means the executable could not be resolved.  Checking both the
+    lexical PATH hit and its canonical target prevents a workspace launcher or
+    symlink from masquerading as a trusted test runner.
+    """
+
+    located = shutil.which(executable, path=path_value)
+    if located is None:
+        return None
+    lexical = Path(located).expanduser().absolute()
+    try:
+        canonical = lexical.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    for root in workspace_roots:
+        for candidate in (lexical, canonical):
+            try:
+                candidate.relative_to(root)
+            except ValueError:
+                continue
+            return True
+    return False
+
+
+def _validation_scope_is_workspace_bound(
+    argv: tuple[str, ...],
+    workspace_roots: tuple[Path, ...],
+) -> bool:
+    """Reject validation operands that resolve outside every writable workspace."""
+
+    for raw_value in argv[1:]:
+        candidates = [raw_value]
+        if raw_value.startswith("-") and "=" in raw_value:
+            candidates.append(raw_value.split("=", 1)[1])
+        for rendered in candidates:
+            if rendered.startswith("-") and "=" not in rendered:
+                continue
+            if rendered.startswith("@"):
+                rendered = rendered[1:]
+            rendered = rendered.split("::", 1)[0]
+            if not rendered:
+                continue
+            path = Path(rendered).expanduser()
+            candidate = (
+                path.resolve(strict=False) if path.is_absolute() else (workspace_roots[0] / path).resolve(strict=False)
+            )
+            if not any(candidate == root or root in candidate.parents for root in workspace_roots):
+                return False
+    return True
+
+
+def _successful_validation_ran_work(argv: tuple[str, ...], output: str) -> bool:
+    """Reject known success-without-validation outcomes from trusted runners."""
+
+    lowered = tuple(value.lower() for value in argv)
+    executable = Path(lowered[0]).name
+    pytest_runner = executable in {"pytest", "py.test"}
+    ruff_runner = executable == "ruff"
+    compileall_runner = False
+    if executable.startswith("python") or executable in {"pypy", "pypy3"}:
+        try:
+            module_index = lowered.index("-m")
+        except ValueError:
+            return True
+        module = lowered[module_index + 1] if module_index + 1 < len(lowered) else ""
+        pytest_runner = module == "pytest"
+        ruff_runner = module == "ruff"
+        compileall_runner = module == "compileall"
+        if module == "unittest":
+            matches = re.findall(r"(?m)^Ran\s+([0-9][0-9,]*)\s+tests?\s+in\s+", output)
+            return bool(matches) and int(matches[-1].replace(",", "")) > 0
+    if pytest_runner and re.search(
+        r"(?im)(?:\bno tests ran\b|\bcollected 0 items?\b|\b\d+ (?:tests?|items?) collected in\b)",
+        output,
+    ):
+        return False
+    if ruff_runner and re.search(r"(?im)\bNo Python files found\b", output):
+        return False
+    if compileall_runner and not re.search(r"(?m)^Compiling\s+", output):
+        return False
+    if executable == "ctest" and re.search(r"(?im)^No tests were found", output):
+        return False
+    if (
+        executable == "go"
+        and len(lowered) > 1
+        and lowered[1] == "test"
+        and re.search(
+            r"(?im)(?:\[no test files\]|warning: no tests to run)",
+            output,
+        )
+    ):
+        return False
+    return True
+
+
+def _validation_execution_argv(argv: tuple[str, ...]) -> tuple[str, ...]:
+    """Neutralize inherited pytest options without changing audited scope."""
+
+    lowered = tuple(value.lower() for value in argv)
+    executable = Path(lowered[0]).name
+    is_pytest = executable in {"pytest", "py.test"}
+    if executable.startswith("python") or executable in {"pypy", "pypy3"}:
+        try:
+            module_index = lowered.index("-m")
+        except ValueError:
+            module_index = -1
+        is_pytest = module_index >= 0 and lowered[module_index + 1 : module_index + 2] == ("pytest",)
+    if not is_pytest:
+        return argv
+    insertion = argv.index("--") if "--" in argv else len(argv)
+    return (*argv[:insertion], "-o", "addopts=", *argv[insertion:])
+
+
+def _validate_workspace_hygiene(policy: AgentToolPolicy) -> _BoundedCommandResult:
+    """Check the complete current text workspace, including staged/untracked files."""
+
+    policy.require(AgentToolPermission.READ)
+    skipped_directories = {
+        ".git",
+        ".hg",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".svn",
+        ".tox",
+        ".venv",
+        "__pycache__",
+        "build",
+        "dist",
+        "models",
+        "node_modules",
+        "spd",
+    }
+    binary_suffixes = {
+        ".7z",
+        ".a",
+        ".avi",
+        ".bin",
+        ".bmp",
+        ".class",
+        ".dylib",
+        ".eot",
+        ".gif",
+        ".gz",
+        ".ico",
+        ".jar",
+        ".jpeg",
+        ".jpg",
+        ".lockb",
+        ".m4a",
+        ".mov",
+        ".mp3",
+        ".mp4",
+        ".o",
+        ".otf",
+        ".pdf",
+        ".png",
+        ".pyc",
+        ".so",
+        ".tar",
+        ".tiff",
+        ".ttf",
+        ".wav",
+        ".webm",
+        ".webp",
+        ".woff",
+        ".woff2",
+        ".xz",
+        ".zip",
+    }
+    checked_files = 0
+    checked_bytes = 0
+    violations = 0
+    limits_exceeded = False
+    conflict_pattern = re.compile(rb"(?m)^(?:<<<<<<<(?: [^\r\n]*)?|=======|>>>>>>>(?: [^\r\n]*)?)\r?$")
+    trailing_pattern = re.compile(rb"[ \t]+(?:\r?\n|\Z)")
+    traversal_failed = False
+
+    def mark_traversal_failure(_error: OSError) -> None:
+        nonlocal traversal_failed
+        traversal_failed = True
+
+    for root in policy.workspace_roots:
+        try:
+            walker = os.fwalk(
+                root,
+                topdown=True,
+                onerror=mark_traversal_failure,
+                follow_symlinks=False,
+            )
+            for _directory, dirnames, filenames, directory_fd in walker:
+                retained: list[str] = []
+                for name in sorted(dirnames):
+                    try:
+                        directory_stat = os.stat(
+                            name,
+                            dir_fd=directory_fd,
+                            follow_symlinks=False,
+                        )
+                    except OSError:
+                        violations += 1
+                        continue
+                    if stat.S_ISLNK(directory_stat.st_mode):
+                        violations += 1
+                    elif name not in skipped_directories:
+                        retained.append(name)
+                dirnames[:] = retained
+                for name in sorted(filenames):
+                    suffix = Path(name).suffix.lower()
+                    if suffix in binary_suffixes:
+                        continue
+                    try:
+                        file_stat = os.stat(
+                            name,
+                            dir_fd=directory_fd,
+                            follow_symlinks=False,
+                        )
+                    except OSError:
+                        violations += 1
+                        continue
+                    if stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink > 1:
+                        violations += 1
+                        continue
+                    checked_files += 1
+                    if checked_files > 20_000 or file_stat.st_size > policy.file_limit_chars:
+                        limits_exceeded = True
+                        continue
+                    descriptor = -1
+                    try:
+                        descriptor = os.open(
+                            name,
+                            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+                            dir_fd=directory_fd,
+                        )
+                        before_read = os.fstat(descriptor)
+                        if (
+                            not stat.S_ISREG(before_read.st_mode)
+                            or before_read.st_nlink > 1
+                            or (
+                                before_read.st_dev,
+                                before_read.st_ino,
+                            )
+                            != (
+                                file_stat.st_dev,
+                                file_stat.st_ino,
+                            )
+                        ):
+                            violations += 1
+                            continue
+                        chunks: list[bytes] = []
+                        file_bytes = 0
+                        exceeded_during_read = False
+                        while chunk := os.read(descriptor, 1024 * 1024):
+                            file_bytes += len(chunk)
+                            if file_bytes > policy.file_limit_chars or checked_bytes + file_bytes > 128 * 1024 * 1024:
+                                limits_exceeded = True
+                                exceeded_during_read = True
+                                break
+                            chunks.append(chunk)
+                        if exceeded_during_read:
+                            continue
+                        after_read = os.fstat(descriptor)
+                        if (
+                            before_read.st_dev,
+                            before_read.st_ino,
+                            before_read.st_size,
+                            before_read.st_mtime_ns,
+                        ) != (
+                            after_read.st_dev,
+                            after_read.st_ino,
+                            after_read.st_size,
+                            after_read.st_mtime_ns,
+                        ):
+                            violations += 1
+                            continue
+                        data = b"".join(chunks)
+                        checked_bytes += file_bytes
+                    except OSError:
+                        violations += 1
+                        continue
+                    finally:
+                        if descriptor >= 0:
+                            os.close(descriptor)
+                    if b"\x00" in data:
+                        continue
+                    if trailing_pattern.search(data) or conflict_pattern.search(data):
+                        violations += 1
+        except OSError:
+            traversal_failed = True
+    if traversal_failed:
+        return _BoundedCommandResult(
+            output="workspace hygiene traversal was incomplete",
+            returncode=2,
+        )
+    if limits_exceeded:
+        return _BoundedCommandResult(
+            output="workspace hygiene scan exceeded its bounded coverage",
+            returncode=2,
+        )
+    if violations:
+        return _BoundedCommandResult(
+            output=f"workspace hygiene violations: {violations}",
+            returncode=1,
+        )
+    return _BoundedCommandResult(
+        output=f"workspace hygiene files checked: {checked_files}",
+        returncode=0,
+    )
+
+
 def tool_validate(
     argv: list[str] | tuple[str, ...],
     *,
@@ -476,38 +795,86 @@ def tool_validate(
                 "(validation rejected: use a direct supported test, static, build, or git diff --check argv)",
             )
 
+        if not _validation_scope_is_workspace_bound(
+            normalized,
+            active_policy.workspace_roots,
+        ):
+            target = _audit_target_for_argv(normalized, str(getattr(kind, "value", kind)))
+            active_policy.audit(
+                operation="validate",
+                permission=AgentToolPermission.SHELL,
+                target=target,
+                allowed=False,
+                outcome="unscoped",
+                detail="validation operand resolves outside every writable workspace",
+            )
+            return _capped(
+                active_policy,
+                "(validation rejected: every explicit path must remain inside a writable workspace)",
+            )
+
         kind_name = str(getattr(kind, "value", kind))
         target = _audit_target_for_argv(normalized, kind_name)
-        sandboxed_argv, command_env = sandboxed_command(list(normalized), active_policy)
-        scratch = Path(
-            tempfile.mkdtemp(
-                prefix=".mio-validation-",
-                dir=active_policy.primary_workspace,
-            )
-        )
-        command_env = dict(command_env)
-        command_env.update(
-            {
-                "HOME": str(scratch),
-                "TMPDIR": str(scratch),
-                "XDG_CACHE_HOME": str(scratch / "cache"),
-                "PYTHONPYCACHEPREFIX": str(scratch / "pycache"),
-                "PYTHONDONTWRITEBYTECODE": "1",
-            }
-        )
         started = time.perf_counter()
-        try:
-            result = _run_bounded_process(
-                sandboxed_argv,
-                cwd=active_policy.primary_workspace,
-                env=command_env,
-                timeout_s=active_policy.command_timeout_s,
-                output_limit_chars=active_policy.output_limit_chars,
+        if kind_name == "diff":
+            # ``git diff --check`` is the model-facing sentinel, but invoking
+            # repository Git would omit staged/untracked files and cannot work
+            # reliably in plain or linked workspaces.  The trusted dispatcher
+            # instead scans the complete bounded current text tree.
+            result = _validate_workspace_hygiene(active_policy)
+        else:
+            execution_argv = _validation_execution_argv(normalized)
+            sandboxed_argv, command_env = sandboxed_command(
+                list(execution_argv),
+                active_policy,
             )
-        finally:
-            # The unique trusted scratch root prevents test caches/temp files
-            # from becoming workspace mutations or leaking between checks.
-            shutil.rmtree(scratch, ignore_errors=True)
+            workspace_controlled = _workspace_controls_executable(
+                normalized[0],
+                path_value=command_env.get("PATH", ""),
+                workspace_roots=active_policy.workspace_roots,
+            )
+            if workspace_controlled is not False:
+                active_policy.audit(
+                    operation="validate",
+                    permission=AgentToolPermission.SHELL,
+                    target=target,
+                    allowed=False,
+                    outcome="untrusted_executable",
+                    detail="validation executable is unresolved or controlled by a workspace",
+                )
+                return _capped(
+                    active_policy,
+                    "(validation rejected: executable must resolve outside every writable workspace)",
+                )
+            scratch = Path(
+                tempfile.mkdtemp(
+                    prefix=".mio-validation-",
+                    dir=active_policy.primary_workspace,
+                )
+            )
+            command_env = dict(command_env)
+            command_env.pop("PYTEST_ADDOPTS", None)
+            command_env.update(
+                {
+                    "HOME": str(scratch),
+                    "TMPDIR": str(scratch),
+                    "XDG_CACHE_HOME": str(scratch / "cache"),
+                    "PYTHONPYCACHEPREFIX": str(scratch / "pycache"),
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                }
+            )
+            try:
+                result = _run_bounded_process(
+                    sandboxed_argv,
+                    cwd=active_policy.primary_workspace,
+                    env=command_env,
+                    timeout_s=active_policy.command_timeout_s,
+                    output_limit_chars=active_policy.output_limit_chars,
+                )
+            finally:
+                # The unique trusted scratch root prevents test caches/temp
+                # files from becoming mutations or leaking between checks.
+                shutil.rmtree(scratch, ignore_errors=True)
         duration_s = time.perf_counter() - started
         response = _command_response(result, active_policy)
         outcome = "ok" if result.returncode == 0 else "nonzero"
@@ -515,6 +882,11 @@ def tool_validate(
             outcome = "timeout"
         elif result.output_exceeded:
             outcome = "output_limit"
+        elif outcome == "ok" and not _successful_validation_ran_work(
+            normalized,
+            result.output,
+        ):
+            outcome = "no_work"
         active_policy.audit(
             operation="validate",
             permission=AgentToolPermission.SHELL,
@@ -846,102 +1218,170 @@ AGENT_TOOLS = {
 }
 
 AGENT_TOOLS_SPEC = [
-    {"type": "function", "function": {
-        "name": "bash",
-        "description": "Run a zsh command (including pipes, redirections, and scripts) in an inherited workspace sandbox. Requires the caller's shell grant; network needs a separate caller grant; output and runtime are capped.",
-        "parameters": {"type": "object", "properties": {
-            "command": {"type": "string", "description": "Shell command to run"},
-        }, "required": ["command"]},
-    }},
-    {"type": "function", "function": {
-        "name": "validate",
-        "description": (
-            "Run a recognized test, static check, build, or git diff --check as direct argv. "
-            "Use this instead of bash for evidence after any edit. No shell, pipes, redirections, "
-            "wrappers, or inline code are accepted; the true exit status is audited."
-        ),
-        "parameters": {"type": "object", "properties": {
-            "argv": {
-                "type": "array",
-                "items": {"type": "string"},
-                "minItems": 1,
-                "maxItems": 128,
-                "description": "Direct executable and arguments, e.g. [\"python3\", \"-m\", \"pytest\", \"-q\"]",
+    {
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": "Run a zsh command (including pipes, redirections, and scripts) in an inherited workspace sandbox. Requires the caller's shell grant; network needs a separate caller grant; output and runtime are capped.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Shell command to run"},
+                },
+                "required": ["command"],
             },
-        }, "required": ["argv"]},
-    }},
-    {"type": "function", "function": {
-        "name": "read",
-        "description": "Read a regular, non-symlink file inside a caller-allowed workspace. Output is capped by policy.",
-        "parameters": {"type": "object", "properties": {
-            "path": {"type": "string"},
-        }, "required": ["path"]},
-    }},
-    {"type": "function", "function": {
-        "name": "write",
-        "description": "Atomically create or overwrite a non-symlink file inside a caller-allowed workspace. Requires the caller's write grant.",
-        "parameters": {"type": "object", "properties": {
-            "path":    {"type": "string"},
-            "content": {"type": "string"},
-        }, "required": ["path", "content"]},
-    }},
-    {"type": "function", "function": {
-        "name": "edit",
-        "description": "Replace a substring in a confined regular file. Requires the caller's read and write grants.",
-        "parameters": {"type": "object", "properties": {
-            "path": {"type": "string"},
-            "old":  {"type": "string", "description": "Exact substring to replace"},
-            "new":  {"type": "string", "description": "Replacement"},
-        }, "required": ["path", "old", "new"]},
-    }},
-    {"type": "function", "function": {
-        "name": "list_mio_skills",
-        "description": (
-            "Search instruction skills installed inside Mio. Filter by text, exact tag, "
-            "or source. This only lists metadata and never executes skill code."
-        ),
-        "parameters": {"type": "object", "properties": {
-            "query": {"type": "string", "description": "Words matched across name, description, and tags"},
-            "tag": {"type": "string", "description": "Optional exact tag"},
-            "source": {"type": "string", "description": "Optional exact source id"},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
-        }, "required": []},
-    }},
-    {"type": "function", "function": {
-        "name": "read_mio_skill",
-        "description": (
-            "Read the validated SKILL.md instructions for one Mio-local skill. "
-            "Call list_mio_skills first when the name is unknown. Never executes the skill."
-        ),
-        "parameters": {"type": "object", "properties": {
-            "name": {"type": "string", "description": "Installed skill name or unique canonical name"},
-            "max_chars": {
-                "type": "integer", "minimum": 1, "maximum": 200000, "default": 32000,
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "validate",
+            "description": (
+                "Run a recognized test, static check, build, or workspace-hygiene check as direct argv. "
+                'For hygiene, pass exactly ["git", "diff", "--check"]: Mio scans the bounded '
+                "current text workspace, including staged and untracked files, without invoking Git. "
+                "Use this instead of bash for evidence after any edit. No shell, pipes, redirections, "
+                "wrappers, or inline code are accepted; the true exit status is audited."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "argv": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "maxItems": 128,
+                        "description": 'Direct executable and arguments, e.g. ["python3", "-m", "pytest", "-q"]',
+                    },
+                },
+                "required": ["argv"],
             },
-        }, "required": ["name"]},
-    }},
-    {"type": "function", "function": {
-        "name": "list_mcp_tools",
-        "description": (
-            "List tools advertised by one enabled Mio-local MCP server. "
-            "Known built-ins: headroom, llm-wiki, ponytail. Never reaches remote/auth MCPs."
-        ),
-        "parameters": {"type": "object", "properties": {
-            "server": {"type": "string", "description": "Enabled Mio MCP server name"},
-        }, "required": ["server"]},
-    }},
-    {"type": "function", "function": {
-        "name": "call_mcp_tool",
-        "description": (
-            "Call an advertised tool on an enabled Mio-local MCP. Discover with list_mcp_tools first. "
-            "Use mutating tools only when the user's request explicitly requires that change."
-        ),
-        "parameters": {"type": "object", "properties": {
-            "server": {"type": "string", "description": "Enabled Mio MCP server name"},
-            "name": {"type": "string", "description": "Advertised MCP tool name"},
-            "arguments": {"type": "object", "description": "Tool arguments", "additionalProperties": True},
-        }, "required": ["server", "name"]},
-    }},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read",
+            "description": "Read a regular, non-symlink file inside a caller-allowed workspace. Output is capped by policy.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write",
+            "description": "Atomically create or overwrite a non-symlink file inside a caller-allowed workspace. Requires the caller's write grant.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit",
+            "description": "Replace a substring in a confined regular file. Requires the caller's read and write grants.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "old": {"type": "string", "description": "Exact substring to replace"},
+                    "new": {"type": "string", "description": "Replacement"},
+                },
+                "required": ["path", "old", "new"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_mio_skills",
+            "description": (
+                "Search instruction skills installed inside Mio. Filter by text, exact tag, "
+                "or source. This only lists metadata and never executes skill code."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Words matched across name, description, and tags"},
+                    "tag": {"type": "string", "description": "Optional exact tag"},
+                    "source": {"type": "string", "description": "Optional exact source id"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_mio_skill",
+            "description": (
+                "Read the validated SKILL.md instructions for one Mio-local skill. "
+                "Call list_mio_skills first when the name is unknown. Never executes the skill."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Installed skill name or unique canonical name"},
+                    "max_chars": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 200000,
+                        "default": 32000,
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_mcp_tools",
+            "description": (
+                "List tools advertised by one enabled Mio-local MCP server. "
+                "Known built-ins: headroom, llm-wiki, ponytail. Never reaches remote/auth MCPs."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "server": {"type": "string", "description": "Enabled Mio MCP server name"},
+                },
+                "required": ["server"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "call_mcp_tool",
+            "description": (
+                "Call an advertised tool on an enabled Mio-local MCP. Discover with list_mcp_tools first. "
+                "Use mutating tools only when the user's request explicitly requires that change."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "server": {"type": "string", "description": "Enabled Mio MCP server name"},
+                    "name": {"type": "string", "description": "Advertised MCP tool name"},
+                    "arguments": {"type": "object", "description": "Tool arguments", "additionalProperties": True},
+                },
+                "required": ["server", "name"],
+            },
+        },
+    },
 ]
 
 
@@ -1030,6 +1470,7 @@ def _context_interactive(tc) -> str:
 
 
 # --- Slash Commands ---
+
 
 def handle_slash_command(
     cmd: str,
@@ -1120,10 +1561,7 @@ def handle_slash_command(
         if args:
             level = args[0].lower()
             if level not in CODING_EFFORT_LEVELS:
-                return (
-                    f"Unknown effort: {level}. Options: "
-                    + ", ".join(CODING_EFFORT_LEVELS)
-                )
+                return f"Unknown effort: {level}. Options: " + ", ".join(CODING_EFFORT_LEVELS)
             if state.get("quality_gate_pending"):
                 return (
                     "Cannot change effort while a coding-quality obligation is pending. "
@@ -1131,10 +1569,7 @@ def handle_slash_command(
                 )
             state["coding_effort"] = level
             return f"Coding-quality effort: **{level}** (mandatory)"
-        return (
-            f"Coding-quality effort: **{current}** (mandatory). Usage: "
-            "`/effort low|medium|high|xhigh|ultra`"
-        )
+        return f"Coding-quality effort: **{current}** (mandatory). Usage: `/effort low|medium|high|xhigh|ultra`"
 
     elif command == "/context":
         tier = state.get("tier", "large-moe")
@@ -1204,6 +1639,7 @@ def handle_slash_command(
 
 # --- Main Agent Loop ---
 
+
 def run_agent(
     config: MioConfig,
     manager: ModelManager,
@@ -1219,9 +1655,7 @@ def run_agent(
     # native CLI passes its named coding policy explicitly at the trust edge.
     declared_tool_policy = tool_policy or _default_read_policy()
     if coding_effort not in CODING_EFFORT_LEVELS:
-        raise ValueError(
-            f"coding_effort must be one of: {', '.join(CODING_EFFORT_LEVELS)}"
-        )
+        raise ValueError(f"coding_effort must be one of: {', '.join(CODING_EFFORT_LEVELS)}")
     state = {
         "tier": tier,
         "prompt_policy": prompt_policy or PromptPolicy(),
@@ -1232,13 +1666,15 @@ def run_agent(
     }
 
     # Banner
-    console.print(Panel(
-        "[bold cyan]Mio Agent[/bold cyan]\n"
-        f"[dim]Tier: {tier} | Prompt: {state['prompt_policy'].label} | "
-        f"Quality: {coding_effort + ' (mandatory)' if quality_gate_enabled else 'off (benchmark control)'} "
-        "| /help for commands[/dim]",
-        border_style="cyan",
-    ))
+    console.print(
+        Panel(
+            "[bold cyan]Mio Agent[/bold cyan]\n"
+            f"[dim]Tier: {tier} | Prompt: {state['prompt_policy'].label} | "
+            f"Quality: {coding_effort + ' (mandatory)' if quality_gate_enabled else 'off (benchmark control)'} "
+            "| /help for commands[/dim]",
+            border_style="cyan",
+        )
+    )
     console.print()
 
     engine = manager.get_engine(tier)
@@ -1323,6 +1759,11 @@ def _process_user_input(
         from mio.coding_quality import CodingQualityGate
 
         pending_gate = state.get("_quality_gate")
+        if isinstance(pending_gate, CodingQualityGate):
+            # A prior generation may have failed after validation while a late
+            # workspace mutation was still landing. Reconcile before deciding
+            # that the stored certificate can be discarded.
+            pending_gate.refresh()
         if isinstance(pending_gate, CodingQualityGate) and not pending_gate.decision().satisfied:
             quality_gate = pending_gate
         else:
@@ -1332,6 +1773,11 @@ def _process_user_input(
                 effort=str(state.get("coding_effort", "medium")),
                 enabled=True,
             )
+        # Persist the live object before model execution.  Tool mutations update
+        # it in place, so an interrupt or generation exception cannot erase an
+        # unsatisfied obligation before the next user turn.
+        state["_quality_gate"] = quality_gate
+        state["quality_gate_pending"] = not quality_gate.decision().satisfied
         system_prompt += quality_gate.system_instructions()
 
     # Initial messages
@@ -1363,10 +1809,12 @@ def _process_user_input(
         generation_messages = current_messages
         generation_tools = tool_specs
         if finalization_only:
-            generation_messages = list(current_messages) + [{
-                "role": "user",
-                "content": _FINALIZE_TOOL_LOOP.format(reason=finalization_reason),
-            }]
+            generation_messages = list(current_messages) + [
+                {
+                    "role": "user",
+                    "content": _FINALIZE_TOOL_LOOP.format(reason=finalization_reason),
+                }
+            ]
             # The final round is reserved for truthful synthesis. Omitting the
             # tool schema prevents one more mutation from silently exceeding
             # the model-round, call-count, or result-size budget.
@@ -1396,13 +1844,12 @@ def _process_user_input(
         round_traces.append(_round_trace(_round_idx, m))
         if m.generation_tps > 0:
             console.print(
-                f"[dim]  {m.generation_tps:.1f} tok/s · "
-                f"{m.completion_tokens} tokens · "
-                f"{m.total_time_s:.2f}s[/dim]"
+                f"[dim]  {m.generation_tps:.1f} tok/s · {m.completion_tokens} tokens · {m.total_time_s:.2f}s[/dim]"
             )
 
         # Extract tool calls (OpenAI-format: {function: {name, arguments}})
         import json as _json
+
         _leading, parsed_tool_calls = _parse_tc(full_text)
         # Streaming and whole-response parsing have the same grammar. Prefer
         # the streamed calls so terminal filtering and dispatch share one
@@ -1424,9 +1871,10 @@ def _process_user_input(
                     "additional operation was executed."
                 )
                 console.print(notice, style="yellow")
-            terminal_assistant_text = "\n\n".join(
-                text for text in (visible_text, notice if tool_calls else "") if text
-            )
+            terminal_assistant_text = "\n\n".join(text for text in (visible_text, notice if tool_calls else "") if text)
+            if quality_gate is not None:
+                quality_gate.refresh()
+                state["quality_gate_pending"] = not quality_gate.decision().satisfied
             if quality_gate is not None and not quality_gate.decision().satisfied:
                 quality_notice = (
                     "Coding-quality gate: INCOMPLETE. The latest workspace revision "
@@ -1441,6 +1889,9 @@ def _process_user_input(
             break
 
         if not tool_calls:
+            if quality_gate is not None:
+                quality_gate.refresh()
+                state["quality_gate_pending"] = not quality_gate.decision().satisfied
             if quality_gate is not None and not quality_gate.decision().satisfied:
                 feedback = quality_gate.feedback()
                 console.print(feedback, style="yellow")
@@ -1473,31 +1924,27 @@ def _process_user_input(
             normalized_calls.append(normalized_call)
             invocations.append((tc, name, args))
 
-        current_messages = list(current_messages) + [{
-            "role": "assistant",
-            "content": _leading or None,
-            "tool_calls": normalized_calls,
-        }]
+        current_messages = list(current_messages) + [
+            {
+                "role": "assistant",
+                "content": _leading or None,
+                "tool_calls": normalized_calls,
+            }
+        ]
 
         for tc, name, args in invocations:
             spec = tool_registry.get(name)
             audit_start = len(audit_events)
             gate_before = (
-                quality_gate.before_tool(name, args)
-                if quality_gate is not None and spec is not None
-                else None
+                quality_gate.before_tool(name, args) if quality_gate is not None and spec is not None else None
             )
             tool_calls_used += 1
             if tool_calls_used > _MAX_TOOL_CALLS_PER_TURN:
                 result = "(tool call budget exhausted for this turn)"
-                forced_finalization_reason = (
-                    f"tool call limit {_MAX_TOOL_CALLS_PER_TURN} reached"
-                )
+                forced_finalization_reason = f"tool call limit {_MAX_TOOL_CALLS_PER_TURN} reached"
             elif tool_result_chars >= _MAX_TOOL_RESULT_CHARS_PER_TURN:
                 result = "(tool result budget exhausted for this turn)"
-                forced_finalization_reason = (
-                    f"tool result limit {_MAX_TOOL_RESULT_CHARS_PER_TURN} characters reached"
-                )
+                forced_finalization_reason = f"tool result limit {_MAX_TOOL_RESULT_CHARS_PER_TURN} characters reached"
             elif not spec:
                 result = f"(unknown tool: {name})"
             else:
@@ -1516,10 +1963,8 @@ def _process_user_input(
                     before=gate_before,
                     audit_events=invocation_audits,
                 )
-            tool_event_traces.extend(
-                _tool_trace(_round_idx, name, event)
-                for event in invocation_audits
-            )
+                state["quality_gate_pending"] = not quality_gate.decision().satisfied
+            tool_event_traces.extend(_tool_trace(_round_idx, name, event) for event in invocation_audits)
             remaining_result_chars = max(
                 0,
                 _MAX_TOOL_RESULT_CHARS_PER_TURN - tool_result_chars,
@@ -1532,9 +1977,7 @@ def _process_user_input(
             )
             tool_result_chars += len(result)
             if tool_result_chars >= _MAX_TOOL_RESULT_CHARS_PER_TURN:
-                forced_finalization_reason = (
-                    f"tool result limit {_MAX_TOOL_RESULT_CHARS_PER_TURN} characters reached"
-                )
+                forced_finalization_reason = f"tool result limit {_MAX_TOOL_RESULT_CHARS_PER_TURN} characters reached"
             preview = ", ".join(k for k in (spec["args"] if spec else []) if k in args)
             console.print(
                 f"  ◆ {name}({preview}) → {str(result)[:120]}",
@@ -1548,23 +1991,42 @@ def _process_user_input(
                 "</tool_response>",
                 "&lt;/tool_response&gt;",
             )
-            current_messages.append({
-                "role": "tool",
-                "tool_call_id": str(tc.get("id", "")),
-                "name": name,
-                "content": safe_result,
-            })
+            current_messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": str(tc.get("id", "")),
+                    "name": name,
+                    "content": safe_result,
+                }
+            )
+
+    if quality_gate is not None:
+        quality_gate.refresh()
+        if not quality_gate.decision().satisfied and terminal_reason != "quality_incomplete":
+            quality_notice = (
+                "Coding-quality gate: INCOMPLETE. The workspace changed after its latest "
+                "trusted validation; no success is certified."
+            )
+            console.print(quality_notice, style="yellow")
+            if quality_notice not in terminal_assistant_text:
+                terminal_assistant_text = "\n\n".join(
+                    text for text in (terminal_assistant_text, quality_notice) if text
+                )
+            terminal_reason = "quality_incomplete"
+        state["quality_gate_pending"] = not quality_gate.decision().satisfied
 
     console.print()
     # Persist the final assistant text (joined across rounds) so multi-turn
     # history stays sensible.
-    state["messages"].append({
-        "role": "assistant",
-        # Earlier pre-tool narration was already visible live and was replayed
-        # while this turn ran. Persist only the terminal synthesis so the next
-        # user turn starts from the outcome, not a duplicate execution diary.
-        "content": terminal_assistant_text or "(tool-only turn)",
-    })
+    state["messages"].append(
+        {
+            "role": "assistant",
+            # Earlier pre-tool narration was already visible live and was replayed
+            # while this turn ran. Persist only the terminal synthesis so the next
+            # user turn starts from the outcome, not a duplicate execution diary.
+            "content": terminal_assistant_text or "(tool-only turn)",
+        }
+    )
 
     # Trim history (keep last 40 entries — ~20 exchanges)
     if len(state["messages"]) > 40:

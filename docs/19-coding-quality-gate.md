@@ -86,8 +86,10 @@ The gate recognizes validation categories conservatively:
 - `test`: a project test runner or a narrowly targeted test command;
 - `build`: a recognized project build command;
 - `static`: a parser, compiler, type checker or linter check;
-- `diff`: repository-integrity checks such as malformed-diff or whitespace
-  validation;
+- `diff`: the exact model-facing sentinel `git diff --check`, implemented by
+  Mio as a bounded, subprocess-free hygiene scan of the complete current text
+  workspace. It includes staged and untracked files and works in Git, linked
+  worktree, and plain-directory workspaces;
 - `review`: a distinct review/remediation stage when an effort profile
   requires one.
 
@@ -95,6 +97,13 @@ The exact classifier and effort profile are source-bound by the run manifest.
 Unknown commands never count as evidence. A nonzero, timed-out, denied or
 output-limited command is recorded but does not satisfy a success requirement.
 Another mutation invalidates the evidence and requires validation again.
+Help, version, discovery, collection-only, dry-run, touch-only, stdin-only, and
+other success-without-work modes are rejected. Recognized runners that report
+zero tests or zero checked files are recorded as `no_work`, never as success.
+The hygiene sentinel rejects trailing whitespace, unresolved conflict markers,
+text-file or directory symlinks, hard-linked text files, read races, and
+incomplete bounded coverage. It does not execute repository Git configuration,
+hooks, filters, or file content.
 
 If a task ends without a workspace mutation, the gate does not fabricate a
 quality certificate. If a task mutates the workspace but cannot meet its

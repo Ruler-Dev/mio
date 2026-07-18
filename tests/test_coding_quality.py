@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -78,12 +79,16 @@ def _record_validation(
     [
         (("pytest", "-q"), ValidationKind.TEST),
         (("python3", "-m", "pytest", "-q"), ValidationKind.TEST),
+        (("python3", "-B", "-m", "unittest", "discover"), ValidationKind.TEST),
+        (("python3", "-I", "-m", "pytest", "-q"), ValidationKind.TEST),
         (("python", "-m", "unittest", "discover"), ValidationKind.TEST),
         (("npm", "test", "--", "--runInBand"), ValidationKind.TEST),
         (("pnpm", "run", "test:unit"), ValidationKind.TEST),
         (("cargo", "test", "--workspace"), ValidationKind.TEST),
         (("go", "test", "./..."), ValidationKind.TEST),
         (("ruff", "check", "."), ValidationKind.STATIC),
+        (("ruff", "format", "--check", "."), ValidationKind.STATIC),
+        (("node", "--check", "module.js"), ValidationKind.STATIC),
         (("python3", "-m", "compileall", "mio"), ValidationKind.STATIC),
         (("tsc", "--noEmit"), ValidationKind.STATIC),
         (("cargo", "clippy", "--all-targets"), ValidationKind.STATIC),
@@ -110,6 +115,8 @@ def test_validation_argv_classifier_accepts_direct_recognized_commands(
         ("timeout", "10", "pytest"),
         ("uv", "run", "pytest"),
         ("python3", "-c", "import pytest; pytest.main()"),
+        ("python3", "-V", "-m", "compileall", "mio"),
+        ("python3", "-VV", "-m", "unittest", "discover"),
         ("python3", "script.py"),
         ("pytest", "||", "true"),
         ("pytest", "&&", "ruff", "check", "."),
@@ -117,6 +124,79 @@ def test_validation_argv_classifier_accepts_direct_recognized_commands(
         ("pytest", ";", "true"),
         ("pytest", ">", "result.txt"),
         ("pytest\ntrue",),
+        ("pytest", "--help"),
+        ("pytest", "--co"),
+        ("pytest", "--collect-only"),
+        ("pytest", "--setup-plan"),
+        ("pytest", "--fixtures-per-test"),
+        ("pytest", "-V"),
+        ("pytest", "-VV"),
+        ("python3", "-m", "pytest", "-V"),
+        ("tox", "-l"),
+        ("tox", "-a"),
+        ("tox", "-av"),
+        ("tox", "config"),
+        ("tox", "devenv", ".venv"),
+        ("tox", "exec", "python", "-V"),
+        ("tox", "--notest"),
+        ("nox", "-l"),
+        ("nox", "--install-only"),
+        ("ctest", "--show-only"),
+        ("ctest", "--show-only=json-v1"),
+        ("ctest", "--help-command", "add_test"),
+        ("ctest", "--help-full"),
+        ("ctest", "--help-variable", "CTEST_COMMAND"),
+        ("ctest", "--print-labels"),
+        ("ctest", "-S", "dashboard.cmake"),
+        ("ctest", "-T", "Start"),
+        ("npm", "test", "--", "--listTests"),
+        ("npm", "test", "--", "--passWithNoTests"),
+        ("npm", "--prefix", "test", "exec", "true"),
+        ("swift", "test", "list"),
+        ("python3", "-m", "ruff", "clean"),
+        ("python3", "-m", "ruff", "check", "--exit-zero", "."),
+        ("ruff", "format", "."),
+        ("ruff", "check", "--exit-zero", "."),
+        ("ruff", "check", "--fix-only", "."),
+        ("ruff", "check", "--show-files"),
+        ("ruff", "check", "-"),
+        ("ruff", "format", "--check", "-"),
+        ("python3", "-m", "ruff", "check", "--show-settings", "."),
+        ("python3", "-m", "compileall", "-q", "mio"),
+        ("node", "--check"),
+        ("go", "build", "-n", "./..."),
+        ("tsc", "--showConfig"),
+        ("tsc", "--init"),
+        ("tsc", "--build", "--clean"),
+        ("tsc", "--listFilesOnly"),
+        ("tsc", "--build", "--dry"),
+        ("tsc", "-v"),
+        ("eslint", "--print-config", "module.js"),
+        ("eslint", "--env-info"),
+        ("eslint", "-v"),
+        ("stylelint", "-v"),
+        ("mypy", "-V"),
+        ("python3", "-m", "mypy", "-V"),
+        ("pyright", "--createstub", "module"),
+        ("./pytest", "-q"),
+        ("cargo", "test", "--no-run"),
+        ("cargo", "build", "--build-plan"),
+        ("go", "test", "-list", "."),
+        ("go", "test", "-c"),
+        ("go", "test", "-exec", "echo"),
+        ("ctest", "-N"),
+        ("make", "-n", "test"),
+        ("make", "-q", "test"),
+        ("make", "-t", "test"),
+        ("make", "-sn", "test"),
+        ("mvn", "test", "-DskipTests"),
+        ("mvn", "-f", "test", "help:evaluate"),
+        ("gradle", "-m", "test"),
+        ("dotnet", "test", "-t"),
+        ("swift", "test", "-l"),
+        ("swift", "build", "--show-bin-path"),
+        ("git", "diff", "HEAD", "HEAD", "--check"),
+        ("git", "diff", "--no-index", "--check", "/dev/null", "/dev/null"),
     ],
 )
 def test_validation_argv_classifier_rejects_shell_wrappers_inline_code_and_grammar(
@@ -137,6 +217,10 @@ def test_validation_argv_classifier_rejects_non_argv_inputs() -> None:
     [
         ("Implement the missing parser", RequestIntent.CODE_CHANGE_REQUESTED),
         ("Correggi il bug nel parser", RequestIntent.CODE_CHANGE_REQUESTED),
+        ("Aggiorna e ottimizza il parser", RequestIntent.CODE_CHANGE_REQUESTED),
+        ("Installa e configura il parser", RequestIntent.CODE_CHANGE_REQUESTED),
+        ("Do not modify it; explain how to implement it", RequestIntent.INSPECT),
+        ("Non modificare nulla; spiega come implementarlo", RequestIntent.INSPECT),
         ("Inspect the parser architecture", RequestIntent.INSPECT),
         ("Spiegami come funziona", RequestIntent.INSPECT),
         ("Hello Mio", RequestIntent.GENERAL),
@@ -201,6 +285,167 @@ def test_git_snapshot_preserves_preexisting_dirty_baseline_and_detects_new_and_d
     assert hashlib.sha256(b"deleted").hexdigest() in {entry.state_sha256 for entry in with_deletion.entries}
 
 
+def test_git_snapshot_never_invokes_repository_fsmonitor(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    _init_git_repo(root)
+    marker = tmp_path / "fsmonitor-was-invoked"
+    hook = root / "fsmonitor-hook.sh"
+    hook.write_text(
+        f"#!/bin/sh\nprintf invoked > {shlex.quote(str(marker))}\nexit 0\n",
+        encoding="utf-8",
+    )
+    hook.chmod(hook.stat().st_mode | 0o100)
+    subprocess.run(
+        ["git", "-C", str(root), "config", "core.fsmonitor", str(hook)],
+        check=True,
+    )
+
+    snapshot = snapshot_workspaces([root])
+
+    assert snapshot.complete is True
+    assert snapshot.method in {"git", "manifest"}
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("index_hint", ["--assume-unchanged", "--skip-worktree"])
+def test_git_snapshot_hashes_tracked_content_hidden_by_index_hints(
+    tmp_path: Path,
+    index_hint: str,
+) -> None:
+    root = tmp_path / "hinted-repo"
+    _init_git_repo(root)
+    source = root / "module.py"
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "add", "module.py"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.name=Mio Test",
+            "-c",
+            "user.email=mio@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "tracked fixture",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(root), "update-index", index_hint, "module.py"],
+        check=True,
+    )
+    gate = CodingQualityGate.start([root], "hello", effort=CodingEffort.ULTRA)
+    assert gate.initial_snapshot is not None
+    assert gate.initial_snapshot.method == "git"
+    before = gate.before_tool("bash", {})
+    source.write_text("VALUE = 2\n", encoding="utf-8")
+
+    gate.after_tool("bash", {}, before=before, audit_events=[])
+
+    assert gate.mutation_epoch == 1
+    assert gate.changed_kinds == {"code"}
+    assert gate.decision().status is GateStatus.INCOMPLETE
+
+
+def test_git_snapshot_detects_ignored_document_mutated_by_unsafe_tool(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "ignored-repo"
+    _init_git_repo(root)
+    (root / ".gitignore").write_text("ignored.md\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "add", ".gitignore"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.name=Mio Test",
+            "-c",
+            "user.email=mio@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "ignore fixture",
+        ],
+        check=True,
+    )
+    gate = CodingQualityGate.start([root], "hello", effort=CodingEffort.MEDIUM)
+    before = gate.before_tool("bash", {})
+    (root / "ignored.md").write_text("changed outside native tools\n", encoding="utf-8")
+
+    gate.after_tool("bash", {}, before=before, audit_events=[])
+
+    assert gate.mutation_epoch == 1
+    assert gate.changed_kinds == {"code"}
+    assert gate.decision().status is GateStatus.INCOMPLETE
+
+
+def test_git_snapshot_detects_ignored_build_file_mutated_by_unsafe_tool(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "ignored-build-repo"
+    _init_git_repo(root)
+    (root / ".gitignore").write_text("BUILD\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "add", ".gitignore"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.name=Mio Test",
+            "-c",
+            "user.email=mio@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "ignore build fixture",
+        ],
+        check=True,
+    )
+    gate = CodingQualityGate.start([root], "hello", effort=CodingEffort.MEDIUM)
+    before = gate.before_tool("bash", {})
+    (root / "BUILD").write_text("target(name='mio')\n", encoding="utf-8")
+
+    gate.after_tool("bash", {}, before=before, audit_events=[])
+
+    assert gate.mutation_epoch == 1
+    assert gate.changed_kinds == {"code"}
+    assert gate.decision().status is GateStatus.INCOMPLETE
+
+
+def test_manifest_hash_rejects_file_swapped_to_external_symlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    target = root / "module.py"
+    target.write_text("VALUE = 1\n", encoding="utf-8")
+    outside = tmp_path / "outside-secret.py"
+    outside.write_text("SECRET = 'must-not-hash'\n", encoding="utf-8")
+    resolved_root = root.resolve()
+    original_open = coding_quality.os.open
+    calls = 0
+
+    def swap_before_file_open(path, flags, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            target.unlink()
+            target.symlink_to(outside)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(coding_quality.os, "open", swap_before_file_open)
+
+    with pytest.raises(OSError):
+        coding_quality._hash_file(target, root=resolved_root, byte_budget=[0])
+
+
 def test_snapshot_falls_back_to_bounded_manifest_when_git_is_unavailable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -234,7 +479,7 @@ def test_snapshot_falls_back_to_bounded_manifest_when_git_is_unavailable(
     assert "VALUE = 2" not in serialized
 
 
-def test_requested_change_without_a_workspace_diff_is_incomplete(tmp_path: Path) -> None:
+def test_requested_change_without_a_workspace_diff_remains_observational(tmp_path: Path) -> None:
     gate = CodingQualityGate.start(
         [tmp_path],
         "Implement a parser change, then stop without editing.",
@@ -244,9 +489,9 @@ def test_requested_change_without_a_workspace_diff_is_incomplete(tmp_path: Path)
     decision = gate.decision()
 
     assert gate.mutation_epoch == 0
-    assert decision.status is GateStatus.INCOMPLETE
-    assert decision.phase == "change_required"
-    assert decision.missing == ("workspace_mutation",)
+    assert decision.status is GateStatus.NOT_APPLICABLE
+    assert decision.phase == "observing"
+    assert decision.missing == ()
 
 
 def test_successful_edit_audit_activates_gate_even_when_snapshot_has_no_delta(
@@ -339,6 +584,70 @@ def test_validation_bound_to_a_stale_snapshot_cannot_satisfy_current_revision(
     assert gate.mutation_epoch == 1
     assert gate.decision().status is GateStatus.INCOMPLETE
     assert gate.decision().missing == ("any_validation",)
+
+
+def test_terminal_refresh_invalidates_late_workspace_change(tmp_path: Path) -> None:
+    root = tmp_path / "late-change"
+    root.mkdir()
+    target = root / "module.py"
+    gate = CodingQualityGate.start([root], "hello", effort=CodingEffort.MEDIUM)
+    _record_edit(gate, target, "VALUE = 1\n")
+    _record_validation(gate, ValidationKind.TEST, ("pytest", "-q"))
+    assert gate.decision().status is GateStatus.PASS
+
+    target.write_text("VALUE = 2\n", encoding="utf-8")
+    gate.refresh()
+
+    assert gate.mutation_epoch == 2
+    assert gate.changed_kinds == {"code"}
+    assert gate.decision().status is GateStatus.INCOMPLETE
+
+
+def test_before_unsafe_tool_reconciles_background_code_change(tmp_path: Path) -> None:
+    root = tmp_path / "background-change"
+    root.mkdir()
+    readme = root / "README.md"
+    gate = CodingQualityGate.start([root], "hello", effort=CodingEffort.MEDIUM)
+    _record_edit(gate, readme, "docs\n")
+    _record_validation(gate, ValidationKind.DIFF, ("git", "diff", "--check"))
+    assert gate.changed_kinds == {"docs"}
+    assert gate.decision().status is GateStatus.PASS
+
+    (root / "requirements.txt").write_text("package==1\n", encoding="utf-8")
+    gate.before_tool("validate", {"argv": ["pytest", "-q"]})
+
+    assert gate.mutation_epoch == 2
+    assert gate.changed_kinds == {"code", "docs"}
+    assert gate.decision().status is GateStatus.INCOMPLETE
+    assert gate.decision().missing == ("test_or_build",)
+
+
+def test_unsafe_tool_activates_fail_closed_gate_when_snapshots_stay_incomplete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    incomplete = coding_quality.WorkspaceSnapshot(
+        revision_sha256="a" * 64,
+        entries=(),
+        complete=False,
+        root_count=1,
+        method="incomplete",
+        error_codes=("snapshot_incomplete",),
+    )
+    gate = CodingQualityGate(
+        roots=(tmp_path,),
+        effort=CodingEffort.MEDIUM,
+        initial_snapshot=incomplete,
+        current_snapshot=incomplete,
+    )
+    monkeypatch.setattr(coding_quality, "snapshot_workspaces", lambda _roots: incomplete)
+
+    gate.after_tool("bash", {}, before=incomplete, audit_events=[])
+
+    decision = gate.decision()
+    assert gate.mutation_epoch == 1
+    assert decision.status is GateStatus.INCOMPLETE
+    assert "complete_workspace_snapshot" in decision.missing
 
 
 @pytest.mark.parametrize("outcome", ["nonzero", "timeout", "output_limit"])
@@ -484,6 +793,22 @@ def test_medium_docs_relaxation_does_not_apply_to_code(tmp_path: Path) -> None:
     assert code_gate.decision().missing == ("test_or_build",)
 
 
+@pytest.mark.parametrize("name", ["requirements.txt", "CMakeLists.txt"])
+def test_source_named_txt_files_never_receive_docs_relaxation(
+    tmp_path: Path,
+    name: str,
+) -> None:
+    root = tmp_path / "source-name"
+    root.mkdir()
+    gate = CodingQualityGate.start([root], "hello", effort=CodingEffort.MEDIUM)
+    _record_edit(gate, root / name, "changed\n")
+    _record_validation(gate, ValidationKind.DIFF, ("git", "diff", "--check"))
+
+    assert gate.changed_kinds == {"code"}
+    assert gate.decision().status is GateStatus.INCOMPLETE
+    assert gate.decision().missing == ("test_or_build",)
+
+
 def test_high_and_xhigh_require_distinct_additional_categories(tmp_path: Path) -> None:
     high = _gate_with_code_mutation(tmp_path, CodingEffort.HIGH)
     _record_validation(high, ValidationKind.TEST, ("pytest", "-q"))
@@ -507,7 +832,17 @@ def test_ultra_requires_review_or_second_distinct_successful_test(tmp_path: Path
 
     assert gate.decision().missing == ("review_or_second_distinct_test",)
 
-    _record_validation(gate, ValidationKind.TEST, ("pytest", "-q"))
+    _record_validation(gate, ValidationKind.TEST, ("pytest", "-qq"))
+    assert gate.decision().missing == ("review_or_second_distinct_test",)
+
+    _record_validation(
+        gate,
+        ValidationKind.TEST,
+        ("python3", "-B", "-m", "pytest", "--tb=long", "-q"),
+    )
+    assert gate.decision().missing == ("review_or_second_distinct_test",)
+
+    _record_validation(gate, ValidationKind.TEST, ("pytest", "-q", "."))
     assert gate.decision().missing == ("review_or_second_distinct_test",)
 
     _record_validation(gate, ValidationKind.TEST, ("pytest", "tests/test_other.py", "-q"))
