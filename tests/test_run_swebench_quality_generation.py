@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -440,6 +441,56 @@ def test_receipt_verification_does_not_repair_deleted_canonical_output(tmp_path:
             tool_surface_sha256=surface_digest,
         )
     assert not deleted.exists()
+
+
+def test_receipt_verification_rejects_hardlinked_receipt_and_run_header(tmp_path: Path) -> None:
+    source, base_commit = _source_repo(tmp_path)
+    instances = _instances(base_commit)
+    document, schedule = _schedule_document(instances)
+    layout = runner.GenerationLayout.create(tmp_path / "generation")
+    agent_module = _agent_module()
+    runner.run_generation_pairs(
+        schedule_document=document,
+        schedule=schedule,
+        layout=layout,
+        workspace_factory=runner.ExternalGitWorkspaceFactory(lambda _instance: source),
+        executor=RecordingExecutor(),
+        binding=_binding(),
+        tier_config=_tier(),
+        agent_module=agent_module,
+    )
+    _registry, _specs, surface_digest = runner.build_identical_tool_surface(agent_module)
+    runner.seal_generation_receipt(
+        schedule=schedule,
+        layout=layout,
+        binding=_binding(),
+        tool_surface_sha256=surface_digest,
+        observed_model_identity_before=protocol.EXPECTED_MODEL_IDENTITY,
+        observed_model_identity_after=protocol.EXPECTED_MODEL_IDENTITY,
+    )
+
+    receipt_alias = tmp_path / "receipt-alias.json"
+    os.link(layout.receipt, receipt_alias)
+    with pytest.raises(protocol.ProtocolError, match="single-link"):
+        runner.verify_generation_receipt(
+            receipt_path=layout.receipt,
+            schedule=schedule,
+            layout=layout,
+            binding=_binding(),
+            tool_surface_sha256=surface_digest,
+        )
+    receipt_alias.unlink()
+
+    header_alias = tmp_path / "run-header-alias.json"
+    os.link(layout.run_header, header_alias)
+    with pytest.raises(protocol.ProtocolError, match="single-link"):
+        runner.verify_generation_receipt(
+            receipt_path=layout.receipt,
+            schedule=schedule,
+            layout=layout,
+            binding=_binding(),
+            tool_surface_sha256=surface_digest,
+        )
 
 
 def test_target_only_tier_and_exact_model_identity_are_mandatory() -> None:

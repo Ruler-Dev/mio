@@ -27,6 +27,7 @@ import random
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import uuid
@@ -812,6 +813,73 @@ class ArmCheckpoint:
         }
 
 
+def _read_immutable_file(path: Path, *, allow_missing: bool = False) -> bytes | None:
+    """Read one stable, single-link regular file without following aliases."""
+
+    _reject_symlink_path_components(path.parent)
+    try:
+        parent = path.parent.resolve(strict=True)
+    except FileNotFoundError:
+        if allow_missing:
+            return None
+        raise ProtocolError(f"immutable artifact parent is missing: {path.name}") from None
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    directory_fd = os.open(parent, directory_flags)
+    fd = -1
+    try:
+        try:
+            fd = os.open(
+                path.name,
+                os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory_fd,
+            )
+        except FileNotFoundError:
+            if allow_missing:
+                return None
+            raise ProtocolError(f"immutable artifact is missing: {path.name}") from None
+        except OSError as exc:
+            raise ProtocolError(f"cannot open immutable artifact without following aliases: {path.name}") from exc
+
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise ProtocolError("immutable artifact must be a single-link regular file")
+        if before.st_mode & 0o077:
+            raise ProtocolError("immutable artifact must use private permissions")
+        chunks: list[bytes] = []
+        while True:
+            block = os.read(fd, 1024 * 1024)
+            if not block:
+                break
+            chunks.append(block)
+        after = os.fstat(fd)
+        try:
+            named = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise ProtocolError("immutable artifact path changed during read") from exc
+        stable_fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if any(getattr(before, field) != getattr(after, field) for field in stable_fields) or (
+            named.st_dev,
+            named.st_ino,
+            named.st_mode,
+            named.st_nlink,
+            named.st_size,
+            named.st_mtime_ns,
+            named.st_ctime_ns,
+        ) != tuple(getattr(after, field) for field in stable_fields):
+            raise ProtocolError("immutable artifact changed during read")
+        return b"".join(chunks)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        os.close(directory_fd)
+
+
+def _immutable_file_sha256(path: Path) -> str:
+    payload = _read_immutable_file(path)
+    assert payload is not None
+    return sha256_bytes(payload)
+
+
 class CheckpointStore:
     """Immutable per-arm checkpoints with crash-safe, exclusive publication."""
 
@@ -835,34 +903,30 @@ class CheckpointStore:
         )
         destination = self.path_for(entry)
         payload = canonical_json_bytes(checkpoint.private_dict())
-        if destination.exists():
-            if destination.read_bytes() != payload:
+        existing = _read_immutable_file(destination, allow_missing=True)
+        if existing is not None:
+            if existing != payload:
                 raise ProtocolError("immutable checkpoint already exists with different bytes")
             return destination
-
-        temporary = self.root / f".{destination.name}.{uuid.uuid4().hex}.tmp"
         try:
-            with temporary.open("xb") as handle:
-                os.fchmod(handle.fileno(), 0o600)
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            try:
-                os.link(temporary, destination)
-            except FileExistsError:
-                if destination.read_bytes() != payload:
-                    raise ProtocolError("concurrent checkpoint publication conflict")
-            directory_fd = os.open(self.root, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-        finally:
-            temporary.unlink(missing_ok=True)
+            _atomic_write(destination, payload)
+        except ProtocolError as exc:
+            # A second writer may win after our initial absence check.  Re-read
+            # through the same no-alias path and accept only byte identity.
+            observed = _read_immutable_file(destination, allow_missing=True)
+            if observed is None or observed != payload:
+                raise ProtocolError("concurrent checkpoint publication conflict") from exc
+        if _read_immutable_file(destination) != payload:
+            raise ProtocolError("checkpoint publication changed bytes")
         return destination
 
     def load(self, entry: ScheduleEntry) -> ArmCheckpoint:
-        raw = json.loads(self.path_for(entry).read_text(encoding="utf-8"))
+        payload = _read_immutable_file(self.path_for(entry))
+        assert payload is not None
+        try:
+            raw = json.loads(payload)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ProtocolError("checkpoint is not valid UTF-8 JSON") from exc
         if raw.pop("schema", None) != f"{SCHEMA}.arm-checkpoint":
             raise ProtocolError("unexpected arm checkpoint schema")
         checkpoint = ArmCheckpoint(**raw)
@@ -995,9 +1059,10 @@ class AttemptLedger:
         return tuple(records)
 
     def read(self) -> tuple[dict[str, Any], ...]:
-        if not self.path.exists():
+        payload = _read_immutable_file(self.path, allow_missing=True)
+        if payload is None:
             return ()
-        return self._parse(self.path.read_bytes())
+        return self._parse(payload)
 
     def append(
         self,
@@ -1008,13 +1073,36 @@ class AttemptLedger:
         reason_code: str,
         checkpoint_sha256s: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
+        _reject_symlink_path_components(self.path.parent)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a+b") as handle:
-            os.fchmod(handle.fileno(), 0o600)
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        parent = self.path.parent.resolve(strict=True)
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        directory_fd = os.open(parent, directory_flags)
+        fd = -1
+        try:
             try:
-                handle.seek(0)
-                payload = handle.read()
+                fd = os.open(
+                    self.path.name,
+                    os.O_RDWR | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=directory_fd,
+                )
+            except OSError as exc:
+                raise ProtocolError("attempt ledger cannot follow an alias") from exc
+            os.fchmod(fd, 0o600)
+            file_stat = os.fstat(fd)
+            if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+                raise ProtocolError("attempt ledger must be a single-link regular file")
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                os.lseek(fd, 0, os.SEEK_SET)
+                chunks: list[bytes] = []
+                while True:
+                    block = os.read(fd, 1024 * 1024)
+                    if not block:
+                        break
+                    chunks.append(block)
+                payload = b"".join(chunks)
                 records = self._parse(payload)
                 previous = records[-1]["record_sha256"] if records else ""
                 record: dict[str, Any] = {
@@ -1031,48 +1119,93 @@ class AttemptLedger:
                 record["record_sha256"] = self._record_digest(record)
                 candidate = canonical_json_bytes(record)
                 self._parse(payload + candidate)
-                handle.seek(0, os.SEEK_END)
-                handle.write(candidate)
-                handle.flush()
-                os.fsync(handle.fileno())
-                directory_fd = os.open(self.path.parent, os.O_RDONLY)
+                offset = 0
+                while offset < len(candidate):
+                    written = os.write(fd, candidate[offset:])
+                    if written <= 0:
+                        raise ProtocolError("attempt ledger append made no progress")
+                    offset += written
+                os.fsync(fd)
+                after = os.fstat(fd)
                 try:
-                    os.fsync(directory_fd)
-                finally:
-                    os.close(directory_fd)
+                    named = os.stat(self.path.name, dir_fd=directory_fd, follow_symlinks=False)
+                except OSError as exc:
+                    raise ProtocolError("attempt ledger path changed during append") from exc
+                if (
+                    not stat.S_ISREG(after.st_mode)
+                    or after.st_nlink != 1
+                    or (named.st_dev, named.st_ino, named.st_nlink) != (after.st_dev, after.st_ino, after.st_nlink)
+                ):
+                    raise ProtocolError("attempt ledger changed identity during append")
+                os.fsync(directory_fd)
                 return record
             finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            if fd >= 0:
+                os.close(fd)
+            os.close(directory_fd)
 
 
 def _atomic_write(path: Path, payload: bytes, *, mode: int = 0o600) -> None:
-    _reject_symlink_path_components(path)
+    _reject_symlink_path_components(path.parent)
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.is_symlink():
-        raise ProtocolError("immutable artifact destination must not be a symlink")
-    if path.exists():
-        if path.read_bytes() == payload:
+    parent = path.parent.resolve(strict=True)
+    existing = _read_immutable_file(parent / path.name, allow_missing=True)
+    if existing is not None:
+        if existing == payload:
             return
         raise ProtocolError(f"refusing to overwrite immutable artifact: {path.name}")
-    temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    directory_fd = os.open(parent, directory_flags)
+    temporary_name = f".{path.name}.{uuid.uuid4().hex}.tmp"
+    temporary_fd = -1
     try:
-        with temporary.open("xb") as handle:
-            os.fchmod(handle.fileno(), mode)
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
+        temporary_fd = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            mode,
+            dir_fd=directory_fd,
+        )
+        os.fchmod(temporary_fd, mode)
+        offset = 0
+        while offset < len(payload):
+            written = os.write(temporary_fd, payload[offset:])
+            if written <= 0:
+                raise ProtocolError("immutable artifact write made no progress")
+            offset += written
+        os.fsync(temporary_fd)
+        os.close(temporary_fd)
+        temporary_fd = -1
         try:
-            os.link(temporary, path)
+            os.link(
+                temporary_name,
+                path.name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
         except FileExistsError:
-            if path.read_bytes() != payload:
+            observed = _read_immutable_file(parent / path.name)
+            if observed != payload:
                 raise ProtocolError(f"concurrent immutable artifact conflict: {path.name}")
-        directory_fd = os.open(path.parent, os.O_RDONLY)
         try:
+            os.unlink(temporary_name, dir_fd=directory_fd)
             os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        except FileNotFoundError:
+            pass
     finally:
-        temporary.unlink(missing_ok=True)
+        if temporary_fd >= 0:
+            os.close(temporary_fd)
+        try:
+            os.unlink(temporary_name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+        os.close(directory_fd)
+
+    if _read_immutable_file(parent / path.name) != payload:
+        raise ProtocolError("immutable artifact publication changed bytes")
 
 
 def export_official_predictions(

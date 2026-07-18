@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from argparse import Namespace
 import json
+import os
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -412,6 +413,36 @@ def test_checkpoint_store_is_atomic_idempotent_and_immutable(tmp_path: Path) -> 
         store.save(replace(checkpoint, output_tokens=18))
 
 
+def test_checkpoint_store_rejects_symlink_hardlink_and_nonregular_leaf(
+    tmp_path: Path,
+) -> None:
+    schedule = benchmark.make_balanced_schedule(
+        [_instance_id(0), _instance_id(1)],
+        require_full=False,
+    )
+    digest = benchmark.schedule_digest(schedule)
+    checkpoint = _checkpoint(schedule[0], digest)
+
+    symlink_store = benchmark.CheckpointStore(tmp_path / "symlink-checkpoints")
+    symlink_path = symlink_store.path_for(schedule[0])
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}\n", encoding="utf-8")
+    symlink_path.symlink_to(outside)
+    with pytest.raises(benchmark.ProtocolError, match="alias"):
+        symlink_store.save(checkpoint)
+
+    hardlink_store = benchmark.CheckpointStore(tmp_path / "hardlink-checkpoints")
+    hardlink_path = hardlink_store.save(checkpoint)
+    os.link(hardlink_path, tmp_path / "checkpoint-alias.json")
+    with pytest.raises(benchmark.ProtocolError, match="single-link"):
+        hardlink_store.load(schedule[0])
+
+    fifo_store = benchmark.CheckpointStore(tmp_path / "fifo-checkpoints")
+    os.mkfifo(fifo_store.path_for(schedule[0]))
+    with pytest.raises(benchmark.ProtocolError, match="single-link regular"):
+        fifo_store.load(schedule[0])
+
+
 def test_checkpoint_rejects_prefix_only_or_wrong_27b_identity() -> None:
     schedule = benchmark.make_balanced_schedule([_instance_id(0), _instance_id(1)], require_full=False)
     with pytest.raises(benchmark.ProtocolError, match="full local model identity"):
@@ -494,6 +525,45 @@ def test_resume_and_attempt_ledger_retain_whole_pair_retries(tmp_path: Path) -> 
         )
     with pytest.raises(benchmark.ProtocolError, match="event fields are invalid"):
         ledger.append(pair_index=1, attempt_index=0, event="started", reason_code="retry")
+
+
+def test_attempt_ledger_rejects_symlink_and_hardlink_aliases(tmp_path: Path) -> None:
+    schedule = benchmark.make_balanced_schedule(
+        [_instance_id(0), _instance_id(1)],
+        require_full=False,
+    )
+    digest = benchmark.schedule_digest(schedule)
+    outside = tmp_path / "outside-ledger.jsonl"
+    outside.write_bytes(b"")
+    symlink_path = tmp_path / "symlink-ledger.jsonl"
+    symlink_path.symlink_to(outside)
+    symlink_ledger = benchmark.AttemptLedger(symlink_path, digest)
+    with pytest.raises(benchmark.ProtocolError, match="alias"):
+        symlink_ledger.append(
+            pair_index=0,
+            attempt_index=0,
+            event="started",
+            reason_code="initial",
+        )
+
+    ledger_path = tmp_path / "ledger.jsonl"
+    ledger = benchmark.AttemptLedger(ledger_path, digest)
+    ledger.append(
+        pair_index=0,
+        attempt_index=0,
+        event="started",
+        reason_code="initial",
+    )
+    os.link(ledger_path, tmp_path / "ledger-alias.jsonl")
+    with pytest.raises(benchmark.ProtocolError, match="single-link"):
+        ledger.read()
+    with pytest.raises(benchmark.ProtocolError, match="single-link"):
+        ledger.append(
+            pair_index=0,
+            attempt_index=0,
+            event="aborted",
+            reason_code="infrastructure_host_loss",
+        )
 
 
 def test_export_requires_every_checkpoint_and_one_runtime_binding(tmp_path: Path) -> None:

@@ -560,7 +560,8 @@ def _load_run_header(layout: GenerationLayout) -> dict[str, Any]:
     path = protocol.require_private_path(layout.run_header, must_exist=True)
     if path.stat().st_mode & 0o077:
         raise protocol.ProtocolError("private generation run header must use 0600 permissions")
-    payload = path.read_bytes()
+    payload = protocol._read_immutable_file(path)
+    assert payload is not None
     try:
         import json
 
@@ -626,7 +627,7 @@ def _checkpoint_hashes(
         if not path.is_file():
             raise protocol.ProtocolError("completed pair attempt lacks an arm checkpoint")
         store.load(entry)
-        hashes[entry.condition] = protocol.sha256_file(path)
+        hashes[entry.condition] = protocol._immutable_file_sha256(path)
     return hashes
 
 
@@ -644,7 +645,7 @@ def _promote_completed_pair(
     for entry in pair:
         checkpoint = attempt_store.load(entry)
         destination = canonical_store.save(checkpoint)
-        if protocol.sha256_file(destination) != hashes[entry.condition]:
+        if protocol._immutable_file_sha256(destination) != hashes[entry.condition]:
             raise protocol.ProtocolError("canonical promotion changed checkpoint bytes")
 
 
@@ -950,7 +951,7 @@ def _generation_manifest(
                 "position_in_pair": entry.position_in_pair,
                 "condition": entry.condition,
                 "instance_digest": checkpoint.instance_digest,
-                "checkpoint_sha256": protocol.sha256_file(store.path_for(entry)),
+                "checkpoint_sha256": protocol._immutable_file_sha256(store.path_for(entry)),
             }
         )
     return rows
@@ -990,8 +991,10 @@ def build_generation_receipt(
     completed_pairs = {record["pair_index"] for record in records if record["event"] == "completed"}
     if completed_pairs != {pair[0].pair_index for pair in _pairs(schedule)}:
         raise protocol.ProtocolError("generation ledger lacks exactly one completion per pair")
-    ledger_payload = layout.ledger.read_bytes()
-    run_header_sha256 = protocol.sha256_file(layout.run_header)
+    ledger_payload = protocol._read_immutable_file(layout.ledger)
+    run_header_payload = protocol._read_immutable_file(layout.run_header)
+    assert ledger_payload is not None and run_header_payload is not None
+    run_header_sha256 = protocol.sha256_bytes(run_header_payload)
     return {
         "schema": GENERATION_RECEIPT_SCHEMA,
         "preregistration_sha256": run_header["preregistration_sha256"],
@@ -1060,7 +1063,8 @@ def verify_generation_receipt(
     path = protocol.require_private_path(receipt_path, must_exist=True)
     if path.stat().st_mode & 0o077:
         raise protocol.ProtocolError("private generation receipt must use 0600 permissions")
-    payload = path.read_bytes()
+    payload = protocol._read_immutable_file(path)
+    assert payload is not None
     try:
         import json
 
