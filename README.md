@@ -40,8 +40,8 @@ Adaptive-effort R&D is tracked separately from these 27B throughput results.
 The current [calibration checkpoint](experimental/effort/RESULTS_2026-07-18.md)
 documents the repaired end-to-end agent tool loop, a source-certified 164/164
 HumanEval verifier, and a 32-task paired uncertainty experiment. That
-experiment found no routing-quality or end-to-end speedup, and the 132-task
-held-out split remains sealed.
+experiment found no evidence of ranking-signal improvement or end-to-end
+speedup, and the 132-task held-out split remains sealed.
 
 ## Architecture
 
