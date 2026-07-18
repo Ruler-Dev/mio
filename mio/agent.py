@@ -1887,38 +1887,78 @@ def _process_user_input(
             # the model-round, call-count, or result-size budget.
             generation_tools = None
 
+        configured_output_tokens = getattr(
+            getattr(engine, "tier_config", None),
+            "max_output_tokens",
+            None,
+        )
+        if (
+            isinstance(configured_output_tokens, bool)
+            or not isinstance(configured_output_tokens, int)
+            or configured_output_tokens < 1
+        ):
+            configured_output_tokens = None
+
+        round_max_tokens: int | None = None
+        if execution_budget.max_output_tokens is not None:
+            round_max_tokens = execution_budget.max_output_tokens - completion_tokens_used
+            if round_max_tokens <= 0:
+                budget_exhaustion = f"completion token limit {execution_budget.max_output_tokens} reached"
+                terminal_reason = "budget_exhausted"
+                terminal_assistant_text = f"Agent execution stopped: {budget_exhaustion}."
+                break
+            if configured_output_tokens is not None:
+                # A budget is a ceiling, never authority to raise the model's
+                # configured generation limit.
+                round_max_tokens = min(round_max_tokens, configured_output_tokens)
+
+        if execution_budget.max_context_tokens is not None:
+            count_prompt_tokens = getattr(engine, "prompt_token_count", None)
+            if not callable(count_prompt_tokens):
+                raise RuntimeError("max_context_tokens requires an engine with exact prompt_token_count support")
+            prompt_tokens_before_generation = count_prompt_tokens(
+                generation_messages,
+                tools=generation_tools,
+            )
+            if (
+                isinstance(prompt_tokens_before_generation, bool)
+                or not isinstance(prompt_tokens_before_generation, int)
+                or prompt_tokens_before_generation < 0
+            ):
+                raise RuntimeError("engine returned an invalid exact prompt token count")
+            remaining_context_tokens = execution_budget.max_context_tokens - prompt_tokens_before_generation
+            if remaining_context_tokens <= 0:
+                budget_exhaustion = f"context token limit {execution_budget.max_context_tokens} reached"
+                terminal_reason = "budget_exhausted"
+                terminal_assistant_text = (
+                    f"Agent execution stopped: {budget_exhaustion}. No model round or tool call was executed."
+                )
+                console.print(terminal_assistant_text, style="yellow")
+                break
+            context_limited_output = remaining_context_tokens
+            if configured_output_tokens is not None:
+                context_limited_output = min(
+                    context_limited_output,
+                    configured_output_tokens,
+                )
+            round_max_tokens = (
+                context_limited_output if round_max_tokens is None else min(round_max_tokens, context_limited_output)
+            )
+
+        generation_kwargs: dict[str, object] = {"tools": generation_tools}
+        if round_max_tokens is not None:
+            generation_kwargs["max_tokens"] = round_max_tokens
+        if wall_deadline is not None:
+            generation_kwargs["deadline_monotonic"] = wall_deadline
+
         console.print("[bold green]Mio[/bold green]: ", end="")
         full_text = ""
         visible_parts: list[str] = []
         display_parser = StreamingToolCallParser()
-        if execution_budget.max_output_tokens is None:
-            generation_stream = engine.generate_stream(
-                generation_messages,
-                tools=generation_tools,
-            )
-        else:
-            remaining_output_tokens = execution_budget.max_output_tokens - completion_tokens_used
-            configured_output_tokens = getattr(
-                getattr(engine, "tier_config", None),
-                "max_output_tokens",
-                None,
-            )
-            if (
-                not isinstance(configured_output_tokens, bool)
-                and isinstance(configured_output_tokens, int)
-                and configured_output_tokens > 0
-            ):
-                # A budget is a ceiling, never authority to raise the model's
-                # configured generation limit.
-                remaining_output_tokens = min(
-                    remaining_output_tokens,
-                    configured_output_tokens,
-                )
-            generation_stream = engine.generate_stream(
-                generation_messages,
-                tools=generation_tools,
-                max_tokens=max(1, remaining_output_tokens),
-            )
+        generation_stream = engine.generate_stream(
+            generation_messages,
+            **generation_kwargs,
+        )
         for chunk, metrics in generation_stream:
             full_text += chunk
             # Keep native tool XML for parsing, but never expose it as ordinary

@@ -26,16 +26,25 @@ class _ScriptedEngine:
         self.requests: list[list[dict]] = []
         self.tool_specs: list[list[dict] | None] = []
         self.max_token_limits: list[int | None] = []
+        self.deadlines: list[float | None] = []
         self.last_metrics = SimpleNamespace(
             generation_tps=0.0,
             completion_tokens=0,
             total_time_s=0.0,
         )
 
-    def generate_stream(self, messages, *, tools, max_tokens=None):
+    def generate_stream(
+        self,
+        messages,
+        *,
+        tools,
+        max_tokens=None,
+        deadline_monotonic=None,
+    ):
         self.requests.append(deepcopy(messages))
         self.tool_specs.append(tools)
         self.max_token_limits.append(max_tokens)
+        self.deadlines.append(deadline_monotonic)
         response = next(self.responses)
         # Deliberately split XML delimiters across chunks to exercise the
         # incremental terminal filter as well as whole-call dispatch.
@@ -53,9 +62,21 @@ class _MetricScriptedEngine(_ScriptedEngine):
     ) -> None:
         super().__init__(responses)
         self._prompt_tokens = iter(prompt_tokens)
+        self._preflight_prompt_tokens = iter(prompt_tokens)
         self._completion_tokens = iter(completion_tokens)
 
-    def generate_stream(self, messages, *, tools, max_tokens=None):
+    def prompt_token_count(self, _messages, *, tools=None):
+        del tools
+        return next(self._preflight_prompt_tokens)
+
+    def generate_stream(
+        self,
+        messages,
+        *,
+        tools,
+        max_tokens=None,
+        deadline_monotonic=None,
+    ):
         self.last_metrics = SimpleNamespace(
             prompt_tokens=next(self._prompt_tokens),
             generation_tps=0.0,
@@ -66,6 +87,7 @@ class _MetricScriptedEngine(_ScriptedEngine):
             messages,
             tools=tools,
             max_tokens=max_tokens,
+            deadline_monotonic=deadline_monotonic,
         )
 
 
@@ -546,6 +568,40 @@ def test_context_budget_uses_reported_prompt_plus_completion_without_dispatch(
     assert result.tool_calls == 0
     assert result.budget_exhaustion == "context token limit 8 reached"
     assert result.terminal_reason == "budget_exhausted"
+    assert engine.max_token_limits == [1]
+
+
+def test_context_budget_blocks_before_generation_when_prompt_fills_window(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(
+        agent,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+    state = _state(tmp_path)
+    state["execution_budget"] = agent.AgentExecutionBudget(max_context_tokens=8)
+    engine = _MetricScriptedEngine(
+        ["must not be consumed"],
+        prompt_tokens=[8],
+        completion_tokens=[1],
+    )
+
+    result = agent._process_user_input(
+        "Stop before an over-context round.",
+        engine,
+        _Manager(),
+        MioConfig.default(),
+        state,
+    )
+
+    assert result.rounds == ()
+    assert result.tool_calls == 0
+    assert result.completion_tokens == 0
+    assert result.budget_exhaustion == "context token limit 8 reached"
+    assert result.terminal_reason == "budget_exhausted"
+    assert engine.requests == []
 
 
 def test_wall_deadline_reduces_injected_command_timeout_and_blocks_next_call(
@@ -594,6 +650,7 @@ def test_wall_deadline_reduces_injected_command_timeout_and_blocks_next_call(
     assert result.wall_time_s == pytest.approx(0.6)
     assert result.budget_exhaustion == "wall time limit 0.5s reached"
     assert result.terminal_reason == "budget_exhausted"
+    assert engine.deadlines == [0.5]
 
 
 def test_execution_budget_state_rejects_untrusted_mapping(tmp_path):

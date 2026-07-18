@@ -239,6 +239,66 @@ def test_stream_stop_closes_raw_generation_immediately():
     assert chunks[-1][1] is metrics
 
 
+def test_prompt_token_count_uses_exact_rendered_tools():
+    engine = _engine()
+    captured = {}
+
+    def render(messages, tools=None):
+        captured["messages"] = messages
+        captured["tools"] = tools
+        return [1, 2, 3, 4]
+
+    engine._apply_chat_template = render
+    messages = [{"role": "user", "content": "x"}]
+    tools = [{"type": "function", "function": {"name": "read"}}]
+
+    assert engine.prompt_token_count(messages, tools=tools) == 4
+    assert captured == {"messages": messages, "tools": tools}
+
+
+def test_expired_stream_deadline_stops_before_decode(monkeypatch):
+    engine = _engine()
+    requested_events = 0
+
+    class Detokenizer:
+        last_segment = ""
+
+        def add_token(self, _token):
+            pass
+
+        def finalize(self):
+            pass
+
+        def reset(self):
+            pass
+
+    def dflash_stream(**_kwargs):
+        nonlocal requested_events
+        requested_events += 1
+        yield {"event": "prefill", "prefill_us": 10, "prompt_token_count": 3}
+        requested_events += 1
+        yield {
+            "event": "token",
+            "token_id": 7,
+            "generated_tokens": 1,
+        }
+
+    engine._new_streaming_detokenizer = Detokenizer
+    monkeypatch.setattr("mio.dflash.runtime.stream_dflash_generate", dflash_stream)
+
+    output = list(
+        engine.generate_stream(
+            [{"role": "user", "content": "x"}],
+            deadline_monotonic=0.0,
+        )
+    )
+
+    assert requested_events == 1
+    assert [chunk for chunk, metrics in output if chunk] == []
+    assert output[-1][1] is not None
+    assert output[-1][1].completion_tokens == 0
+
+
 def test_raw_stream_detokenizes_split_utf8_without_replacement(monkeypatch):
     engine = _engine()
     engine._tokenizer = _ByteFallbackTokenizer()

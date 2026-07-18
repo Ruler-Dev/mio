@@ -8,6 +8,7 @@ state transitions remain in their dedicated runtime modules.
 from __future__ import annotations
 
 import json
+import math
 import threading
 import time
 from collections.abc import Generator
@@ -771,6 +772,23 @@ class MioEngine:
                 pass
         return tokens
 
+    def prompt_token_count(
+        self,
+        messages: list[dict],
+        *,
+        tools: list[dict] | None = None,
+    ) -> int:
+        """Count the exact model input, including any rendered tool schemas.
+
+        Agent budgets use this trusted preflight before starting a round.  The
+        generation path renders the same template again, so the count covers
+        tool-schema tokens instead of estimating them from message text.
+        """
+
+        if not self._loaded:
+            raise RuntimeError("Engine not loaded.")
+        return len(self._apply_chat_template(messages, tools=tools))
+
     def _eos_token_ids(self) -> list[int]:
         eos_ids = list(getattr(self._tokenizer, "eos_token_ids", None) or [])
         eos_id = getattr(self._tokenizer, "eos_token_id", None)
@@ -1238,11 +1256,28 @@ class MioEngine:
         top_p: float | None = None,
         top_k: int | None = None,
         seed: int | None = None,
+        deadline_monotonic: float | None = None,
     ) -> Generator[tuple[str, GenerationMetrics | None], None, None]:
         """Stream generation while withholding partial textual stop matches."""
 
+        if deadline_monotonic is not None and (
+            isinstance(deadline_monotonic, bool)
+            or not isinstance(deadline_monotonic, (int, float))
+            or not math.isfinite(float(deadline_monotonic))
+        ):
+            raise ValueError("deadline_monotonic must be None or a finite monotonic timestamp")
+
         stops = [value for value in (stop or []) if value]
         stop_signal = threading.Event()
+        deadline_timer: threading.Timer | None = None
+        if deadline_monotonic is not None:
+            remaining = float(deadline_monotonic) - time.perf_counter()
+            if remaining <= 0:
+                stop_signal.set()
+            else:
+                deadline_timer = threading.Timer(remaining, stop_signal.set)
+                deadline_timer.daemon = True
+                deadline_timer.start()
         raw = self._generate_stream_raw(
             messages,
             max_tokens=max_tokens,
@@ -1255,14 +1290,14 @@ class MioEngine:
             stop_signal=stop_signal,
             decode_chunk_tokens=1 if stops else 8,
         )
-        if not stops:
-            yield from raw
-            return
-
-        buffer = ""
-        emitted: list[str] = []
-        stopped = False
         try:
+            if not stops:
+                yield from raw
+                return
+
+            buffer = ""
+            emitted: list[str] = []
+            stopped = False
             for chunk, metrics in raw:
                 if metrics is not None:
                     if buffer and not stopped:
@@ -1303,6 +1338,8 @@ class MioEngine:
                     emitted.append(safe)
                     yield safe, None
         finally:
+            if deadline_timer is not None:
+                deadline_timer.cancel()
             close = getattr(raw, "close", None)
             if callable(close):
                 close()
@@ -1538,6 +1575,8 @@ class MioEngine:
 
         try:
             for event in stream:
+                if stop_signal is not None and stop_signal.is_set():
+                    break
                 ev_type = event.get("event")
 
                 if ev_type == "prefill":
