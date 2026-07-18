@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+from pathlib import Path
+import stat
 
 import pytest
 
@@ -224,6 +226,7 @@ def test_paired_ablation_keeps_hidden_channel_closed_and_report_source_free(
     assert report["pairing"]["all_outputs_identical"] is True
     assert report["timing"]["shared_verification"]["calls"] == 32
     assert report["pairing"]["shared_hidden_labels"] == 32
+    assert "paired_label_manifest_sha256" not in report["pairing"]
     assert report["row_commitment"]["rows"] == 32
     assert report["statistics"][benchmark.NATIVE_SIGNAL]["error_count"] == report[
         "statistics"
@@ -379,3 +382,63 @@ def test_integrity_drift_after_hidden_scoring_blocks_report(
         )
     assert probes == 3
     assert len([event for event in events if event[0] == "verify"]) == 32
+
+
+def test_private_snapshot_is_content_bound_read_only_and_is_the_only_load_path(
+    tmp_path: Path,
+) -> None:
+    original = tmp_path / "original-model"
+    original.mkdir()
+    (original / "config.json").write_text('{"model_type":"fixture"}\n')
+    (original / "model.safetensors").write_bytes(b"tiny-weight-fixture")
+    (original / "tokenizer.json").write_text('{"fixture":true}\n')
+    (original / "copied-entire-bundle.bin").write_bytes(b"non-identity-extra")
+    fingerprint = benchmark.fingerprint_local_model(original)
+    resolved = benchmark.resolve_model_reference(original.as_posix(), fingerprint.revision)
+    loaded: dict[str, object] = {}
+
+    def fake_loader(
+        model_id: str,
+        *,
+        revision: str | None,
+        lazy: bool,
+    ) -> tuple[object, object]:
+        loaded.update(model_id=model_id, revision=revision, lazy=lazy)
+        return object(), object()
+
+    with benchmark._snapshot_local_model(resolved) as snapshot:
+        snapshot_path = snapshot.path
+        assert snapshot_path != original
+        assert snapshot_path.is_dir()
+        assert (snapshot_path / "copied-entire-bundle.bin").read_bytes() == b"non-identity-extra"
+        assert snapshot.verify(phase="unit_test").digest == fingerprint.digest
+        assert all(
+            not (path.stat().st_mode & stat.S_IWUSR)
+            for path in (*snapshot.directories, *snapshot.files)
+        )
+
+        native, renormalized = benchmark._load_generators(
+            snapshot,
+            loader=fake_loader,
+        )
+        assert Path(str(loaded["model_id"])) == snapshot_path
+        assert Path(str(loaded["model_id"])) != original
+        assert loaded["revision"] is None
+        assert loaded["lazy"] is False
+        assert native.model_id == resolved.canonical_model_id
+        assert renormalized.model_id == resolved.canonical_model_id
+
+    assert not snapshot_path.exists()
+
+
+def test_private_snapshot_rejects_remote_model_reference() -> None:
+    remote = ResolvedModelReference(
+        source_kind="huggingface",
+        canonical_model_id=f"hf://org/model@{'a' * 40}",
+        load_model_id="org/model",
+        load_revision="a" * 40,
+        requested_model="org/model",
+        requested_revision="a" * 40,
+    )
+    with pytest.raises(benchmark.BenchmarkProtocolError, match="remote Hugging Face"):
+        benchmark._snapshot_local_model(remote)

@@ -21,10 +21,15 @@ import hashlib
 import importlib.metadata
 import json
 import math
+import os
 from pathlib import Path
 import random
+import shutil
 import statistics
-from typing import Any, Mapping, Protocol, Sequence
+import stat
+import subprocess
+import tempfile
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from experimental.effort.bench_markov_humaneval import (
     BenchmarkProtocolError,
@@ -60,8 +65,10 @@ from experimental.effort.mlx_backend import (
     UNCERTAINTY_METHOD_RENORMALIZED,
 )
 from experimental.effort.model_identity import (
+    LocalModelFingerprint,
     ModelIdentityError,
     ResolvedModelReference,
+    fingerprint_local_model,
     resolve_model_reference,
 )
 from experimental.effort.uncertainty_statistics import (
@@ -820,15 +827,6 @@ def run_paired_uncertainty_ablation(
         }
         for pair in generated_pairs
     ]
-    paired_label_rows = [
-        {
-            "task_id": pair.case.task_id,
-            "native_is_error": not result.passed,
-            "renormalized_is_error": not result.passed,
-            "shared_verification": True,
-        }
-        for pair, result in zip(generated_pairs, shared_hidden, strict=True)
-    ]
     private_result_rows = [
         {
             "task_id": pair.case.task_id,
@@ -922,7 +920,6 @@ def run_paired_uncertainty_ablation(
                 "finish_reason",
             ],
             "shared_hidden_labels": len(generated_pairs),
-            "paired_label_manifest_sha256": _canonical_sha256(paired_label_rows),
         },
         "row_commitment": {
             "schema": "mio.paired-uncertainty-private-row-commitment.v1",
@@ -974,12 +971,180 @@ def _verification_evaluator(timeout_seconds: float) -> HiddenEvaluator:
     return evaluate
 
 
-def _load_generators(
-    resolved: ResolvedModelReference,
-) -> tuple[MLXEffortGenerator, MLXEffortGenerator]:
-    from mlx_lm.utils import load
+def _copy_model_tree(source: Path, destination: Path) -> str:
+    """Clone the complete APFS tree when available, else copy every entry."""
 
-    model, tokenizer = load(
+    try:
+        subprocess.run(
+            ["cp", "-cR", os.fspath(source), os.fspath(destination)],
+            check=True,
+            capture_output=True,
+            timeout=300.0,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        shutil.rmtree(destination, ignore_errors=True)
+        shutil.copytree(source, destination, symlinks=True)
+    return os.fspath(destination)
+
+
+def _snapshot_tree_paths(root: Path) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+    directories: list[Path] = [root]
+    files: list[Path] = []
+    for directory, directory_names, file_names in os.walk(root, followlinks=False):
+        directory_path = Path(directory)
+        for name in directory_names:
+            child = directory_path / name
+            mode = child.lstat().st_mode
+            if not stat.S_ISDIR(mode):
+                raise BenchmarkProtocolError("model snapshot contains a non-directory entry")
+            directories.append(child)
+        for name in file_names:
+            child = directory_path / name
+            mode = child.lstat().st_mode
+            if not stat.S_ISREG(mode):
+                raise BenchmarkProtocolError("model snapshot contains a non-regular file")
+            files.append(child)
+    return tuple(directories), tuple(files)
+
+
+@dataclass
+class LocalModelSnapshot:
+    """Private immutable copy that remains alive while MLX owns mapped weights."""
+
+    _temporary_directory: tempfile.TemporaryDirectory
+    path: Path
+    canonical_model_id: str
+    requested_revision: str
+    directories: tuple[Path, ...]
+    files: tuple[Path, ...]
+    initial_fingerprint: LocalModelFingerprint
+    _closed: bool = False
+
+    @property
+    def resolved_reference(self) -> ResolvedModelReference:
+        if self._closed:
+            raise BenchmarkProtocolError("model snapshot is already closed")
+        return ResolvedModelReference(
+            source_kind="local",
+            canonical_model_id=self.canonical_model_id,
+            load_model_id=os.fspath(self.path),
+            load_revision=None,
+            requested_model="private-read-only-snapshot",
+            requested_revision=self.requested_revision,
+        )
+
+    def verify(self, *, phase: str) -> LocalModelFingerprint:
+        if self._closed:
+            raise BenchmarkProtocolError("model snapshot is already closed")
+        try:
+            observed = fingerprint_local_model(self.path)
+        except ModelIdentityError as exc:
+            raise BenchmarkProtocolError(
+                f"private model snapshot cannot be fingerprinted at {phase}"
+            ) from exc
+        observed_identity = f"local-mlx@{observed.revision}"
+        if (
+            observed_identity != self.canonical_model_id
+            or observed.digest != self.initial_fingerprint.digest
+        ):
+            raise BenchmarkProtocolError(
+                f"private model snapshot integrity drift detected at {phase}"
+            )
+        return observed
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        # Deletion needs write permission on directories.  Restore modes only
+        # after all MLX-backed objects have left the enclosing context.
+        for directory in self.directories:
+            try:
+                directory.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+            except FileNotFoundError:
+                pass
+        for file_path in self.files:
+            try:
+                file_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+            except FileNotFoundError:
+                pass
+        self._closed = True
+        self._temporary_directory.cleanup()
+
+    def __enter__(self) -> LocalModelSnapshot:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+
+def _snapshot_local_model(resolved: ResolvedModelReference) -> LocalModelSnapshot:
+    """Clone a content-bound local bundle and freeze the private copy."""
+
+    if resolved.source_kind != "local":
+        raise BenchmarkProtocolError(
+            "remote Hugging Face models are not supported by the evidence CLI: "
+            "a content-verified private remote snapshot is not implemented"
+        )
+    source = Path(resolved.load_model_id).resolve(strict=True)
+    temporary = tempfile.TemporaryDirectory(prefix="mio-mlx-model-snapshot-")
+    root = Path(temporary.name)
+    root.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+    destination = root / "model"
+    try:
+        _copy_model_tree(source, destination)
+        fingerprint = fingerprint_local_model(destination)
+        snapshot_identity = f"local-mlx@{fingerprint.revision}"
+        if snapshot_identity != resolved.canonical_model_id:
+            raise BenchmarkProtocolError(
+                "private model snapshot does not match the requested content identity"
+            )
+        directories, files = _snapshot_tree_paths(destination)
+        for file_path in files:
+            file_path.chmod(stat.S_IRUSR)
+        for directory in reversed(directories):
+            directory.chmod(stat.S_IRUSR | stat.S_IXUSR)
+        return LocalModelSnapshot(
+            _temporary_directory=temporary,
+            path=destination,
+            canonical_model_id=resolved.canonical_model_id,
+            requested_revision=resolved.requested_revision,
+            directories=directories,
+            files=files,
+            initial_fingerprint=fingerprint,
+        )
+    except Exception:
+        # No tree has been published to MLX yet, so cleanup is safe here.
+        for directory, _directory_names, _file_names in os.walk(
+            destination,
+            topdown=True,
+        ):
+            try:
+                Path(directory).chmod(
+                    stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
+                )
+            except FileNotFoundError:
+                pass
+        temporary.cleanup()
+        raise
+
+
+def _load_generators(
+    snapshot: LocalModelSnapshot,
+    *,
+    loader: Callable[..., tuple[object, object]] | None = None,
+) -> tuple[MLXEffortGenerator, MLXEffortGenerator]:
+    if not isinstance(snapshot, LocalModelSnapshot):
+        raise BenchmarkProtocolError("MLX generators require a private model snapshot")
+    snapshot.verify(phase="loader_preflight")
+    resolved = snapshot.resolved_reference
+    if loader is None:
+        from mlx_lm.utils import load
+
+        selected_loader = load
+    else:
+        selected_loader = loader
+
+    model, tokenizer = selected_loader(
         resolved.load_model_id,
         revision=resolved.load_revision,
         lazy=False,
@@ -1026,6 +1191,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         resolved = resolve_model_reference(args.model, args.model_revision)
     except ModelIdentityError as exc:
         raise SystemExit(f"model identity error: {exc}") from exc
+    if resolved.source_kind != "local":
+        raise SystemExit(
+            "remote Hugging Face models are disabled for this evidence CLI: "
+            "a content-verified private remote snapshot is not implemented"
+        )
     initial_integrity = IntegritySnapshot(
         git_revision=_git_revision(),
         git_dirty=_git_dirty(),
@@ -1045,29 +1215,52 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_output_tokens=args.max_output_tokens,
         seed=args.seed,
     )
-    native, renormalized = _load_generators(resolved)
-    _require_integrity(initial_integrity, integrity_probe, phase="post_model_load")
-    started_at_utc = datetime.now(timezone.utc).isoformat()
-    report = run_paired_uncertainty_ablation(
-        cases=cases,
-        pinned_corpus=pinned,
-        resolved_model=resolved,
-        native_generator=native,
-        renormalized_generator=renormalized,
-        hidden_evaluator=_verification_evaluator(config.verifier_timeout_seconds),
-        expected_integrity=initial_integrity,
-        integrity_probe=integrity_probe,
-        config=config,
-    )
-    completed_at_utc = datetime.now(timezone.utc).isoformat()
-    _require_integrity(
-        initial_integrity,
-        integrity_probe,
-        phase="post_run_before_write",
-    )
-    report["started_at_utc"] = started_at_utc
-    report["completed_at_utc"] = completed_at_utc
-    _write_json(output, report)
+    with _snapshot_local_model(resolved) as model_snapshot:
+        model_snapshot.verify(phase="pre_model_load")
+        native, renormalized = _load_generators(
+            model_snapshot,
+        )
+        post_load_fingerprint = model_snapshot.verify(phase="post_model_load")
+        _require_integrity(initial_integrity, integrity_probe, phase="post_model_load")
+        started_at_utc = datetime.now(timezone.utc).isoformat()
+        report = run_paired_uncertainty_ablation(
+            cases=cases,
+            pinned_corpus=pinned,
+            resolved_model=resolved,
+            native_generator=native,
+            renormalized_generator=renormalized,
+            hidden_evaluator=_verification_evaluator(
+                config.verifier_timeout_seconds
+            ),
+            expected_integrity=initial_integrity,
+            integrity_probe=integrity_probe,
+            config=config,
+        )
+        completed_at_utc = datetime.now(timezone.utc).isoformat()
+        final_snapshot_fingerprint = model_snapshot.verify(phase="post_run")
+        _require_integrity(
+            initial_integrity,
+            integrity_probe,
+            phase="post_run_before_write",
+        )
+        report["provenance"]["model_snapshot"] = {
+            "method": "private-full-bundle-copy-cow-preferred-v1",
+            "loaded_from_snapshot_only": True,
+            "snapshot_path_serialized": False,
+            "read_only_during_load_and_run": True,
+            "fingerprint_schema": post_load_fingerprint.schema,
+            "fingerprint_digest": post_load_fingerprint.digest,
+            "fingerprinted_files": len(post_load_fingerprint.files),
+            "fingerprinted_bytes": post_load_fingerprint.total_bytes,
+            "post_load_verified": True,
+            "post_run_verified": (
+                final_snapshot_fingerprint.digest
+                == post_load_fingerprint.digest
+            ),
+        }
+        report["started_at_utc"] = started_at_utc
+        report["completed_at_utc"] = completed_at_utc
+        _write_json(output, report)
     print(
         f"[paired-uncertainty] output={output} tasks={report['pairing']['tasks']} "
         f"outputs_identical={report['pairing']['all_outputs_identical']}",
