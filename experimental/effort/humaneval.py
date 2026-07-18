@@ -364,6 +364,110 @@ def _safe_feedback(text: str) -> str:
     return text[:256]
 
 
+def _top_level_defined_names(node: ast.stmt) -> frozenset[str]:
+    """Return names bound by one declarative top-level prompt statement."""
+
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return frozenset({node.name})
+    if isinstance(node, ast.Import):
+        return frozenset(
+            alias.asname or alias.name.partition(".")[0] for alias in node.names
+        )
+    if isinstance(node, ast.ImportFrom):
+        return frozenset(
+            alias.asname or alias.name
+            for alias in node.names
+            if alias.name != "*"
+        )
+
+    def assignment_names(target: ast.expr) -> set[str]:
+        if isinstance(target, ast.Name):
+            return {target.id}
+        if isinstance(target, (ast.Tuple, ast.List)):
+            return {
+                name
+                for item in target.elts
+                for name in assignment_names(item)
+            }
+        return set()
+
+    if isinstance(node, ast.Assign):
+        return frozenset(
+            name
+            for target in node.targets
+            for name in assignment_names(target)
+        )
+    if isinstance(node, ast.AnnAssign):
+        return frozenset(assignment_names(node.target))
+    return frozenset()
+
+
+def _public_verifier_support_source(case: HumanEvalCase) -> str:
+    """Extract public declarations transitively needed by hidden tests.
+
+    HumanEval tests sometimes call helpers declared in the public prompt (for
+    example ``poly``) or call the entry point by name as well as through their
+    ``candidate`` argument.  Executing the complete prompt would also install
+    the incomplete target stub and could run unrelated top-level statements.
+    Instead, this extracts only declarative imports, helper definitions/classes,
+    and assignments reachable by name from the pinned test source.  The target
+    itself is always supplied by the RPC proxy.
+
+    Extracted code still executes inside the trusted verifier sandbox.  A
+    non-official corpus can place executable imports, decorators, defaults, or
+    class bodies in a public declaration, so this static filter complements --
+    and does not replace -- the no-network/no-fork sandbox.
+    """
+
+    try:
+        prompt_tree = ast.parse(case.prompt)
+        test_tree = ast.parse(case.test)
+    except SyntaxError as exc:
+        raise HumanEvalError("HumanEval prompt or test is not parseable") from exc
+
+    declarations: list[tuple[ast.stmt, frozenset[str]]] = []
+    last_declaration: dict[str, int] = {}
+    for node in prompt_tree.body:
+        names = _top_level_defined_names(node)
+        if not names or case.entry_point in names:
+            continue
+        index = len(declarations)
+        declarations.append((node, names))
+        for name in names:
+            last_declaration[name] = index
+
+    pending = {
+        node.id
+        for node in ast.walk(test_tree)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+    }
+    pending.discard(case.entry_point)
+    selected: set[int] = set()
+    inspected: set[str] = set()
+    while pending:
+        name = pending.pop()
+        if name in inspected:
+            continue
+        inspected.add(name)
+        index = last_declaration.get(name)
+        if index is None:
+            continue
+        selected.add(index)
+        declaration, _names = declarations[index]
+        pending.update(
+            node.id
+            for node in ast.walk(declaration)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+        )
+
+    snippets: list[str] = []
+    for index in sorted(selected):
+        node, _names = declarations[index]
+        snippet = ast.get_source_segment(case.prompt, node) or ast.unparse(node)
+        snippets.append(snippet.rstrip())
+    return "\n\n".join(snippets)
+
+
 def _candidate_worker_source(
     prepared: PreparedCandidate,
     entry_point: str,
@@ -453,6 +557,7 @@ def _hidden_verifier_source(
 ) -> str:
     """Build a sandboxed verifier whose only candidate handle is host RPC."""
 
+    public_support = _public_verifier_support_source(case)
     settings = json.dumps(
         {
             "request_marker": request_marker,
@@ -544,6 +649,12 @@ def _hidden_verifier_source(
         "        if status == 'invalid_exit': raise __MioCandidateInvalidExit('exit')\n"
         "        raise __MioCandidateRuntime('candidate runtime')\n"
         "    return __mio_decode(payload.get('result'))\n\n"
+        # Bind the public entry-point name before loading public helpers/tests.
+        # Official HumanEval tests sometimes reference it directly instead of
+        # using only the ``candidate`` argument passed to ``check``.
+        + f"\n{case.entry_point} = __mio_invoke\n"
+        + (f"\n{public_support}\n" if public_support else "")
+        + "\n"
         + case.test.rstrip()
         + "\n\ntry:\n"
         + "    check(__mio_invoke)\n"
@@ -775,7 +886,7 @@ def verify_candidate(
     case: HumanEvalCase,
     model_text: str,
     *,
-    timeout_s: float = 3.0,
+    timeout_s: float = 10.0,
 ) -> VerificationResult:
     """Evaluate a candidate without exposing hidden tests to its process.
 

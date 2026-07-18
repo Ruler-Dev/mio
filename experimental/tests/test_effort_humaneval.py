@@ -152,6 +152,55 @@ def test_verifier_passes_and_redacts_assertion_details() -> None:
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS sandbox-exec")
+def test_verifier_loads_needed_public_helpers_and_binds_entry_point() -> None:
+    helper_case = HumanEvalCase(
+        task_id="HumanEval/helper-rpc",
+        prompt=(
+            "import math\n\n"
+            "def public_helper(value):\n"
+            "    return math.sqrt(value)\n\n"
+            "def unused_helper():\n"
+            "    raise RuntimeError('must not execute')\n\n"
+            "def solve(value):\n"
+            "    \"\"\"Return the public helper result.\"\"\"\n"
+        ),
+        test=(
+            "def check(candidate):\n"
+            "    assert candidate(4) == public_helper(4)\n"
+            "    assert solve(9) == public_helper(9)\n"
+        ),
+        entry_point="solve",
+    )
+
+    result = verify_candidate(
+        helper_case,
+        "    return public_helper(value)\n",
+    )
+
+    assert result.passed is True
+    assert result.status == "passed"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS sandbox-exec")
+def test_default_verifier_budget_covers_many_isolated_rpc_calls() -> None:
+    many_call_case = HumanEvalCase(
+        task_id="HumanEval/many-rpc-calls",
+        prompt="def add(x, y):\n    \"\"\"Add two integers.\"\"\"\n",
+        test=(
+            "def check(candidate):\n"
+            "    for value in range(105):\n"
+            "        assert candidate(value, 1) == value + 1\n"
+        ),
+        entry_point="add",
+    )
+
+    result = verify_candidate(many_call_case, "    return x + y\n")
+
+    assert result.passed is True
+    assert result.status == "passed"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS sandbox-exec")
 def test_verifier_rejects_early_exit_and_times_out_loop() -> None:
     early_exit = verify_candidate(
         case(),
