@@ -73,8 +73,9 @@ plan is in [docs/13-development-plan.md](docs/13-development-plan.md).
 
 Requirements:
 
-- an Apple Silicon Mac;
-- Python 3.10 or newer;
+- an Apple Silicon Mac running macOS 14 or newer;
+- Python 3.12 or newer;
+- [uv](https://docs.astral.sh/uv/) for the reproducible locked install;
 - enough unified memory and disk for the selected model;
 - Git for the optional external skill and Ponytail source installs;
 - Node.js only for the optional local Ponytail MCP provider.
@@ -82,7 +83,8 @@ Requirements:
 ```bash
 git clone https://github.com/Ruler-Dev/mio.git
 cd mio
-python3 -m pip install -e .
+uv sync --locked --extra dev
+source .venv/bin/activate
 mio --help
 ```
 
@@ -91,12 +93,15 @@ weights and reviewed external skill repositories are intentionally installed
 separately: they are large, independently licensed, and live outside the
 Python package.
 
-The compatible-minor dependency window is currently validated with MLX
+The compatible-minor dependency window and committed `uv.lock` are currently
+validated on Python 3.12 with MLX
 `0.32.0`, mlx-lm `0.31.3`, dflash-mlx `0.1.8`, mlx-dspark `0.5.0`, mlx-vlm
 `0.6.5`, mlx-audio `0.4.4`, huggingface-hub `1.24.0`, and transformers
-`5.14.1`. Run `python3 -m pip check` after an upgrade; these are environment
-checks, not inference benchmark results. Mio generation remains text-only:
-installing mlx-vlm does not yet certify image-in-prompt inference.
+`5.14.1`. MLX 0.32 wheels require macOS 14 on Apple Silicon; NumPy 2.5
+requires Python 3.12. Run `uv sync --locked --extra dev` and
+`uv pip check` after an upgrade; these are environment checks,
+not inference benchmark results. Mio generation remains text-only: installing
+mlx-vlm does not yet certify image-in-prompt inference.
 
 ## Qwen 3.6 27B speculative stack
 

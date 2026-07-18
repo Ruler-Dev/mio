@@ -1453,7 +1453,12 @@ class CorpusHiddenEvaluator:
         from mio.agent_policy import AgentToolPolicy, sandboxed_command
 
         bootstrap = "import sys; sys.path.insert(0, '.')\n" + source
-        argv = [sys.executable, "-I", "-B", "-c", bootstrap]
+        # Virtual-environment launchers commonly live below /Users on macOS,
+        # which the evaluator sandbox deliberately denies. Execute the
+        # canonical framework binary instead of asking sandbox-exec to follow
+        # an otherwise-forbidden user-owned symlink.
+        python = str(Path(sys.executable).resolve(strict=True))
+        argv = [python, "-I", "-B", "-c", bootstrap]
         policy = AgentToolPolicy.read_only(workspace)
         sandboxed_argv, environment = sandboxed_command(
             argv,

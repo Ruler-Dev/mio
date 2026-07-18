@@ -2,8 +2,9 @@
 
 ## Requirements
 
-- macOS on Apple Silicon;
-- Python 3.10 or newer;
+- macOS 14 or newer on Apple Silicon;
+- Python 3.12 or newer;
+- [uv](https://docs.astral.sh/uv/) for the reproducible locked install;
 - Git;
 - enough disk and unified memory for the selected checkpoint;
 - optional: Hugging Face CLI for explicit downloads, Node.js for Ponytail MCP,
@@ -18,18 +19,20 @@ Smaller tiers are available for lower-memory machines.
 ```bash
 git clone https://github.com/Ruler-Dev/mio.git
 cd mio
-python3 -m pip install -e .
+uv sync --locked --extra dev
+source .venv/bin/activate
 mio --help
 ```
 
 Verify the installed dependency graph when changing environments:
 
 ```bash
-python3 -m pip check
-python3 -c 'import mlx; print(mlx.__version__)'
+uv pip check
+uv run python -c 'from importlib.metadata import version; print(version("mlx"))'
 ```
 
-The current validated development environment uses MLX `0.32.0`, mlx-lm
+The current validated development environment and committed `uv.lock` use
+Python 3.12 with MLX `0.32.0`, mlx-lm
 `0.31.3`, dflash-mlx `0.1.8`, mlx-dspark `0.5.0`, mlx-vlm `0.6.5`, mlx-audio
 `0.4.4`, huggingface-hub `1.24.0`, and transformers `5.14.1`. mlx-audio is a
 required transitive dependency of mlx-vlm. Its `0.4.5` release constrains
@@ -37,6 +40,9 @@ transformers below the version required by mlx-vlm `0.6.5`, so Mio explicitly
 holds the latest compatible leaf, `0.4.4`, instead of relying on pip's silent
 backtracking. These VLM utilities are dependency-compatible, but Mio's current
 generation path is still text-only and does not certify image-in-prompt use.
+MLX 0.32 wheels require macOS 14 on Apple Silicon, and NumPy 2.5 requires
+Python 3.12; older hosts or interpreters are therefore outside the supported
+resolver domain.
 
 ## Download the tested Qwen 3.6 stack
 

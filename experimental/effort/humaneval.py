@@ -1035,7 +1035,11 @@ def verify_candidate(
                 command_timeout_s=timeout_s,
                 audit_sink=lambda _event: None,
             )
-            python = shlex.quote(sys.executable)
+            # A uv/venv launcher is normally a symlink below /Users, a tree
+            # intentionally hidden by the sandbox. Resolve it before launch so
+            # the process executes the trusted framework binary without
+            # widening the sandbox's readable roots.
+            python = shlex.quote(str(Path(sys.executable).resolve(strict=True)))
             candidate_command = (
                 "ulimit -S -f 2048 >/dev/null 2>&1; "
                 "ulimit -S -d 1048576 >/dev/null 2>&1 || true; "

@@ -2,7 +2,7 @@
 name = "mio"
 version = "0.1.0"
 description = "Local MLX inference and agent stack for Apple Silicon with DSpark/DFlash speculative decoding"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = "MIT"
 license-files = ["THIRD_PARTY_NOTICES.md"]
 # One install = full experience. All UI / skill / multimodal libraries are
@@ -21,13 +21,13 @@ dependencies = [
     "mlx-audio>=0.4.4,<0.4.5",
     "transformers>=5.14.1,<5.15.0",
     # API + CLI
-    "fastapi>=0.139.0",
+    "fastapi>=0.139.2",
     "uvicorn>=0.51.0",
     "pydantic>=2.13.4",         # imported directly in server.py
     "python-multipart>=0.0.32",
     "huggingface-hub>=1.24.0,<2.0.0",
     "rich>=15.0.0",
-    "numpy>=2.5.1",
+    "numpy>=2.5.1",            # NumPy 2.5 requires Python >=3.12
     "certifi>=2026.6.17",
     # Documents
     "fpdf2>=2.8.7",
@@ -40,7 +40,7 @@ dependencies = [
     "markdown>=3.10.2",
     "markdownify>=1.2.3",
     # Data / dev utilities
-    "matplotlib>=3.11.0",
+    "matplotlib>=3.11.1",
     "pyyaml>=6.0.3",
     "pyjwt>=2.13.0",
     "jsonpath-ng>=1.8.0",
@@ -64,7 +64,7 @@ dev = [
     "build>=1.5.0,<2.0.0",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
-    "ruff>=0.15.21",
+    "ruff>=0.15.22",
 ]
 [project.scripts]
 mio = "mio.main:main"
@@ -86,7 +86,7 @@ mio = [
 ]
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py312"
 line-length = 120
 
 [tool.pytest.ini_options]
