@@ -99,6 +99,18 @@ net quality-gain lower bound is positive. Calibration records a rescue as
 rate. Missing, stale, or identity-mismatched calibration data causes the
 controller to stop rather than improvise.
 
+The sufficiency of the transition key is itself an experimental hypothesis.
+The current table indexes context, trigger, depth, and action, but does not
+condition its estimates on the complete action history. A depth-one
+counterfactual is therefore the first publishable pilot: direct is the only
+possible predecessor and every repair, alternative, or refinement uses the
+same public state as deployment. Deeper action-homogeneous rollouts are useful
+diagnostics, but they must be excluded as state-aliasing/off-policy data until
+a full reachable-state tree or a history-aware key is implemented. If an
+out-of-fold history-aware model materially improves Brier score or log loss,
+Mio must describe the controller as semi-Markov/history-aware rather than
+claiming a first-order Markov state.
+
 VoC-GMT is the proposed next step, not the present implementation. Its gate is
 to estimate
 
@@ -215,6 +227,26 @@ uncertainty calibration, and fit task-cluster lower/upper bounds for each
 back to a preregistered global row or be ineligible; they must not borrow hidden
 held-out outcomes.
 
+Validate uncertainty before allowing it to route. Report error-detection
+AUROC, Brier score, area under the risk-coverage curve, task-bootstrap
+intervals, and reliability bins. The preregistered minimum gate is an AUROC
+lower bound above `0.5`, a calibrated Brier improvement over the frozen
+prevalence predictor whose paired interval excludes zero, and no significant
+risk-coverage regression. If that gate fails, uncertainty branching is
+disabled and only deterministic public-validator failures may trigger work.
+The 32-task split is adequate only for a scalar engineering pilot; it is not
+enough to establish a multi-feature router or densely stratified transition
+model.
+
+For the first transition experiment, publish depth-one counterfactuals only.
+For each tier/action condition, use the exact deployed output-token cap,
+end-to-end deadline, trigger threshold, parent rule, public terminal selector,
+and deterministic seed. Generate every public counterfactual for every task
+before requesting any hidden label. Offline quality delta is the hidden score
+of the public selector after appending the candidate minus its score before the
+action; it is not candidate-minus-parent. Full depth-four work requires an
+exhaustive reachable public-state tree or an explicitly history-aware model.
+
 The initial envelopes may be adjusted during this phase, but every adjustment
 invalidates the previous preregistration. Small models may be used to find
 implementation bugs quickly. Their results are engineering evidence only and
@@ -259,7 +291,10 @@ directly and attribute overlap through ablations.
 HumanEval alone is too small and too narrow to justify a coding-engine claim.
 Replicate on at least one contamination-resistant or newly authored coding set
 and one repository-level task set. Freeze their public/hidden boundary before
-execution. A benchmark-specific gain is reported as such.
+execution. EvalPlus can strengthen HumanEval's oracle but does not create more
+independent task clusters; LiveCodeBench and BigCodeBench are candidate
+families for broader replication. A benchmark-specific gain is reported as
+such.
 
 ## Baselines and ablations
 
@@ -428,8 +463,13 @@ Research precedents motivate hypotheses but do not validate Mio:
 - [Tree of Thoughts](https://arxiv.org/abs/2305.10601)
 - [LE-MCTS](https://arxiv.org/abs/2412.15797)
 - [Answer Convergence as a Signal for Early Stopping](https://aclanthology.org/2025.emnlp-main.904/)
+- [Thought Calibration](https://aclanthology.org/2025.emnlp-main.722/)
+- [Formalizing Test-Time Compute for Code Generation](https://aclanthology.org/2025.findings-ijcnlp.70/)
 - [Let's Verify Step by Step](https://arxiv.org/abs/2305.20050)
 - [Evaluating Large Language Models Trained on Code (HumanEval)](https://arxiv.org/abs/2107.03374)
+- [EvalPlus](https://arxiv.org/abs/2305.01210)
+- [LiveCodeBench](https://arxiv.org/abs/2403.07974)
+- [BigCodeBench](https://arxiv.org/abs/2406.15877)
 
 ACT, PonderNet, and CALM allocate compute inside a trained network or decoder;
 Mio's current experiment allocates whole request-level candidate generations.
