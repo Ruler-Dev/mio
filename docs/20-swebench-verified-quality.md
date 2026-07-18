@@ -175,6 +175,12 @@ Quality Gate v2 changes the intervention before any confirmatory run:
 - v2 reports validate invocations, recognized validation attempts and narrowly
   detected validation commands misrouted through Bash as separate counters.
 
+The intervention remains Quality Gate v2, while its immutable report schema is
+`mio.coding-quality-gate.v3`. That schema records initial/current canonical
+content hashes separately from revision metadata. A metadata-only Git change
+therefore remains an incomplete no-net-change outcome, and an incomplete
+initial or final snapshot can never certify completion.
+
 This scheduler keeps the same maximum model rounds, but it does not promise
 equal wall time: extra Quality feedback and real tests consume prompt, model
 and tool time. It does not change the MLX prefill/decode implementation, so raw

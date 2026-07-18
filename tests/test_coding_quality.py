@@ -874,8 +874,11 @@ def test_quality_report_exposes_only_closed_snapshot_attestation_fields(tmp_path
 
     report = gate.report()
 
+    assert report["schema"] == "mio.coding-quality-gate.v3"
     assert report["snapshot_method"] in {"git", "manifest"}
     assert report["snapshot_error_codes"] == []
+    assert report["initial_snapshot_complete"] is True
+    assert report["initial_content_sha256"] == report["current_content_sha256"]
 
     incomplete = coding_quality.WorkspaceSnapshot(
         revision_sha256="a" * 64,
@@ -892,6 +895,83 @@ def test_quality_report_exposes_only_closed_snapshot_attestation_fields(tmp_path
     ).report()
     assert failed["snapshot_method"] == "incomplete"
     assert failed["snapshot_error_codes"] == ["snapshot_incomplete"]
+
+
+def test_net_change_uses_complete_content_not_revision_metadata(tmp_path: Path) -> None:
+    entry = coding_quality.RevisionEntry(
+        path_sha256="1" * 64,
+        suffix=".py",
+        state_sha256="2" * 64,
+    )
+    baseline = coding_quality.WorkspaceSnapshot(
+        revision_sha256="a" * 64,
+        entries=(entry,),
+        complete=True,
+        root_count=1,
+        method="git",
+    )
+    metadata_only = coding_quality.WorkspaceSnapshot(
+        revision_sha256="b" * 64,
+        entries=(entry,),
+        complete=True,
+        root_count=1,
+        method="manifest",
+    )
+    gate = CodingQualityGate(
+        roots=(tmp_path,),
+        effort=CodingEffort.LOW,
+        require_net_workspace_change=True,
+        initial_snapshot=baseline,
+        current_snapshot=metadata_only,
+        mutation_epoch=1,
+        changed_kinds={"code"},
+    )
+
+    assert baseline.content_sha256 == metadata_only.content_sha256
+    assert gate.net_workspace_changed is False
+    assert gate.decision().phase == "no_net_change"
+    assert gate.decision().missing == ("net_workspace_change",)
+
+
+def test_incomplete_initial_snapshot_can_never_certify_net_change(tmp_path: Path) -> None:
+    initial = coding_quality.WorkspaceSnapshot(
+        revision_sha256="a" * 64,
+        entries=(),
+        complete=False,
+        root_count=1,
+        method="incomplete",
+        error_codes=("snapshot_incomplete",),
+    )
+    current = coding_quality.WorkspaceSnapshot(
+        revision_sha256="b" * 64,
+        entries=(
+            coding_quality.RevisionEntry(
+                path_sha256="1" * 64,
+                suffix=".py",
+                state_sha256="2" * 64,
+            ),
+        ),
+        complete=True,
+        root_count=1,
+        method="manifest",
+    )
+    gate = CodingQualityGate(
+        roots=(tmp_path,),
+        effort=CodingEffort.LOW,
+        require_net_workspace_change=True,
+        initial_snapshot=initial,
+        current_snapshot=current,
+        mutation_epoch=1,
+        changed_kinds={"code"},
+    )
+
+    assert gate.net_workspace_changed is False
+    assert gate.snapshot_comparison_complete is False
+    assert gate.decision().missing == (
+        "net_workspace_change",
+        "complete_workspace_snapshot",
+    )
+    assert gate.should_persist() is False
 
 
 def test_feedback_signature_changes_with_revision_epoch_phase_and_obligation(

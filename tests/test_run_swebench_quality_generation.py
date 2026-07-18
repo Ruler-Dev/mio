@@ -1164,7 +1164,7 @@ def _raw_target_result():
 
 def _passing_quality_report(instruction: str, initial, current) -> dict[str, object]:
     return {
-        "schema": "mio.coding-quality-gate.v2",
+        "schema": "mio.coding-quality-gate.v3",
         "enabled": True,
         "effort": "medium",
         "intent": "code_change_requested",
@@ -1181,6 +1181,9 @@ def _passing_quality_report(instruction: str, initial, current) -> dict[str, obj
         "snapshot_error_codes": list(current.error_codes),
         "initial_revision_sha256": initial.revision_sha256,
         "current_revision_sha256": current.revision_sha256,
+        "initial_snapshot_complete": initial.complete,
+        "initial_content_sha256": initial.content_sha256,
+        "current_content_sha256": current.content_sha256,
         "required": ["net_workspace_change", "test_or_build"],
         "missing": [],
         "validation_counts": {"test": 1, "build": 0, "static": 0, "diff": 0, "review": 0},
@@ -1194,7 +1197,7 @@ def _passing_quality_report(instruction: str, initial, current) -> dict[str, obj
 
 def _observing_quality_report(instruction: str, snapshot) -> dict[str, object]:
     return {
-        "schema": "mio.coding-quality-gate.v2",
+        "schema": "mio.coding-quality-gate.v3",
         "enabled": True,
         "effort": "medium",
         "intent": "inspect",
@@ -1211,6 +1214,9 @@ def _observing_quality_report(instruction: str, snapshot) -> dict[str, object]:
         "snapshot_error_codes": list(snapshot.error_codes),
         "initial_revision_sha256": snapshot.revision_sha256,
         "current_revision_sha256": snapshot.revision_sha256,
+        "initial_snapshot_complete": snapshot.complete,
+        "initial_content_sha256": snapshot.content_sha256,
+        "current_content_sha256": snapshot.content_sha256,
         "required": [],
         "missing": [],
         "validation_counts": {"test": 1, "build": 0, "static": 0, "diff": 0, "review": 0},
@@ -1453,7 +1459,7 @@ def test_native_raw_target_telemetry_accepts_denied_unrecognized_validate(
     assert outcome.telemetry.document()[3][-1]["outcome"] == "unrecognized"
 
 
-def test_native_gate_on_without_change_contract_is_completed_and_satisfied_without_mutation(
+def test_native_gate_on_rejects_report_without_mandatory_change_contract(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1489,17 +1495,8 @@ def test_native_gate_on_without_change_contract_is_completed_and_satisfied_witho
     )
     monkeypatch.setattr(agent, "_process_user_input", lambda *_args, **_kwargs: result)
 
-    outcome = native(request)
-    turn, quality, _rounds, _tools = outcome.telemetry.document()
-
-    assert outcome.status == "completed"
-    assert outcome.quality_gate_decision == "satisfied"
-    assert turn["status"] == "completed"
-    assert quality["decision"] == "not_applicable"
-    assert quality["phase"] == "observing"
-    assert quality["activated"] is False
-    assert quality["satisfied"] is True
-    assert quality["require_net_workspace_change"] is False
+    with pytest.raises(protocol.ProtocolError, match="mandatory net-change contract"):
+        native(request)
 
 
 def test_native_gate_on_change_contract_without_mutation_is_fail_closed(
@@ -1614,6 +1611,91 @@ def test_native_gate_on_mutation_then_revert_is_fail_closed_and_cannot_pass(
         native(request)
 
 
+def test_gate_on_rejects_content_delta_without_revision_delta(tmp_path: Path) -> None:
+    from mio.coding_quality import snapshot_workspaces
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    initial = snapshot_workspaces((workspace,))
+    (workspace / "module.py").write_text("VALUE = 2\n", encoding="utf-8")
+    current = snapshot_workspaces((workspace,))
+    report = _passing_quality_report("Implement the requested code change", initial, current)
+    normalized = runner._validate_quality_gate_report(report, quality_gate_enabled=True)
+
+    report["initial_revision_sha256"] = current.revision_sha256
+    normalized["initial_revision_sha256"] = current.revision_sha256
+
+    with pytest.raises(protocol.ProtocolError, match="revision/content delta is inconsistent"):
+        runner._validate_quality_gate_report(report, quality_gate_enabled=True)
+    with pytest.raises(protocol.ProtocolError, match="revision/content delta is inconsistent"):
+        runner._validate_normalized_quality_document(normalized)
+
+
+def test_gate_on_accepts_revision_metadata_delta_as_no_net_content_change(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    from mio.coding_quality import snapshot_workspaces
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    initial = snapshot_workspaces((workspace,))
+    metadata_only = replace(
+        initial,
+        revision_sha256="f" * 64,
+        method="manifest",
+    )
+    report = _no_net_change_quality_report("Implement the requested code change", metadata_only)
+    report["initial_revision_sha256"] = initial.revision_sha256
+    report["initial_content_sha256"] = initial.content_sha256
+
+    normalized = runner._validate_quality_gate_report(report, quality_gate_enabled=True)
+
+    assert normalized["decision"] == "incomplete"
+    assert normalized["phase"] == "no_net_change"
+    assert normalized["initial_revision_sha256"] != normalized["current_revision_sha256"]
+    assert normalized["initial_content_sha256"] == normalized["current_content_sha256"]
+    assert runner._validate_normalized_quality_document(normalized) == normalized
+
+
+def test_normalized_gate_on_rejects_disabled_net_change_contract(tmp_path: Path) -> None:
+    from mio.coding_quality import snapshot_workspaces
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    initial = snapshot_workspaces((workspace,))
+    (workspace / "module.py").write_text("VALUE = 2\n", encoding="utf-8")
+    current = snapshot_workspaces((workspace,))
+    report = _passing_quality_report("Implement the requested code change", initial, current)
+    normalized = runner._validate_quality_gate_report(report, quality_gate_enabled=True)
+    normalized["require_net_workspace_change"] = False
+
+    with pytest.raises(protocol.ProtocolError, match="mandatory net-change contract"):
+        runner._validate_normalized_quality_document(normalized)
+
+
+def test_gate_on_cannot_certify_change_from_incomplete_initial_snapshot(tmp_path: Path) -> None:
+    from mio.coding_quality import snapshot_workspaces
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    initial = snapshot_workspaces((workspace,))
+    (workspace / "module.py").write_text("VALUE = 2\n", encoding="utf-8")
+    current = snapshot_workspaces((workspace,))
+    report = _passing_quality_report("Implement the requested code change", initial, current)
+    normalized = runner._validate_quality_gate_report(report, quality_gate_enabled=True)
+    report["initial_snapshot_complete"] = False
+    normalized["initial_snapshot_complete"] = False
+
+    with pytest.raises(protocol.ProtocolError, match="no-net-change"):
+        runner._validate_quality_gate_report(report, quality_gate_enabled=True)
+    with pytest.raises(protocol.ProtocolError, match="no-net-change"):
+        runner._validate_normalized_quality_document(normalized)
+
+
 def test_native_budget_exhaustion_is_sealed_as_bounded_incomplete_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1694,7 +1776,7 @@ def test_quality_deadline_serializes_complete_wall_overhead_and_capped_checkpoin
         result.terminal_reason = "quality_incomplete"
         result.budget_exhaustion = f"wall time limit {protocol.MAX_AGENT_WALL_SECONDS}s reached"
         result.quality_gate = {
-            "schema": "mio.coding-quality-gate.v2",
+            "schema": "mio.coding-quality-gate.v3",
             "enabled": True,
             "effort": "medium",
             "intent": "code_change_requested",
@@ -1711,6 +1793,9 @@ def test_quality_deadline_serializes_complete_wall_overhead_and_capped_checkpoin
             "snapshot_error_codes": list(current.error_codes),
             "initial_revision_sha256": initial.revision_sha256,
             "current_revision_sha256": current.revision_sha256,
+            "initial_snapshot_complete": initial.complete,
+            "initial_content_sha256": initial.content_sha256,
+            "current_content_sha256": current.content_sha256,
             "required": ["net_workspace_change", "test_or_build"],
             "missing": ["test_or_build"],
             "validation_counts": {"test": 0, "build": 0, "static": 0, "diff": 0, "review": 0},
@@ -1831,7 +1916,7 @@ def test_native_gate_on_rejects_quality_validation_counter_drift(
     request = _raw_target_native_request(tmp_path)
     request = replace(request, entry=replace(request.entry, condition="gate_on"), quality_gate_enabled=True)
     result = _raw_target_result()
-    report = _observing_quality_report(request.instruction, snapshot_workspaces((request.workspace,)))
+    report = _awaiting_change_quality_report(request.instruction, snapshot_workspaces((request.workspace,)))
     report.update(changes)
     result.quality_gate = report
     monkeypatch.setattr(agent, "_process_user_input", lambda *_args, **_kwargs: result)
@@ -2171,6 +2256,9 @@ def test_portable_model_exceptions_complete_pair_and_preserve_workspace_patch(
         else:
             assert telemetry["quality_gate"]["phase"] == "experiment_disabled"
             assert telemetry["quality_gate"]["require_net_workspace_change"] is False
+        assert telemetry["quality_gate"]["initial_snapshot_complete"] is None
+        assert telemetry["quality_gate"]["initial_content_sha256"] is None
+        assert telemetry["quality_gate"]["current_content_sha256"] is None
 
 
 def test_portable_artifacts_support_cross_process_audit_and_separate_current_drift(

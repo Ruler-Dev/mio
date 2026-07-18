@@ -1314,6 +1314,9 @@ def _validate_quality_gate_report(
             "request_sha256": None,
             "initial_revision_sha256": None,
             "current_revision_sha256": None,
+            "initial_snapshot_complete": None,
+            "initial_content_sha256": None,
+            "current_content_sha256": None,
             "snapshot": None,
             "changed_kinds": [],
             "required": [],
@@ -1343,6 +1346,9 @@ def _validate_quality_gate_report(
         "snapshot_error_codes",
         "initial_revision_sha256",
         "current_revision_sha256",
+        "initial_snapshot_complete",
+        "initial_content_sha256",
+        "current_content_sha256",
         "required",
         "missing",
         "validation_counts",
@@ -1354,7 +1360,7 @@ def _validate_quality_gate_report(
     }
     if not isinstance(raw, Mapping) or set(raw) != expected_keys:
         raise protocol.ProtocolError("gate_on quality report fields differ from the sealed schema")
-    if raw.get("schema") != "mio.coding-quality-gate.v2" or raw.get("enabled") is not True:
+    if raw.get("schema") != "mio.coding-quality-gate.v3" or raw.get("enabled") is not True:
         raise protocol.ProtocolError("gate_on quality report schema or enabled flag is invalid")
     effort = raw["effort"]
     intent = raw["intent"]
@@ -1364,17 +1370,29 @@ def _validate_quality_gate_report(
         raise protocol.ProtocolError("quality effort or intent differs from the frozen experiment")
     if decision not in _QUALITY_DECISIONS or phase not in _QUALITY_PHASES:
         raise protocol.ProtocolError("quality decision or phase is outside the sealed vocabulary")
-    for name in ("activated", "satisfied", "require_net_workspace_change", "snapshot_complete"):
+    for name in (
+        "activated",
+        "satisfied",
+        "require_net_workspace_change",
+        "initial_snapshot_complete",
+        "snapshot_complete",
+    ):
         if not isinstance(raw[name], bool):
             raise protocol.ProtocolError(f"quality {name} must be boolean")
+    if raw["require_net_workspace_change"] is not True:
+        raise protocol.ProtocolError("gate_on quality report lacks the mandatory net-change contract")
     mutation_epoch = _nonnegative_integer(raw["mutation_epoch"], "quality mutation_epoch", maximum=128)
     request_sha256 = raw["request_sha256"]
     initial_revision = raw["initial_revision_sha256"]
     current_revision = raw["current_revision_sha256"]
+    initial_content = raw["initial_content_sha256"]
+    current_content = raw["current_content_sha256"]
     for value, label in (
         (request_sha256, "quality request digest"),
         (initial_revision, "quality initial revision"),
         (current_revision, "quality current revision"),
+        (initial_content, "quality initial content"),
+        (current_content, "quality current content"),
     ):
         if not isinstance(value, str):
             raise protocol.ProtocolError(f"{label} is malformed")
@@ -1446,19 +1464,19 @@ def _validate_quality_gate_report(
     activated = raw["activated"]
     satisfied = raw["satisfied"]
     require_net_workspace_change = raw["require_net_workspace_change"]
-    net_workspace_change = initial_revision != current_revision
+    snapshot_comparison_complete = raw["initial_snapshot_complete"] and snapshot["complete"]
+    content_changed = initial_content != current_content
+    revision_changed = initial_revision != current_revision
+    if snapshot_comparison_complete and content_changed and not revision_changed:
+        raise protocol.ProtocolError("quality revision/content delta is inconsistent")
+    net_workspace_change = snapshot_comparison_complete and content_changed
     if activated != (mutation_epoch > 0):
         raise protocol.ProtocolError("quality activation differs from its mutation epoch")
     if activated != bool(changed_kinds):
         raise protocol.ProtocolError("quality changed kinds differ from its activation state")
-    if not activated and not require_net_workspace_change:
-        if decision != "not_applicable" or not satisfied or phase != "observing":
-            raise protocol.ProtocolError("observing quality report semantics are inconsistent")
-        if required or missing or net_workspace_change:
-            raise protocol.ProtocolError("observing quality report cannot carry obligations or a revision delta")
-    elif not activated:
+    if not activated:
         expected_missing = ["net_workspace_change"]
-        if not snapshot["complete"]:
+        if not snapshot_comparison_complete:
             expected_missing.append("complete_workspace_snapshot")
         if (
             decision != "incomplete"
@@ -1471,7 +1489,7 @@ def _validate_quality_gate_report(
             raise protocol.ProtocolError("awaiting-change quality report semantics are inconsistent")
     elif not net_workspace_change:
         expected_missing = ["net_workspace_change"]
-        if not snapshot["complete"]:
+        if not snapshot_comparison_complete:
             expected_missing.append("complete_workspace_snapshot")
         if (
             decision != "incomplete"
@@ -1486,7 +1504,7 @@ def _validate_quality_gate_report(
             not satisfied
             or phase != "passed"
             or missing
-            or not snapshot["complete"]
+            or not snapshot_comparison_complete
             or mutation_epoch == 0
             or not changed_kinds
         ):
@@ -1512,7 +1530,7 @@ def _validate_quality_gate_report(
             expected_missing.append("diff")
         if validation_required == "test_or_build" and not (validation_counts["test"] or validation_counts["build"]):
             expected_missing.append("test_or_build")
-        if not snapshot["complete"]:
+        if not snapshot_comparison_complete:
             expected_missing.append("complete_workspace_snapshot")
         if list(required) != expected_required or list(missing) != expected_missing:
             raise protocol.ProtocolError("quality decision is not derivable from its obligations and evidence counts")
@@ -1530,6 +1548,9 @@ def _validate_quality_gate_report(
         "request_sha256": request_sha256,
         "initial_revision_sha256": initial_revision,
         "current_revision_sha256": current_revision,
+        "initial_snapshot_complete": raw["initial_snapshot_complete"],
+        "initial_content_sha256": initial_content,
+        "current_content_sha256": current_content,
         "snapshot": snapshot,
         "changed_kinds": list(changed_kinds),
         "required": list(required),
@@ -1560,6 +1581,9 @@ def _validate_normalized_quality_document(raw: Mapping[str, Any]) -> dict[str, A
         "request_sha256",
         "initial_revision_sha256",
         "current_revision_sha256",
+        "initial_snapshot_complete",
+        "initial_content_sha256",
+        "current_content_sha256",
         "snapshot",
         "changed_kinds",
         "required",
@@ -1588,6 +1612,9 @@ def _validate_normalized_quality_document(raw: Mapping[str, Any]) -> dict[str, A
             "request_sha256": None,
             "initial_revision_sha256": None,
             "current_revision_sha256": None,
+            "initial_snapshot_complete": None,
+            "initial_content_sha256": None,
+            "current_content_sha256": None,
             "snapshot": None,
             "changed_kinds": [],
             "required": [],
@@ -1621,6 +1648,9 @@ def _validate_normalized_quality_document(raw: Mapping[str, Any]) -> dict[str, A
             "request_sha256": raw.get("request_sha256"),
             "initial_revision_sha256": None,
             "current_revision_sha256": None,
+            "initial_snapshot_complete": None,
+            "initial_content_sha256": None,
+            "current_content_sha256": None,
             "snapshot": None,
             "changed_kinds": [],
             "required": [],
@@ -1648,10 +1678,21 @@ def _validate_normalized_quality_document(raw: Mapping[str, Any]) -> dict[str, A
         raise protocol.ProtocolError("normalized quality effort or intent is invalid")
     if decision not in _QUALITY_DECISIONS or raw["status"] != decision or phase not in _QUALITY_PHASES:
         raise protocol.ProtocolError("normalized quality decision, status, or phase is invalid")
-    if any(not isinstance(raw[name], bool) for name in ("activated", "satisfied", "require_net_workspace_change")):
+    if any(
+        not isinstance(raw[name], bool)
+        for name in ("activated", "satisfied", "require_net_workspace_change", "initial_snapshot_complete")
+    ):
         raise protocol.ProtocolError("normalized quality booleans are invalid")
+    if raw["require_net_workspace_change"] is not True:
+        raise protocol.ProtocolError("normalized gate_on quality lacks the mandatory net-change contract")
     mutation_epoch = _nonnegative_integer(raw["mutation_epoch"], "quality mutation_epoch", maximum=128)
-    for name in ("request_sha256", "initial_revision_sha256", "current_revision_sha256"):
+    for name in (
+        "request_sha256",
+        "initial_revision_sha256",
+        "current_revision_sha256",
+        "initial_content_sha256",
+        "current_content_sha256",
+    ):
         value = raw[name]
         if not isinstance(value, str):
             raise protocol.ProtocolError(f"normalized quality {name} is malformed")
@@ -1712,24 +1753,19 @@ def _validate_normalized_quality_document(raw: Mapping[str, Any]) -> dict[str, A
     activated = raw["activated"]
     satisfied = raw["satisfied"]
     require_net_workspace_change = raw["require_net_workspace_change"]
-    net_workspace_change = raw["initial_revision_sha256"] != raw["current_revision_sha256"]
+    snapshot_comparison_complete = raw["initial_snapshot_complete"] and snapshot["complete"]
+    content_changed = raw["initial_content_sha256"] != raw["current_content_sha256"]
+    revision_changed = raw["initial_revision_sha256"] != raw["current_revision_sha256"]
+    if snapshot_comparison_complete and content_changed and not revision_changed:
+        raise protocol.ProtocolError("normalized quality revision/content delta is inconsistent")
+    net_workspace_change = snapshot_comparison_complete and content_changed
     if activated != (mutation_epoch > 0):
         raise protocol.ProtocolError("normalized quality activation differs from its mutation epoch")
     if activated != bool(changed_kinds):
         raise protocol.ProtocolError("normalized quality changed kinds differ from activation")
-    if not activated and not require_net_workspace_change:
-        if (
-            decision != "not_applicable"
-            or not satisfied
-            or phase != "observing"
-            or required
-            or missing
-            or net_workspace_change
-        ):
-            raise protocol.ProtocolError("normalized observing quality semantics are inconsistent")
-    elif not activated:
+    if not activated:
         expected_missing = ["net_workspace_change"]
-        if not snapshot["complete"]:
+        if not snapshot_comparison_complete:
             expected_missing.append("complete_workspace_snapshot")
         if (
             decision != "incomplete"
@@ -1742,7 +1778,7 @@ def _validate_normalized_quality_document(raw: Mapping[str, Any]) -> dict[str, A
             raise protocol.ProtocolError("normalized awaiting-change quality semantics are inconsistent")
     elif not net_workspace_change:
         expected_missing = ["net_workspace_change"]
-        if not snapshot["complete"]:
+        if not snapshot_comparison_complete:
             expected_missing.append("complete_workspace_snapshot")
         if (
             decision != "incomplete"
@@ -1757,7 +1793,7 @@ def _validate_normalized_quality_document(raw: Mapping[str, Any]) -> dict[str, A
             not satisfied
             or phase != "passed"
             or missing
-            or not snapshot["complete"]
+            or not snapshot_comparison_complete
             or mutation_epoch == 0
             or not changed_kinds
         ):
@@ -1783,7 +1819,7 @@ def _validate_normalized_quality_document(raw: Mapping[str, Any]) -> dict[str, A
             expected_missing.append("diff")
         if validation_required == "test_or_build" and not (validated_counts["test"] or validated_counts["build"]):
             expected_missing.append("test_or_build")
-        if not snapshot["complete"]:
+        if not snapshot_comparison_complete:
             expected_missing.append("complete_workspace_snapshot")
         if list(required) != expected_required or list(missing) != expected_missing:
             raise protocol.ProtocolError("normalized quality decision is not derivable from its evidence")
@@ -2106,6 +2142,9 @@ class ValidatedArmTelemetry:
                 "request_sha256": request_sha256,
                 "initial_revision_sha256": None,
                 "current_revision_sha256": None,
+                "initial_snapshot_complete": None,
+                "initial_content_sha256": None,
+                "current_content_sha256": None,
                 "snapshot": None,
                 "changed_kinds": [],
                 "required": [],

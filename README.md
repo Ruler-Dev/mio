@@ -628,6 +628,9 @@ to Bash. These changes do not alter MLX prefill or decode kernels, so they do
 not intrinsically reduce tok/s; they can add agent-level prompt/tool wall time.
 Their quality/cost effect is not yet established and will be calibrated on the
 paired MioCodeBench smoke/development splits before another 27B run.
+The content-bound telemetry is emitted as `mio.coding-quality-gate.v3`:
+initial and current workspace-content hashes are distinct from Git/probe
+metadata, and both snapshots must be complete before a net change can pass.
 
 Mio has not yet measured general edit correctness, tool-call accuracy,
 Caveman/Ponytail quality, long-context scaling, or multi-user throughput. A

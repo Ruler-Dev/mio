@@ -580,6 +580,21 @@ class WorkspaceSnapshot:
     def entry_map(self) -> dict[str, RevisionEntry]:
         return {entry.path_sha256: entry for entry in self.entries}
 
+    @property
+    def content_sha256(self) -> str:
+        """Canonical workspace-content identity, excluding Git/probe metadata."""
+
+        digest = hashlib.sha256(b"mio.workspace-content.v1\0")
+        for item in sorted(self.entries, key=lambda entry: entry.path_sha256):
+            digest.update(item.path_sha256.encode())
+            digest.update(b"\0")
+            digest.update(item.suffix.encode())
+            digest.update(b"\0")
+            digest.update(item.state_sha256.encode())
+            digest.update(b"\0")
+        digest.update(str(self.root_count).encode())
+        return digest.hexdigest()
+
 
 def _stat_identity(value: os.stat_result) -> tuple[int, ...]:
     return (
@@ -1310,8 +1325,16 @@ class CodingQualityGate:
         return bool(
             initial is not None
             and current is not None
-            and initial.revision_sha256 != current.revision_sha256
+            and initial.complete
+            and current.complete
+            and initial.content_sha256 != current.content_sha256
         )
+
+    @property
+    def snapshot_comparison_complete(self) -> bool:
+        initial = self.initial_snapshot
+        current = self.current_snapshot
+        return bool(initial is not None and current is not None and initial.complete and current.complete)
 
     @property
     def activated(self) -> bool:
@@ -1321,10 +1344,15 @@ class CodingQualityGate:
         """Persist only revision debt, never pressure a later turn to edit."""
 
         verdict = self.decision()
+        initial = self.initial_snapshot
+        current = self.current_snapshot
         return bool(
             self.enabled
             and not verdict.satisfied
-            and (self.net_workspace_changed or self.snapshot_failed_closed)
+            and initial is not None
+            and initial.complete
+            and current is not None
+            and (self.net_workspace_changed or not current.complete)
         )
 
     def _adopt_snapshot(
@@ -1610,7 +1638,7 @@ class CodingQualityGate:
             )
         if not self.net_workspace_changed:
             missing = ["net_workspace_change"]
-            if self.snapshot_failed_closed:
+            if not self.snapshot_comparison_complete:
                 missing.append("complete_workspace_snapshot")
             return GateDecision(
                 status=GateStatus.INCOMPLETE,
@@ -1702,7 +1730,7 @@ class CodingQualityGate:
         successes = self._current_successes()
         validation_counts = {kind.value: sum(item.kind is kind for item in successes) for kind in ValidationKind}
         return {
-            "schema": "mio.coding-quality-gate.v2",
+            "schema": "mio.coding-quality-gate.v3",
             "enabled": self.enabled,
             "effort": self.effort.value,
             "intent": self.intent.value,
@@ -1719,6 +1747,9 @@ class CodingQualityGate:
             "snapshot_error_codes": list(current.error_codes),
             "initial_revision_sha256": (self.initial_snapshot.revision_sha256 if self.initial_snapshot else ""),
             "current_revision_sha256": current.revision_sha256,
+            "initial_snapshot_complete": bool(self.initial_snapshot and self.initial_snapshot.complete),
+            "initial_content_sha256": (self.initial_snapshot.content_sha256 if self.initial_snapshot else ""),
+            "current_content_sha256": current.content_sha256,
             "required": list(verdict.required),
             "missing": list(verdict.missing),
             "validation_counts": validation_counts,
