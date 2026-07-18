@@ -36,6 +36,13 @@ or a coding-quality gain. See [the benchmark guide](docs/16-benchmarks.md),
 [raw results](benchmarks/results/qwen36-core-256.json), and the
 [research paper](papers/mio-qwen36-research.md).
 
+Adaptive-effort R&D is tracked separately from these 27B throughput results.
+The current [calibration checkpoint](experimental/effort/RESULTS_2026-07-18.md)
+documents the repaired end-to-end agent tool loop, a source-certified 164/164
+HumanEval verifier, and a 32-task paired uncertainty experiment. That
+experiment found no routing-quality or end-to-end speedup, and the 132-task
+held-out split remains sealed.
+
 ## Architecture
 
 ```text
