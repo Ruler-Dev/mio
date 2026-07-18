@@ -1,14 +1,15 @@
 # Qwen 3.6 27B quality gate: SWE-bench Verified preregistration
 
 > Status: protocol, trusted dataset adapter, hardened patch capture, immutable
-> checkpoints, and evaluation receipt verifier are implemented. Confirmatory
-> `evaluate` and `aggregate` are deliberately **hard-blocked** until the isolated
-> model-facing generation runner and its generation attestation/receipt exist.
-> Retry-ledger integration, efficiency-guardrail definition/enforcement, and
-> official Docker image-digest capture are also pending. No model run or quality
-> result is reported here. Independently, the current Mac cannot perform confirmatory
-> evaluation: it is `arm64`, Docker is not installed, and the pinned `swebench`
-> package is not installed. The machine-readable protocol is
+> checkpoints, paired non-evidence smoke runner, portable smoke artifact audit,
+> cross-process receipt verifier, and fail-closed official smoke evaluator are
+> implemented. Confirmatory `evaluate` and `aggregate` remain deliberately
+> **hard-blocked** by the unresolved v2 controls and protocol revision. No
+> quality result is reported here. The Mac now has Docker CLI 29.6.2, a prepared
+> QEMU/Colima `linux/amd64` profile, the two pinned smoke images, and a clean
+> official harness checkout; that VM is intentionally stopped while MLX owns
+> host memory and is restarted only for evaluation. The machine-readable
+> protocol is
 > [`benchmarks/swebench-quality-preregistration-v1.json`](../benchmarks/swebench-quality-preregistration-v1.json).
 
 This is the required external benchmark for Mio's coding-quality gate. It
@@ -43,10 +44,14 @@ Primary sources:
 - [official harness reference](https://www.swebench.com/SWE-bench/reference/harness/)
 - [official Docker setup guide](https://www.swebench.com/SWE-bench/guides/docker_setup/)
 
-The evaluator is pinned to official `swebench` 4.1.0, Git tag `v4.1.0`, commit
-`726c5461e2ef52d83cf1ea2107870a8bb3328d57`. The Verified dataset is pinned to
-revision `c104f840cc67f8b6eec6f759ebc8b2693d585d4a`. An update to either identity
-creates a new protocol version before any labels are inspected.
+Confirmatory protocol v1 is pinned to official `swebench` 4.1.0, Git tag
+`v4.1.0`, commit `726c5461e2ef52d83cf1ea2107870a8bb3328d57`. The
+non-evidence smoke wrapper instead pins official commit
+`f7bbbb2ccdf479001d6467c9e34af59e44a840f9`, which includes the later fix for
+patches that add only new files; it cannot be relabelled as v1 confirmatory
+evidence. The Verified dataset is pinned to revision
+`c104f840cc67f8b6eec6f759ebc8b2693d585d4a`. An update to any confirmatory
+identity requires a new protocol version before labels are inspected.
 
 The adapter never lets the official harness resolve a mutable remote dataset.
 `prepare` accepts only the official parquet with SHA-256
@@ -163,8 +168,10 @@ The adapter now supports this boundary directly: `capture_git_patch` accepts a
 private external Git directory, requires it outside the model workspace with
 `0700` permissions, rejects any case-insensitive `.git` entry created under the
 visible tree, and invokes Git with explicit `--git-dir`/`--work-tree` paths.
-The model-facing runner that provisions those directories and proves their
-tool-level invisibility is still pending.
+The paired smoke runner provisions that separation and rejects a workspace if
+the factory returns state outside its exclusive arm destination or a
+case-insensitive `.git` entry appears. Clean-subprocess/container provenance
+for confirmatory generation remains pending.
 
 All gold, full, and private artifacts live outside the Mio repository root.
 Symlinked path components are rejected. Private directories use mode `0700`
@@ -194,10 +201,12 @@ only missing arms. The implemented ledger primitive uses separate
 append-only event ledger. Retry reasons are restricted to process crash, host
 loss, telemetry corruption, or evaluator-infrastructure failure. A retry can
 begin only after the prior whole-pair attempt was aborted for one of those
-reasons; retry after a completed attempt is forbidden. Both arm checkpoint
-hashes are required for a completed pair event, so earlier attempts cannot be
-overwritten. Integration of this primitive into the isolated generation runner
-is still pending and blocks confirmatory use.
+reasons; retry after a completed attempt is forbidden. Legacy completion binds
+both checkpoint hashes. Portable completion instead records a domain-separated
+digest of each checkpoint SHA-256 and telemetry-sidecar SHA-256. Promotion and
+receipt verification recompute that binding, so neither artifact can be
+swapped independently. This primitive is integrated in the smoke runner;
+confirmatory provenance remains blocked.
 
 Before Docker starts, `evaluate` writes an immutable seal binding the schedule,
 exact dataset snapshot, both prediction hashes, clean Mio commit, exact model
@@ -223,6 +232,55 @@ Raw schedules, IDs, patches, model text, trajectories, harness logs, and
 per-instance labels remain private. The publishable result contains aggregate
 counts and statistics only. Hashing a known instance ID is not treated as
 anonymization, so even per-instance digests are omitted from the public result.
+
+### Portable non-evidence smoke artifacts
+
+Every newly created smoke CLI layout now has an immutable `0600` layout
+profile, the exact canonical private runtime manifest captured by automatic
+attestation, and one canonical `0600` telemetry sidecar per arm. A sidecar is
+bound to the schedule execution index and immutable checkpoint SHA-256. It
+contains validated raw round fields, sanitized fixed-vocabulary/hash tool
+fields, a closed terminal document, and a closed content-free Quality report.
+These attest terminal reason, bounded budget kind, telemetry completeness,
+complete wall time, derived status/gate decision, Quality phase and activation,
+mutation/revision/snapshot state, obligation vocabulary, and bounded validation
+counts. An unstructured model exception is sealed as a non-retryable
+`model_error`; its unavailable trajectory and counters are explicitly marked
+incomplete instead of being invented. A deadline may exceed the 1,800-second
+agent budget by at most the sealed five-second executor-overhead allowance. The
+sidecar retains that observed wall value while the legacy checkpoint field is
+capped at 1,800 seconds. Larger overruns still require the blocked v2 watchdog
+adjudication.
+
+A sidecar contains no task text, assistant text, tool arguments or output,
+filesystem path, or patch. Throughput must agree with raw token/nanosecond
+accounting whenever counters are observed; censored arms are not throughput
+observations. Tool admission, audit, timeout, effect, and final-round topology
+are validated against closed rules. The generation receipt binds the runtime
+manifest, checkpoint/sidecar pair bindings, and complete telemetry manifest.
+The retained SHA-256 commitments are not keyed encryption or anonymization;
+the sidecars remain private `0600` artifacts and their digests may still permit
+correlation when an input has a small enumerable domain.
+
+`verify_sealed_generation_artifacts` audits those retained bytes without
+comparing them with the machine running the audit. This makes a later
+cross-process integrity audit possible without falsely claiming that the
+current Python, MLX packages, model tree, or Mio checkout is the original
+environment. `reattest_current_generation_environment` is a separate,
+fail-closed operation; `verify_generation_receipt` performs the sealed-byte
+audit and then that current-environment re-attestation. Missing files,
+non-canonical JSON, digest drift, permissive modes, symlinks, hard links,
+unknown trace fields, and invalid timing/vocabulary all fail closed.
+
+Layouts created before this profile are left untouched and are explicitly
+reported as legacy/non-portable. `verify_legacy_generation_artifacts` audits
+their retained bytes without claiming current-environment re-attestation.
+They cannot be resumed by the smoke CLI or upgraded by inventing the absent
+runtime and per-arm trace bytes. Portable resume compares the immutable header
+and retained runtime before promotion repair; a missing runtime is rejected
+without recreation or an earlier artifact mutation. None of these
+integrity guarantees changes the smoke's `non_evidence_smoke` classification
+or removes a confirmatory v2 blocker.
 
 ## Adapter commands
 
@@ -280,6 +338,56 @@ python3 scripts/bench_swebench_quality.py aggregate \
 directories. Reusing a directory, placing private data under the repository,
 or traversing a symlink parent fails closed.
 
+For a completed portable smoke layout, the official wrapper performs its own
+artifact-only generation audit and exports separate private prediction
+streams. Every scheduled terminal checkpoint stays in the denominator:
+non-empty captured patches are evaluated regardless of terminal status, while
+genuinely empty predictions are retained as effective unresolved outcomes.
+The receipt preserves both the harness's raw empty/unresolved counts and this
+derived all-scheduled denominator, preventing post-hoc failure exclusion.
+
+The wrapper compares every tracked harness byte with the pinned Git tree
+without trusting index hints such as `skip-worktree`, disables Git replacement
+objects, pins the exact tree object, and rejects every filesystem entry outside
+that tree except `.git` and the one selected venv. It fingerprints both the
+complete venv and the external Python base prefix recursively (package code,
+metadata, standard library, `.pth`, `sitecustomize`, binaries and symlink
+targets), then verifies all manifests again after evaluation. Probe and harness
+execution use Python `-I -S` with an explicit attested path, so `.pth` files and
+user-site customizations are recorded but never executed.
+
+The wrapper also checks local image tag-to-digest bindings and requires the
+output directory to be disjoint from every immutable input, using canonical
+filesystem spelling and ancestor identities rather than lexical paths alone.
+Each arm runs in a fresh working directory. An exit-zero harness result is
+rejected unless aggregate and per-instance reports agree on exact IDs, patch
+application, completion, test partitions, empty predictions, and resolution.
+`--dry-run` executes every preflight and writes the immutable plan without
+starting the harness:
+
+```bash
+python3 scripts/run_swebench_quality_official_evaluation.py \
+  --schedule /private/mio-swe-run-v1/private-schedule.json \
+  --generation-layout /private/mio-swe-run-v1/generation \
+  --dataset /private/test-00000-of-00001.parquet \
+  --harness-root /private/SWE-bench-f7bbbb2 \
+  --python-executable /private/SWE-bench-f7bbbb2/.venv311/bin/python \
+  --docker-executable /opt/homebrew/bin/docker \
+  --docker-context colima-swebench-x86 \
+  --image-manifest /private/mio-swe-run-v1/official-images.json \
+  --output-root /private/mio-swe-run-v1/official-evaluation-001 \
+  --dry-run
+```
+
+Remove `--dry-run` only after reviewing that private plan. The wrapper itself
+neither downloads nor pulls; missing dataset, checkout, daemon, image, digest,
+or generation bytes stop before evaluation. Its offline environment is not a
+kernel-enforced network sandbox: the pinned upstream harness currently starts
+containers on Docker's configured network. This remains a reproducibility
+limitation of the non-evidence smoke and must be closed before a confirmatory
+claim. Public stdout contains only hashes and aggregate counts, never patch or
+evaluator text.
+
 `commands` remains a diagnostic printer and requires both `--schedule` and
 `--full-snapshot`. Manually executing its output cannot create the receipt
 required by the confirmatory aggregator. Run IDs are derived from the prediction, dataset,
@@ -287,13 +395,12 @@ preregistration, schedule, timeout, harness commit, and installed
 harness-distribution identities, preventing old harness logs from being reused
 when any evaluated input changes.
 
-The generation runner is intentionally not faked by this adapter. Before the
-full study, it still must provide the container- or checkout-confined tool
-bridge, enforce cumulative token/wall limits, record authoritative gate
-evidence, integrate the attempt ledger, create an `ArmCheckpoint`, and issue a
-verifiable generation receipt. The adapter fails rather than silently
-substituting assistant text, synthetic evidence, or an unisolated host
-repository.
+The non-evidence runner provides a checkout-confined offline tool bridge,
+cumulative token/wall limits, authoritative gate evidence, an integrated
+attempt ledger, `ArmCheckpoint` creation, and a verifiable portable receipt.
+It does not replace the still-blocked confirmatory clean-subprocess and official
+evaluator chain. The adapter fails rather than silently substituting assistant
+text, synthetic evidence, or an unisolated host repository.
 
 ## Resource and feasibility estimate
 
@@ -309,10 +416,14 @@ budget after a non-evidence smoke—not by changing the frozen analysis.
 For evaluation, the official docs recommend x86_64, at least 120 GB free
 storage, 16 GB RAM, and eight CPU cores; arm64 support is described as
 experimental. The current machine has ample host disk and 48 GiB unified
-memory, but it is arm64 and has neither Docker nor `swebench` installed.
-Therefore no confirmatory Docker run was attempted. Use a pinned x86_64 Docker
-host or an approved official cloud harness, then retain the exact harness,
-image, and host identities in the private run seal.
+memory. A dedicated QEMU/Colima profile supplies an eight-CPU, 32 GiB
+`linux/amd64` Docker engine with the two smoke images already pinned by
+repository digest. The official checkout and Python 3.11 environment are also
+prepared outside the repository. The profile is stopped before 27B generation
+to avoid contaminating memory-pressure measurements, then restarted for the
+official smoke evaluation. This makes a local non-evidence evaluation
+possible; it does not remove the confirmatory protocol blockers or make two
+smoke instances representative of all 500 Verified tasks.
 
 ## Interpretation boundary
 

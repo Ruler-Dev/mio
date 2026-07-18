@@ -176,6 +176,7 @@ def _dependencies(
         if fail_run:
             raise protocol.ProtocolError("immutable resume header mismatch")
         assert kwargs["tier_config"] is config.tiers["large"]
+        assert kwargs["require_portable_artifacts"] is True
         assert kwargs["executor"].engine.tier_config is kwargs["tier_config"]
         instance = protocol.PublicInstance.from_mapping(kwargs["schedule_document"]["public_instances"][0])
         assert kwargs["workspace_factory"].source_for(instance).name == "source.git"
@@ -272,7 +273,7 @@ def test_resume_mismatch_fails_closed_before_seal_and_still_unloads(tmp_path: Pa
     schedule = _private_schedule(tmp_path, _instances(commit))
     model = _model_root(tmp_path)
     config_path = _config_path(tmp_path)
-    layout = generation.GenerationLayout.create(tmp_path / "generation")
+    layout = generation.GenerationLayout.create(tmp_path / "generation", portable_artifacts=True)
     config = _config(model)
     managers: list[FakeManager] = []
     calls: list[str] = []
@@ -300,6 +301,43 @@ def test_resume_mismatch_fails_closed_before_seal_and_still_unloads(tmp_path: Pa
 
     assert calls == ["run"]
     assert managers[0].unloaded is True
+
+
+def test_smoke_resume_rejects_legacy_layout_without_mutating_it(tmp_path: Path) -> None:
+    source, commit = _bare_source(tmp_path)
+    schedule = _private_schedule(tmp_path, _instances(commit))
+    model = _model_root(tmp_path)
+    config_path = _config_path(tmp_path)
+    layout = generation.GenerationLayout.create(tmp_path / "legacy-generation")
+    config = _config(model)
+    managers: list[FakeManager] = []
+    calls: list[str] = []
+    deps = _dependencies(
+        config=config,
+        binding=FakeBinding(),
+        managers=managers,
+        calls=calls,
+    )
+
+    with pytest.raises(protocol.ProtocolError, match="legacy smoke layout is non-portable"):
+        smoke.run_smoke(
+            _options(
+                tmp_path=tmp_path,
+                schedule=schedule,
+                source=source,
+                model=model,
+                config_path=config_path,
+                mode="resume",
+                layout=layout.root,
+            ),
+            dependencies=deps,
+        )
+
+    assert managers == []
+    assert calls == []
+    assert not layout.artifact_profile.exists()
+    assert not layout.runtime_manifest.exists()
+    assert not layout.telemetry.exists()
 
 
 def test_repo_mapping_requires_every_repo_once_and_base_commit_present(tmp_path: Path) -> None:

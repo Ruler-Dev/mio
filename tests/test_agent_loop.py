@@ -5,6 +5,8 @@ from __future__ import annotations
 from copy import deepcopy
 from io import StringIO
 from types import SimpleNamespace
+import json
+import subprocess
 
 import pytest
 from rich.console import Console
@@ -1432,6 +1434,328 @@ def test_quality_gate_reprompts_after_edit_until_trusted_validation(
     assert result.quality_gate["decision"] == "pass"
     assert result.quality_gate["mutation_epoch"] == 1
     assert result.quality_gate["validation_counts"]["test"] == 1
+    assert state["quality_gate_pending"] is False
+
+
+def test_post_tool_quality_feedback_is_emitted_once_until_its_signature_changes(
+    monkeypatch,
+    tmp_path,
+):
+    (tmp_path / "stats.py").write_text("VALUE = 1\n", encoding="utf-8")
+    monkeypatch.setattr(
+        agent,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+    monkeypatch.setitem(
+        agent.AGENT_TOOLS,
+        "validate",
+        {
+            "fn": _audited_test_validation,
+            "args": ["argv"],
+            "permission": agent.AgentToolPermission.SHELL,
+        },
+    )
+    engine = _ScriptedEngine(
+        [
+            _tool_call("edit", path="stats.py", old="VALUE = 1", new="VALUE = 2"),
+            _tool_call("read", path="stats.py"),
+            _tool_call("read", path="stats.py"),
+            _tool_call("edit", path="stats.py", old="VALUE = 2", new="VALUE = 3"),
+            _tool_call("validate", argv='["python3", "-m", "pytest", "-q"]'),
+            "The current revision passed its trusted test.",
+        ]
+    )
+    state = _enable_quality_gate(_state(tmp_path))
+
+    result = agent._process_user_input(
+        "Update stats.py twice and validate the final revision.",
+        engine,
+        _Manager(),
+        MioConfig.default(),
+        state,
+    )
+
+    def feedback_count(messages):
+        return sum(
+            message.get("role") == "user"
+            and isinstance(message.get("content"), str)
+            and "Coding-quality gate incomplete" in message["content"]
+            for message in messages
+        )
+
+    assert [feedback_count(request) for request in engine.requests] == [0, 1, 1, 1, 2, 2]
+    assert result.quality_gate is not None
+    assert result.quality_gate["mutation_epoch"] == 2
+    assert result.quality_gate["decision"] == "pass"
+
+
+def test_no_tool_quality_reprompt_is_bounded_once_per_unchanged_signature(
+    monkeypatch,
+    tmp_path,
+):
+    (tmp_path / "stats.py").write_text("VALUE = 1\n", encoding="utf-8")
+    monkeypatch.setattr(
+        agent,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+    engine = _ScriptedEngine(
+        [
+            _tool_call("edit", path="stats.py", old="VALUE = 1", new="VALUE = 2"),
+            "Implemented and complete.",
+            "I still will not validate it.",
+        ]
+    )
+    state = _enable_quality_gate(_state(tmp_path))
+
+    result = agent._process_user_input(
+        "Update stats.py.",
+        engine,
+        _Manager(),
+        MioConfig.default(),
+        state,
+    )
+
+    assert len(engine.requests) == 3
+    assert result.terminal_reason == "quality_incomplete"
+    assert "already reprompted once" in result.assistant_text
+    assert result.quality_gate is not None
+    assert result.quality_gate["decision"] == "incomplete"
+
+
+def test_builtin_reads_defer_quality_resnapshot_until_terminal_refresh(
+    monkeypatch,
+    tmp_path,
+):
+    import mio.coding_quality as coding_quality
+
+    (tmp_path / "note.txt").write_text("stable\n", encoding="utf-8")
+    monkeypatch.setattr(
+        agent,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+    original_snapshot = coding_quality.snapshot_workspaces
+    snapshot_calls = 0
+
+    def counted_snapshot(roots):
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        return original_snapshot(roots)
+
+    monkeypatch.setattr(coding_quality, "snapshot_workspaces", counted_snapshot)
+    engine = _ScriptedEngine(
+        [
+            _tool_call("read", path="note.txt"),
+            _tool_call("read", path="note.txt"),
+            "Inspection complete.",
+        ]
+    )
+    state = _enable_quality_gate(_state(tmp_path))
+
+    result = agent._process_user_input(
+        "Inspect note.txt twice.",
+        engine,
+        _Manager(),
+        MioConfig.default(),
+        state,
+    )
+
+    # Initial snapshot plus the mandatory no-tool and terminal reconciliations;
+    # neither trusted built-in read adds a full snapshot.
+    assert snapshot_calls == 3
+    assert result.terminal_reason == "model_final"
+    assert result.quality_gate is not None
+    assert result.quality_gate["successful_reads"] == 2
+
+
+def test_pending_quality_gate_is_never_reused_across_workspace_roots(
+    monkeypatch,
+    tmp_path,
+):
+    from mio.coding_quality import CodingEffort, CodingQualityGate, snapshot_workspaces
+
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    first_target = first / "module.py"
+    first_target.write_text("VALUE = 1\n", encoding="utf-8")
+    (second / "current.py").write_text("CURRENT = 1\n", encoding="utf-8")
+    old_gate = CodingQualityGate.start([first], "change", effort=CodingEffort.MEDIUM)
+    before = old_gate.before_tool("edit", {"path": "module.py"})
+    first_target.write_text("VALUE = 2\n", encoding="utf-8")
+    old_gate.after_tool(
+        "edit",
+        {"path": "module.py"},
+        before=before,
+        audit_events=(
+            agent.AgentAuditEvent(
+                timestamp=1.0,
+                operation="edit",
+                permission="write",
+                target=str(first_target),
+                allowed=True,
+                outcome="ok",
+            ),
+        ),
+    )
+    expected_second_revision = snapshot_workspaces([second]).revision_sha256
+
+    def forbidden_refresh():
+        raise AssertionError("mismatched pending roots must not be refreshed")
+
+    monkeypatch.setattr(old_gate, "refresh", forbidden_refresh)
+    monkeypatch.setattr(
+        agent,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+    state = _enable_quality_gate(_state(second))
+    state["_quality_gate"] = old_gate
+    state["quality_gate_pending"] = True
+    engine = _ScriptedEngine(["No operation."])
+
+    result = agent._process_user_input(
+        "Continue.",
+        engine,
+        _Manager(),
+        MioConfig.default(),
+        state,
+    )
+
+    assert state.get("_quality_gate") is None
+    assert result.quality_gate is not None
+    assert result.quality_gate["activated"] is False
+    assert result.quality_gate["initial_revision_sha256"] == expected_second_revision
+    assert result.terminal_reason == "model_final"
+    assert len(engine.requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("effort", "validation_argvs"),
+    [
+        ("low", [["python3", "-m", "pytest", "-q", "tests/test_primary.py"]]),
+        ("medium", [["python3", "-m", "pytest", "-q", "tests/test_primary.py"]]),
+        (
+            "high",
+            [
+                ["python3", "-m", "pytest", "-q", "tests/test_primary.py"],
+                ["git", "diff", "--check"],
+            ],
+        ),
+        (
+            "xhigh",
+            [
+                ["python3", "-m", "pytest", "-q", "tests/test_primary.py"],
+                ["ruff", "check", "."],
+                ["git", "diff", "--check"],
+            ],
+        ),
+        (
+            "ultra",
+            [
+                ["python3", "-m", "pytest", "-q", "tests/test_primary.py"],
+                ["python3", "-m", "pytest", "-q", "tests/test_secondary.py"],
+                ["ruff", "check", "."],
+                ["git", "diff", "--check"],
+            ],
+        ),
+    ],
+)
+def test_all_efforts_pass_with_tracked_unchanged_symlink_in_external_git_worktree(
+    monkeypatch,
+    tmp_path,
+    effort,
+    validation_argvs,
+):
+    import mio.coding_quality as coding_quality
+
+    workspace = tmp_path / f"workspace-{effort}"
+    metadata = tmp_path / f"metadata-{effort}"
+    subprocess.run(
+        [
+            "git",
+            "init",
+            "-q",
+            f"--separate-git-dir={metadata}",
+            str(workspace),
+        ],
+        check=True,
+    )
+    (workspace / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (workspace / "module-current.py").symlink_to("module.py")
+    tests_directory = workspace / "tests"
+    tests_directory.mkdir()
+    (tests_directory / "test_primary.py").write_text("def test_primary():\n    assert True\n", encoding="utf-8")
+    (tests_directory / "test_secondary.py").write_text(
+        "def test_secondary():\n    assert True\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "-C", str(workspace), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(workspace),
+            "-c",
+            "user.name=Mio Test",
+            "-c",
+            "user.email=mio@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "tracked symlink fixture",
+        ],
+        check=True,
+    )
+    monkeypatch.setattr(
+        coding_quality,
+        "_run_git",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("external Git metadata unavailable")),
+    )
+    baseline = coding_quality.snapshot_workspaces([workspace])
+    assert baseline.complete is True
+    assert baseline.method == "manifest"
+    assert tuple(item.relative for item in baseline.symlinks) == ("module-current.py",)
+
+    monkeypatch.setattr(
+        agent,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+    monkeypatch.setattr(agent, "_workspace_controls_executable", lambda *_args, **_kwargs: False)
+
+    def successful_validation(argv, **_kwargs):
+        rendered = " ".join(str(value) for value in argv)
+        output = "1 passed in 0.01s" if "pytest" in rendered else "All checks passed!"
+        return agent._BoundedCommandResult(output=output, returncode=0)
+
+    monkeypatch.setattr(agent, "_run_bounded_process", successful_validation)
+    responses = [
+        _tool_call("edit", path="module.py", old="VALUE = 1", new="VALUE = 2"),
+        *[_tool_call("validate", argv=json.dumps(argv)) for argv in validation_argvs],
+        "The edited revision passed every required trusted validation.",
+    ]
+    engine = _ScriptedEngine(responses)
+    state = _enable_quality_gate(_state(workspace), effort=effort)
+
+    result = agent._process_user_input(
+        "Update module.py and validate it.",
+        engine,
+        _Manager(),
+        MioConfig.default(),
+        state,
+    )
+
+    assert (workspace / "module.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+    assert (workspace / "module-current.py").is_symlink()
+    assert result.terminal_reason == "model_final"
+    assert result.quality_gate is not None
+    assert result.quality_gate["decision"] == "pass"
+    assert result.quality_gate["snapshot_complete"] is True
+    assert result.quality_gate["validation_attempts"] == len(validation_argvs)
     assert state["quality_gate_pending"] is False
 
 

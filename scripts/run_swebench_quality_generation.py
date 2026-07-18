@@ -18,6 +18,7 @@ import copy
 import hashlib
 import importlib.metadata
 import json
+import math
 import os
 import platform
 import re
@@ -41,6 +42,11 @@ from scripts import bench_swebench_quality as protocol  # noqa: E402
 GENERATION_SCHEMA = f"{protocol.SCHEMA}.paired-generation-runner.v1"
 GENERATION_RUN_HEADER_SCHEMA = f"{GENERATION_SCHEMA}.run-header"
 GENERATION_RECEIPT_SCHEMA = f"{GENERATION_SCHEMA}.receipt"
+PORTABLE_LAYOUT_PROFILE_SCHEMA = f"{GENERATION_SCHEMA}.portable-layout.v1"
+SEALED_RUNTIME_BINDING_SCHEMA = f"{GENERATION_SCHEMA}.sealed-runtime-binding.v1"
+PAIR_ARTIFACT_BINDING_SCHEMA = f"{GENERATION_SCHEMA}.pair-artifact-binding.v1"
+ARM_TELEMETRY_SCHEMA = f"{GENERATION_SCHEMA}.arm-telemetry.v1"
+TELEMETRY_MANIFEST_SCHEMA = f"{GENERATION_SCHEMA}.telemetry-manifest.v1"
 TOOL_SURFACE = ("bash", "validate", "read", "write", "edit")
 TARGET_CONTEXT_TOKENS = 32_768
 TARGET_MAX_OUTPUT_TOKENS_PER_ROUND = 4_096
@@ -111,6 +117,128 @@ _RUNTIME_ENVIRONMENT_PREFIXES = (
 )
 _DISTRIBUTION_NAME_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\Z")
 _AUTOMATIC_ATTESTATION_SEAL = object()
+_VALIDATED_TELEMETRY_SEAL = object()
+_PORTABLE_LAYOUT_PROFILE = {
+    "schema": PORTABLE_LAYOUT_PROFILE_SCHEMA,
+    "portable_cross_process_artifact_audit": True,
+    "runtime_manifest_required": True,
+    "per_arm_telemetry_required": True,
+    "current_environment_reattestation_is_separate": True,
+}
+_ROUND_TRACE_FIELDS = (
+    "round_index",
+    "prompt_tokens",
+    "completion_tokens",
+    "total_time_s",
+    "prompt_tps",
+    "generation_tps",
+    "generation_backend",
+    "fallback_ar",
+    "prefill_ns",
+    "decode_ns",
+    "model_total_ns",
+    "logical_prompt_tokens",
+    "physical_prefill_tokens",
+    "physical_decode_tokens",
+    "warm_offset",
+    "warm_offset_tokens",
+    "timing_source",
+    "drafter_requested",
+    "drafter_selected",
+    "drafter_ref",
+    "phase_censored",
+    "deadline_hit",
+)
+_TOOL_TRACE_FIELDS = (
+    "sequence",
+    "round_index",
+    "tool_name",
+    "operation",
+    "permission",
+    "allowed",
+    "outcome",
+    "target_sha256",
+    "duration_ns",
+    "effective_timeout_ns",
+    "exit_code_or_signal",
+    "output_chars",
+    "audit_count",
+    "audit_sha256",
+    "timeout_enforced",
+    "telemetry_complete",
+    "effect_unknown",
+)
+_TOOL_NAMES = frozenset((*TOOL_SURFACE, "unknown"))
+_TOOL_OPERATIONS = frozenset((*TOOL_SURFACE, "unknown", "multiple"))
+_TOOL_PERMISSIONS = frozenset({"read", "write", "shell", "network", "none", "multiple"})
+_TOOL_OUTCOMES_BY_NAME = {
+    "bash": frozenset({"ok", "nonzero", "timeout", "output_limit", "denied", "error"}),
+    "validate": frozenset(
+        {
+            "ok",
+            "nonzero",
+            "timeout",
+            "output_limit",
+            "denied",
+            "error",
+            "no_work",
+            "unrecognized",
+            "unscoped",
+            "untrusted_executable",
+        }
+    ),
+    "read": frozenset({"ok", "not_found", "denied", "error", "timeout"}),
+    "write": frozenset({"ok", "denied", "error", "timeout"}),
+    "edit": frozenset({"ok", "not_found", "old_string_not_found", "denied", "error", "timeout"}),
+    "unknown": frozenset({"unrecognized"}),
+}
+_TOOL_PERMISSION_BY_NAME = {
+    "bash": frozenset({"shell"}),
+    "validate": frozenset({"shell"}),
+    "read": frozenset({"read"}),
+    "write": frozenset({"write"}),
+    "edit": frozenset({"read", "write", "multiple"}),
+    "unknown": frozenset({"none"}),
+}
+_TERMINAL_REASONS = frozenset(
+    {
+        "model_final",
+        "model_error",
+        "tool_timeout",
+        "quality_incomplete",
+        "budget_exhausted",
+        "budget_finalization",
+    }
+)
+_BUDGET_EXHAUSTION_KINDS = frozenset(
+    {"none", "wall_time", "completion_tokens", "context_tokens", "model_rounds", "tool_calls", "tool_output"}
+)
+_QUALITY_DECISIONS = frozenset({"not_applicable", "incomplete", "pass"})
+_QUALITY_PHASES = frozenset({"disabled", "observing", "dirty", "validation_failed", "passed", "model_error"})
+_QUALITY_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "ultra"})
+_QUALITY_INTENTS = frozenset({"general", "inspect", "code_change_requested"})
+_QUALITY_OBLIGATIONS = frozenset(
+    {
+        "any_validation",
+        "diff",
+        "test_or_build",
+        "test",
+        "static_or_diff",
+        "static",
+        "review_or_second_distinct_test",
+        "complete_workspace_snapshot",
+    }
+)
+_VALIDATION_KINDS = ("test", "build", "static", "diff", "review")
+_SNAPSHOT_METHODS = frozenset({"git", "manifest", "incomplete"})
+_SNAPSHOT_ERROR_CODES = frozenset({"snapshot_incomplete", "snapshot_limit"})
+_MAX_TOOL_OUTPUT_CHARS = 24_000
+_TOOL_PARENT_OVERHEAD_NS = 5_000_000_000
+# The agent budget is exactly 1,800 seconds.  The outer executor clock also
+# includes Python return/serialization overhead, which is evidence rather than
+# additional model time.  Bound that overhead explicitly instead of making a
+# legitimate deadline outcome impossible to seal.
+_EXECUTOR_WALL_OVERHEAD_NS = 5_000_000_000
 MODEL_INSTRUCTION_TEMPLATE = (
     "Repository: {repo}\n"
     "Base commit: {base_commit}\n\n"
@@ -861,6 +989,1022 @@ class ArmRunRequest:
     seed: int
 
 
+def _exact_keys(raw: Mapping[str, Any], expected: Sequence[str], label: str) -> None:
+    if set(raw) != set(expected):
+        raise protocol.ProtocolError(f"{label} fields differ from the sealed schema")
+
+
+def _nonnegative_integer(value: Any, label: str, *, maximum: int | None = None) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise protocol.ProtocolError(f"{label} must be a non-negative integer")
+    if maximum is not None and value > maximum:
+        raise protocol.ProtocolError(f"{label} exceeds its frozen maximum")
+    return value
+
+
+def _finite_nonnegative_number(value: Any, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise protocol.ProtocolError(f"{label} must be a finite non-negative number")
+    observed = float(value)
+    if not math.isfinite(observed) or observed < 0:
+        raise protocol.ProtocolError(f"{label} must be a finite non-negative number")
+    return observed
+
+
+def _validate_round_trace_record(raw: Mapping[str, Any]) -> dict[str, Any]:
+    _exact_keys(raw, _ROUND_TRACE_FIELDS, "round telemetry")
+    round_index = _nonnegative_integer(raw["round_index"], "round_index", maximum=TARGET_MAX_ROUNDS - 1)
+    prompt_tokens = _nonnegative_integer(raw["prompt_tokens"], "prompt_tokens", maximum=TARGET_CONTEXT_TOKENS)
+    completion_tokens = _nonnegative_integer(
+        raw["completion_tokens"],
+        "completion_tokens",
+        maximum=TARGET_MAX_OUTPUT_TOKENS_PER_ROUND,
+    )
+    logical_prompt_tokens = _nonnegative_integer(
+        raw["logical_prompt_tokens"],
+        "logical_prompt_tokens",
+        maximum=TARGET_CONTEXT_TOKENS,
+    )
+    warm_offset = _nonnegative_integer(raw["warm_offset"], "warm_offset", maximum=logical_prompt_tokens)
+    warm_offset_tokens = _nonnegative_integer(
+        raw["warm_offset_tokens"],
+        "warm_offset_tokens",
+        maximum=logical_prompt_tokens,
+    )
+    physical_prefill_tokens = _nonnegative_integer(raw["physical_prefill_tokens"], "physical_prefill_tokens")
+    physical_decode_tokens = _nonnegative_integer(raw["physical_decode_tokens"], "physical_decode_tokens")
+    prefill_ns = _nonnegative_integer(raw["prefill_ns"], "prefill_ns")
+    decode_ns = _nonnegative_integer(raw["decode_ns"], "decode_ns")
+    model_total_ns = _nonnegative_integer(raw["model_total_ns"], "model_total_ns")
+    total_time_s = _finite_nonnegative_number(raw["total_time_s"], "total_time_s")
+    prompt_tps = _finite_nonnegative_number(raw["prompt_tps"], "prompt_tps")
+    generation_tps = _finite_nonnegative_number(raw["generation_tps"], "generation_tps")
+    if prompt_tokens != logical_prompt_tokens:
+        raise protocol.ProtocolError("round prompt-token aliases disagree")
+    if warm_offset != warm_offset_tokens:
+        raise protocol.ProtocolError("round warm-offset aliases disagree")
+    if physical_prefill_tokens != logical_prompt_tokens - warm_offset:
+        raise protocol.ProtocolError("round physical prefill accounting is inconsistent")
+    if physical_decode_tokens < completion_tokens:
+        raise protocol.ProtocolError("round physical decode work is below delivered completion tokens")
+    if model_total_ns != prefill_ns + decode_ns:
+        raise protocol.ProtocolError("round raw model time differs from prefill plus decode")
+    if model_total_ns > math.ceil(total_time_s * 1_000_000_000):
+        raise protocol.ProtocolError("round raw model time exceeds total model-call time")
+    expected_prompt_tps = logical_prompt_tokens * 1_000_000_000 / prefill_ns if prefill_ns else 0.0
+    expected_generation_tps = physical_decode_tokens * 1_000_000_000 / decode_ns if decode_ns else 0.0
+    if not math.isclose(prompt_tps, expected_prompt_tps, rel_tol=1e-9, abs_tol=1e-9):
+        raise protocol.ProtocolError("round prompt throughput differs from raw token/time accounting")
+    if not math.isclose(generation_tps, expected_generation_tps, rel_tol=1e-9, abs_tol=1e-9):
+        raise protocol.ProtocolError("round generation throughput differs from raw token/time accounting")
+    if logical_prompt_tokens + completion_tokens > TARGET_CONTEXT_TOKENS:
+        raise protocol.ProtocolError("round prompt plus completion exceeds the frozen context")
+    if (
+        raw["generation_backend"] != "baseline"
+        or raw["fallback_ar"] is not False
+        or raw["timing_source"] != "runtime_raw_ns"
+        or raw["drafter_requested"] != "target_ar"
+        or raw["drafter_selected"] != "baseline"
+        or raw["drafter_ref"] is not None
+    ):
+        raise protocol.ProtocolError("round telemetry differs from target_ar/baseline/no-drafter raw timing")
+    if not isinstance(raw["phase_censored"], bool) or not isinstance(raw["deadline_hit"], bool):
+        raise protocol.ProtocolError("round censoring fields must be boolean")
+    if raw["deadline_hit"] and not raw["phase_censored"]:
+        raise protocol.ProtocolError("a round deadline hit must mark phase telemetry censored")
+    return {
+        "round_index": round_index,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_time_s": total_time_s,
+        "prompt_tps": prompt_tps,
+        "generation_tps": generation_tps,
+        "generation_backend": "baseline",
+        "fallback_ar": False,
+        "prefill_ns": prefill_ns,
+        "decode_ns": decode_ns,
+        "model_total_ns": model_total_ns,
+        "logical_prompt_tokens": logical_prompt_tokens,
+        "physical_prefill_tokens": physical_prefill_tokens,
+        "physical_decode_tokens": physical_decode_tokens,
+        "warm_offset": warm_offset,
+        "warm_offset_tokens": warm_offset_tokens,
+        "timing_source": "runtime_raw_ns",
+        "drafter_requested": "target_ar",
+        "drafter_selected": "baseline",
+        "drafter_ref": None,
+        "phase_censored": raw["phase_censored"],
+        "deadline_hit": raw["deadline_hit"],
+    }
+
+
+def _validate_tool_trace_record(raw: Mapping[str, Any]) -> dict[str, Any]:
+    _exact_keys(raw, _TOOL_TRACE_FIELDS, "tool telemetry")
+    sequence = _nonnegative_integer(raw["sequence"], "tool sequence", maximum=protocol.MAX_TOOL_CALLS_PER_ARM - 1)
+    round_index = _nonnegative_integer(raw["round_index"], "tool round_index", maximum=TARGET_MAX_ROUNDS - 1)
+    tool_name = raw["tool_name"]
+    operation = raw["operation"]
+    permission = raw["permission"]
+    outcome = raw["outcome"]
+    if tool_name not in _TOOL_NAMES or operation not in _TOOL_OPERATIONS or permission not in _TOOL_PERMISSIONS:
+        raise protocol.ProtocolError("tool telemetry name, operation, or permission is outside the sealed vocabulary")
+    if operation != tool_name or permission not in _TOOL_PERMISSION_BY_NAME[str(tool_name)]:
+        raise protocol.ProtocolError("tool telemetry name/operation/permission combination is invalid")
+    if outcome not in _TOOL_OUTCOMES_BY_NAME[str(tool_name)]:
+        raise protocol.ProtocolError("tool telemetry name/outcome is outside the sealed vocabulary")
+    if not isinstance(raw["allowed"], bool):
+        raise protocol.ProtocolError("tool allowed must be boolean")
+    for name in ("timeout_enforced", "telemetry_complete", "effect_unknown"):
+        if not isinstance(raw[name], bool):
+            raise protocol.ProtocolError(f"tool {name} must be boolean")
+    target_sha256 = raw["target_sha256"]
+    audit_sha256 = raw["audit_sha256"]
+    if not isinstance(target_sha256, str):
+        raise protocol.ProtocolError("tool target_sha256 is malformed")
+    _require_sha256(target_sha256, "tool target digest")
+    if not isinstance(audit_sha256, str):
+        raise protocol.ProtocolError("tool audit_sha256 is malformed")
+    _require_sha256(audit_sha256, "tool audit digest")
+    duration_ns = _nonnegative_integer(raw["duration_ns"], "tool duration_ns")
+    timeout_ns = raw["effective_timeout_ns"]
+    if timeout_ns is not None:
+        timeout_ns = _nonnegative_integer(timeout_ns, "tool effective timeout ns")
+        if timeout_ns == 0:
+            raise protocol.ProtocolError("known tool effective timeout must be positive")
+    if tool_name != "unknown" and timeout_ns is None:
+        raise protocol.ProtocolError("known tool telemetry lacks its effective timeout")
+    maximum_timeout_ns = int(
+        (FROZEN_COMMAND_TIMEOUT_SECONDS if tool_name in {"bash", "validate"} else 30.0) * 1_000_000_000
+    )
+    if timeout_ns is not None and timeout_ns > maximum_timeout_ns:
+        raise protocol.ProtocolError("tool effective timeout exceeds the frozen bound")
+    denied_outcomes = {"denied", "unrecognized", "unscoped", "untrusted_executable"}
+    if (raw["allowed"] and outcome in denied_outcomes) or (not raw["allowed"] and outcome not in denied_outcomes):
+        raise protocol.ProtocolError("tool allowed flag and outcome are inconsistent")
+    if tool_name == "unknown":
+        if (
+            raw["allowed"] is not False
+            or outcome != "unrecognized"
+            or timeout_ns is not None
+            or duration_ns > _TOOL_PARENT_OVERHEAD_NS
+            or raw["timeout_enforced"]
+            or not raw["telemetry_complete"]
+            or raw["effect_unknown"]
+        ):
+            raise protocol.ProtocolError("unknown tool telemetry must use the bounded denied sentinel")
+    else:
+        if outcome == "timeout":
+            if timeout_ns is None or not (timeout_ns <= duration_ns <= timeout_ns + _TOOL_PARENT_OVERHEAD_NS):
+                raise protocol.ProtocolError("tool timeout duration is outside its frozen bound")
+        elif timeout_ns is not None and duration_ns > timeout_ns + _TOOL_PARENT_OVERHEAD_NS:
+            raise protocol.ProtocolError("non-timeout tool duration exceeds its effective timeout plus parent bound")
+        if tool_name in {"bash", "validate"}:
+            if raw["timeout_enforced"]:
+                raise protocol.ProtocolError("command tool cannot claim a full-invocation watchdog")
+            if not raw["telemetry_complete"] or raw["effect_unknown"]:
+                raise protocol.ProtocolError("command tool telemetry must be complete with known effect")
+        else:
+            if not raw["timeout_enforced"]:
+                raise protocol.ProtocolError("file tool telemetry must attest its terminable watchdog")
+            incomplete_timeout = outcome == "timeout" and raw["effect_unknown"] and not raw["telemetry_complete"]
+            if not raw["telemetry_complete"] and not incomplete_timeout:
+                raise protocol.ProtocolError("incomplete file telemetry is allowed only for an unknown-effect timeout")
+            if raw["effect_unknown"] != incomplete_timeout:
+                raise protocol.ProtocolError("file tool effect_unknown disagrees with terminal timeout telemetry")
+    exit_value = raw["exit_code_or_signal"]
+    valid_exit = (
+        exit_value is None
+        or (isinstance(exit_value, int) and not isinstance(exit_value, bool) and -64 <= exit_value <= 255)
+        or (
+            isinstance(exit_value, str)
+            and exit_value.startswith("signal:")
+            and exit_value.removeprefix("signal:").isdigit()
+            and 1 <= int(exit_value.removeprefix("signal:")) <= 64
+        )
+    )
+    if not valid_exit:
+        raise protocol.ProtocolError("tool exit_code_or_signal is malformed")
+    if tool_name in {"read", "write", "edit", "unknown"} and exit_value is not None:
+        raise protocol.ProtocolError("file and unknown tool telemetry cannot carry a process exit status")
+    if outcome in denied_outcomes | {"error"} and exit_value is not None:
+        raise protocol.ProtocolError("denied or error tool telemetry cannot carry a process exit status")
+    if tool_name in {"bash", "validate"} and outcome in {"ok", "no_work"} and exit_value != 0:
+        raise protocol.ProtocolError("successful command telemetry must record exit code zero")
+    if outcome == "nonzero" and not (
+        (isinstance(exit_value, int) and not isinstance(exit_value, bool) and exit_value != 0)
+        or (isinstance(exit_value, str) and exit_value.startswith("signal:"))
+    ):
+        raise protocol.ProtocolError("nonzero command telemetry lacks a nonzero exit status")
+    output_chars = _nonnegative_integer(raw["output_chars"], "tool output chars", maximum=_MAX_TOOL_OUTPUT_CHARS)
+    audit_count = _nonnegative_integer(raw["audit_count"], "tool audit count")
+    if (tool_name == "unknown" and audit_count != 0) or (tool_name != "unknown" and audit_count < 1):
+        raise protocol.ProtocolError("tool audit_count is inconsistent with dispatcher admission")
+    return {
+        "sequence": sequence,
+        "round_index": round_index,
+        "tool_name": str(tool_name),
+        "operation": str(operation),
+        "permission": str(permission),
+        "allowed": raw["allowed"],
+        "outcome": str(outcome),
+        "target_sha256": target_sha256,
+        "duration_ns": duration_ns,
+        "effective_timeout_ns": timeout_ns,
+        "exit_code_or_signal": exit_value,
+        "output_chars": output_chars,
+        "audit_count": audit_count,
+        "audit_sha256": audit_sha256,
+        "timeout_enforced": raw["timeout_enforced"],
+        "telemetry_complete": raw["telemetry_complete"],
+        "effect_unknown": raw["effect_unknown"],
+    }
+
+
+def _budget_exhaustion_kind(value: Any, terminal_reason: str) -> str:
+    if value is None:
+        if terminal_reason in {"budget_exhausted", "budget_finalization"}:
+            raise protocol.ProtocolError("budget terminal reason lacks an exhaustion classification")
+        return "none"
+    if not isinstance(value, str) or terminal_reason not in {
+        "budget_exhausted",
+        "budget_finalization",
+        "quality_incomplete",
+    }:
+        raise protocol.ProtocolError("budget exhaustion detail disagrees with terminal reason")
+    patterns = (
+        (r"wall time limit 1800(?:\.0+)?s reached", "wall_time"),
+        (rf"completion token limit {protocol.MAX_OUTPUT_TOKENS_PER_ARM} reached", "completion_tokens"),
+        (rf"context token limit {TARGET_CONTEXT_TOKENS} reached", "context_tokens"),
+        (rf"model round limit {TARGET_MAX_ROUNDS} reached", "model_rounds"),
+        (rf"tool call limit {protocol.MAX_TOOL_CALLS_PER_ARM} reached", "tool_calls"),
+        (r"tool result limit 100000 characters reached", "tool_output"),
+    )
+    for pattern, kind in patterns:
+        if re.fullmatch(pattern, value):
+            return kind
+    raise protocol.ProtocolError("budget exhaustion detail is outside the sealed vocabulary")
+
+
+def _validate_snapshot_observation(raw: Mapping[str, Any]) -> dict[str, Any]:
+    expected = {"revision_sha256", "complete", "method", "error_codes"}
+    if not isinstance(raw, Mapping) or set(raw) != expected:
+        raise protocol.ProtocolError("quality snapshot observation fields are invalid")
+    revision = raw["revision_sha256"]
+    if not isinstance(revision, str):
+        raise protocol.ProtocolError("quality snapshot revision is malformed")
+    _require_sha256(revision, "quality snapshot revision")
+    complete = raw["complete"]
+    method = raw["method"]
+    errors = raw["error_codes"]
+    if not isinstance(complete, bool) or not isinstance(method, str) or not isinstance(errors, list):
+        raise protocol.ProtocolError("quality snapshot status is malformed")
+    methods = method.split("+")
+    if not methods or len(methods) > 8 or any(item not in _SNAPSHOT_METHODS for item in methods):
+        raise protocol.ProtocolError("quality snapshot method is outside the sealed vocabulary")
+    if (
+        len(errors) != len(set(errors))
+        or errors != sorted(errors)
+        or any(item not in _SNAPSHOT_ERROR_CODES for item in errors)
+    ):
+        raise protocol.ProtocolError("quality snapshot error codes are outside the sealed vocabulary")
+    if complete and ("incomplete" in methods or errors):
+        raise protocol.ProtocolError("complete quality snapshot carries an incomplete method or error")
+    if not complete and ("incomplete" not in methods or not errors):
+        raise protocol.ProtocolError("incomplete quality snapshot lacks a method/error attestation")
+    return {
+        "revision_sha256": revision,
+        "complete": complete,
+        "method": method,
+        "error_codes": errors,
+    }
+
+
+def _validate_quality_gate_report(
+    raw: Any,
+    *,
+    quality_gate_enabled: bool,
+) -> dict[str, Any]:
+    zero_counts = {name: 0 for name in _VALIDATION_KINDS}
+    if not quality_gate_enabled:
+        if raw is not None:
+            raise protocol.ProtocolError("gate_off arm unexpectedly carries a quality-gate report")
+        return {
+            "enabled": False,
+            "effort": "not_applicable",
+            "intent": "not_applicable",
+            "decision": "not_applicable",
+            "status": "not_applicable",
+            "phase": "experiment_disabled",
+            "activated": False,
+            "satisfied": True,
+            "mutation_epoch": 0,
+            "request_sha256": None,
+            "initial_revision_sha256": None,
+            "current_revision_sha256": None,
+            "snapshot": None,
+            "changed_kinds": [],
+            "required": [],
+            "missing": [],
+            "validation_counts": zero_counts,
+            "validation_attempts": 0,
+            "successful_reads": 0,
+        }
+    expected_keys = {
+        "schema",
+        "enabled",
+        "effort",
+        "intent",
+        "request_sha256",
+        "decision",
+        "phase",
+        "activated",
+        "satisfied",
+        "mutation_epoch",
+        "changed_kinds",
+        "snapshot_complete",
+        "snapshot_method",
+        "snapshot_error_codes",
+        "initial_revision_sha256",
+        "current_revision_sha256",
+        "required",
+        "missing",
+        "validation_counts",
+        "validation_attempts",
+        "successful_reads",
+    }
+    if not isinstance(raw, Mapping) or set(raw) != expected_keys:
+        raise protocol.ProtocolError("gate_on quality report fields differ from the sealed schema")
+    if raw.get("schema") != "mio.coding-quality-gate.v1" or raw.get("enabled") is not True:
+        raise protocol.ProtocolError("gate_on quality report schema or enabled flag is invalid")
+    effort = raw["effort"]
+    intent = raw["intent"]
+    decision = raw["decision"]
+    phase = raw["phase"]
+    if effort != "medium" or effort not in _QUALITY_EFFORTS or intent not in _QUALITY_INTENTS:
+        raise protocol.ProtocolError("quality effort or intent differs from the frozen experiment")
+    if decision not in _QUALITY_DECISIONS or phase not in _QUALITY_PHASES:
+        raise protocol.ProtocolError("quality decision or phase is outside the sealed vocabulary")
+    for name in ("activated", "satisfied", "snapshot_complete"):
+        if not isinstance(raw[name], bool):
+            raise protocol.ProtocolError(f"quality {name} must be boolean")
+    mutation_epoch = _nonnegative_integer(raw["mutation_epoch"], "quality mutation_epoch", maximum=128)
+    request_sha256 = raw["request_sha256"]
+    initial_revision = raw["initial_revision_sha256"]
+    current_revision = raw["current_revision_sha256"]
+    for value, label in (
+        (request_sha256, "quality request digest"),
+        (initial_revision, "quality initial revision"),
+        (current_revision, "quality current revision"),
+    ):
+        if not isinstance(value, str):
+            raise protocol.ProtocolError(f"{label} is malformed")
+        _require_sha256(value, label)
+    changed_kinds = raw["changed_kinds"]
+    if (
+        not isinstance(changed_kinds, list)
+        or changed_kinds != sorted(set(changed_kinds))
+        or any(item not in {"code", "docs"} for item in changed_kinds)
+    ):
+        raise protocol.ProtocolError("quality changed_kinds is outside the sealed vocabulary")
+    required = raw["required"]
+    missing = raw["missing"]
+    if not isinstance(required, list) or not isinstance(missing, list):
+        raise protocol.ProtocolError("quality obligations must be lists")
+    if (
+        required != list(dict.fromkeys(required))
+        or missing != list(dict.fromkeys(missing))
+        or any(item not in _QUALITY_OBLIGATIONS for item in (*required, *missing))
+        or not set(missing).issubset(set(required) | {"complete_workspace_snapshot"})
+    ):
+        raise protocol.ProtocolError("quality obligations are outside the sealed vocabulary or inconsistent")
+    counts = raw["validation_counts"]
+    if not isinstance(counts, Mapping) or set(counts) != set(_VALIDATION_KINDS):
+        raise protocol.ProtocolError("quality validation counts have the wrong schema")
+    validation_counts = {
+        name: _nonnegative_integer(counts[name], f"quality {name} validations", maximum=protocol.MAX_TOOL_CALLS_PER_ARM)
+        for name in _VALIDATION_KINDS
+    }
+    validation_attempts = _nonnegative_integer(
+        raw["validation_attempts"],
+        "quality validation attempts",
+        maximum=protocol.MAX_TOOL_CALLS_PER_ARM,
+    )
+    if sum(validation_counts.values()) > validation_attempts:
+        raise protocol.ProtocolError("quality successful validation counts exceed attempts")
+    successful_reads = _nonnegative_integer(
+        raw["successful_reads"],
+        "quality successful reads",
+        maximum=protocol.MAX_TOOL_CALLS_PER_ARM,
+    )
+    snapshot = _validate_snapshot_observation(
+        {
+            "revision_sha256": current_revision,
+            "complete": raw["snapshot_complete"],
+            "method": raw["snapshot_method"],
+            "error_codes": raw["snapshot_error_codes"],
+        }
+    )
+    activated = raw["activated"]
+    satisfied = raw["satisfied"]
+    if not activated:
+        if decision != "not_applicable" or not satisfied or phase != "observing" or mutation_epoch != 0:
+            raise protocol.ProtocolError("observing quality report semantics are inconsistent")
+        if required or missing or changed_kinds:
+            raise protocol.ProtocolError("unactivated quality report cannot carry obligations or mutations")
+        if initial_revision != current_revision:
+            raise protocol.ProtocolError("observing quality report changed revision without activation")
+    elif decision == "pass":
+        if (
+            not satisfied
+            or phase != "passed"
+            or missing
+            or not snapshot["complete"]
+            or mutation_epoch == 0
+            or not changed_kinds
+        ):
+            raise protocol.ProtocolError("passing quality report semantics are inconsistent")
+    elif decision == "incomplete":
+        if (
+            satisfied
+            or phase not in {"dirty", "validation_failed"}
+            or not missing
+            or mutation_epoch == 0
+            or not changed_kinds
+        ):
+            raise protocol.ProtocolError("incomplete quality report semantics are inconsistent")
+    else:
+        raise protocol.ProtocolError("activated quality report cannot be not_applicable")
+    if activated:
+        expected_required = ["diff"] if changed_kinds == ["docs"] else ["test_or_build"]
+        expected_missing = []
+        if expected_required == ["diff"] and validation_counts["diff"] == 0:
+            expected_missing.append("diff")
+        if expected_required == ["test_or_build"] and not (validation_counts["test"] or validation_counts["build"]):
+            expected_missing.append("test_or_build")
+        if not snapshot["complete"]:
+            expected_missing.append("complete_workspace_snapshot")
+        if list(required) != expected_required or list(missing) != expected_missing:
+            raise protocol.ProtocolError("quality decision is not derivable from its obligations and evidence counts")
+    return {
+        "enabled": True,
+        "effort": effort,
+        "intent": intent,
+        "decision": decision,
+        "status": decision,
+        "phase": phase,
+        "activated": activated,
+        "satisfied": satisfied,
+        "mutation_epoch": mutation_epoch,
+        "request_sha256": request_sha256,
+        "initial_revision_sha256": initial_revision,
+        "current_revision_sha256": current_revision,
+        "snapshot": snapshot,
+        "changed_kinds": list(changed_kinds),
+        "required": list(required),
+        "missing": list(missing),
+        "validation_counts": validation_counts,
+        "validation_attempts": validation_attempts,
+        "successful_reads": successful_reads,
+    }
+
+
+def _validate_normalized_quality_document(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the exact content-free Quality document persisted in a sidecar."""
+
+    expected = {
+        "enabled",
+        "effort",
+        "intent",
+        "decision",
+        "status",
+        "phase",
+        "activated",
+        "satisfied",
+        "mutation_epoch",
+        "request_sha256",
+        "initial_revision_sha256",
+        "current_revision_sha256",
+        "snapshot",
+        "changed_kinds",
+        "required",
+        "missing",
+        "validation_counts",
+        "validation_attempts",
+        "successful_reads",
+    }
+    if not isinstance(raw, Mapping) or set(raw) != expected or not isinstance(raw.get("enabled"), bool):
+        raise protocol.ProtocolError("normalized quality document fields are invalid")
+    if raw["enabled"] is False:
+        expected_disabled = {
+            "enabled": False,
+            "effort": "not_applicable",
+            "intent": "not_applicable",
+            "decision": "not_applicable",
+            "status": "not_applicable",
+            "phase": "experiment_disabled",
+            "activated": False,
+            "satisfied": True,
+            "mutation_epoch": 0,
+            "request_sha256": None,
+            "initial_revision_sha256": None,
+            "current_revision_sha256": None,
+            "snapshot": None,
+            "changed_kinds": [],
+            "required": [],
+            "missing": [],
+            "validation_counts": {name: 0 for name in _VALIDATION_KINDS},
+            "validation_attempts": 0,
+            "successful_reads": 0,
+        }
+        if dict(raw) != expected_disabled:
+            raise protocol.ProtocolError("disabled quality document differs from its sealed sentinel")
+        return expected_disabled
+
+    # A model exception can occur before the quality tracker returns its normal
+    # revision-bound report.  Preserve that absence as a unique, content-free
+    # terminal sentinel; never fabricate a workspace snapshot or validation.
+    if raw.get("phase") == "model_error":
+        expected_model_error = {
+            "enabled": True,
+            "effort": "medium",
+            "intent": "general",
+            "decision": "incomplete",
+            "status": "incomplete",
+            "phase": "model_error",
+            "activated": False,
+            "satisfied": False,
+            "mutation_epoch": 0,
+            "request_sha256": raw.get("request_sha256"),
+            "initial_revision_sha256": None,
+            "current_revision_sha256": None,
+            "snapshot": None,
+            "changed_kinds": [],
+            "required": [],
+            "missing": [],
+            "validation_counts": {name: 0 for name in _VALIDATION_KINDS},
+            "validation_attempts": 0,
+            "successful_reads": 0,
+        }
+        request_sha256 = raw.get("request_sha256")
+        if not isinstance(request_sha256, str):
+            raise protocol.ProtocolError("model-error quality request digest is malformed")
+        _require_sha256(request_sha256, "model-error quality request digest")
+        if dict(raw) != expected_model_error:
+            raise protocol.ProtocolError("model-error quality document differs from its sealed sentinel")
+        return expected_model_error
+
+    effort = raw["effort"]
+    intent = raw["intent"]
+    decision = raw["decision"]
+    phase = raw["phase"]
+    if effort != "medium" or effort not in _QUALITY_EFFORTS or intent not in _QUALITY_INTENTS:
+        raise protocol.ProtocolError("normalized quality effort or intent is invalid")
+    if decision not in _QUALITY_DECISIONS or raw["status"] != decision or phase not in _QUALITY_PHASES:
+        raise protocol.ProtocolError("normalized quality decision, status, or phase is invalid")
+    if not isinstance(raw["activated"], bool) or not isinstance(raw["satisfied"], bool):
+        raise protocol.ProtocolError("normalized quality booleans are invalid")
+    mutation_epoch = _nonnegative_integer(raw["mutation_epoch"], "quality mutation_epoch", maximum=128)
+    for name in ("request_sha256", "initial_revision_sha256", "current_revision_sha256"):
+        value = raw[name]
+        if not isinstance(value, str):
+            raise protocol.ProtocolError(f"normalized quality {name} is malformed")
+        _require_sha256(value, f"normalized quality {name}")
+    snapshot = _validate_snapshot_observation(raw["snapshot"])
+    if snapshot["revision_sha256"] != raw["current_revision_sha256"]:
+        raise protocol.ProtocolError("normalized quality snapshot revision is inconsistent")
+    changed_kinds = raw["changed_kinds"]
+    if (
+        not isinstance(changed_kinds, list)
+        or changed_kinds != sorted(set(changed_kinds))
+        or any(item not in {"code", "docs"} for item in changed_kinds)
+    ):
+        raise protocol.ProtocolError("normalized quality changed_kinds is invalid")
+    required = raw["required"]
+    missing = raw["missing"]
+    if (
+        not isinstance(required, list)
+        or not isinstance(missing, list)
+        or required != list(dict.fromkeys(required))
+        or missing != list(dict.fromkeys(missing))
+        or any(item not in _QUALITY_OBLIGATIONS for item in (*required, *missing))
+        or not set(missing).issubset(set(required) | {"complete_workspace_snapshot"})
+    ):
+        raise protocol.ProtocolError("normalized quality obligations are invalid")
+    counts = raw["validation_counts"]
+    if not isinstance(counts, Mapping) or set(counts) != set(_VALIDATION_KINDS):
+        raise protocol.ProtocolError("normalized quality validation counts are invalid")
+    validated_counts = {
+        name: _nonnegative_integer(counts[name], f"quality {name} validations", maximum=protocol.MAX_TOOL_CALLS_PER_ARM)
+        for name in _VALIDATION_KINDS
+    }
+    attempts = _nonnegative_integer(
+        raw["validation_attempts"], "quality validation attempts", maximum=protocol.MAX_TOOL_CALLS_PER_ARM
+    )
+    successful_reads = _nonnegative_integer(
+        raw["successful_reads"], "quality successful reads", maximum=protocol.MAX_TOOL_CALLS_PER_ARM
+    )
+    if sum(validated_counts.values()) > attempts:
+        raise protocol.ProtocolError("normalized quality successes exceed validation attempts")
+    activated = raw["activated"]
+    satisfied = raw["satisfied"]
+    if not activated:
+        if (
+            decision != "not_applicable"
+            or not satisfied
+            or phase != "observing"
+            or mutation_epoch != 0
+            or changed_kinds
+            or required
+            or missing
+        ):
+            raise protocol.ProtocolError("normalized observing quality semantics are inconsistent")
+        if raw["initial_revision_sha256"] != raw["current_revision_sha256"]:
+            raise protocol.ProtocolError("normalized observing quality revision changed without activation")
+    elif decision == "pass":
+        if (
+            not satisfied
+            or phase != "passed"
+            or missing
+            or not snapshot["complete"]
+            or mutation_epoch == 0
+            or not changed_kinds
+        ):
+            raise protocol.ProtocolError("normalized passing quality semantics are inconsistent")
+    elif decision == "incomplete":
+        if (
+            satisfied
+            or phase not in {"dirty", "validation_failed"}
+            or not missing
+            or mutation_epoch == 0
+            or not changed_kinds
+        ):
+            raise protocol.ProtocolError("normalized incomplete quality semantics are inconsistent")
+    else:
+        raise protocol.ProtocolError("normalized activated quality decision is inconsistent")
+    if activated:
+        expected_required = ["diff"] if changed_kinds == ["docs"] else ["test_or_build"]
+        expected_missing = []
+        if expected_required == ["diff"] and validated_counts["diff"] == 0:
+            expected_missing.append("diff")
+        if expected_required == ["test_or_build"] and not (validated_counts["test"] or validated_counts["build"]):
+            expected_missing.append("test_or_build")
+        if not snapshot["complete"]:
+            expected_missing.append("complete_workspace_snapshot")
+        if list(required) != expected_required or list(missing) != expected_missing:
+            raise protocol.ProtocolError("normalized quality decision is not derivable from its evidence")
+    return {
+        **dict(raw),
+        "snapshot": snapshot,
+        "validation_counts": validated_counts,
+        "changed_kinds": list(changed_kinds),
+        "required": list(required),
+        "missing": list(missing),
+        "validation_attempts": attempts,
+        "successful_reads": successful_reads,
+    }
+
+
+def _validate_turn_and_topology(
+    raw: Mapping[str, Any],
+    rounds: Sequence[Mapping[str, Any]],
+    tools: Sequence[Mapping[str, Any]],
+    quality: Mapping[str, Any],
+) -> dict[str, Any]:
+    expected = {
+        "terminal_reason",
+        "budget_exhaustion_kind",
+        "trajectory_complete",
+        "counters_observed",
+        "tool_telemetry_complete",
+        "wall_elapsed_ns",
+        "completion_tokens",
+        "tool_calls",
+        "tool_result_chars",
+        "status",
+        "quality_gate_decision",
+    }
+    if not isinstance(raw, Mapping) or set(raw) != expected:
+        raise protocol.ProtocolError("turn telemetry fields differ from the sealed schema")
+    terminal_reason = raw["terminal_reason"]
+    budget_kind = raw["budget_exhaustion_kind"]
+    status = raw["status"]
+    quality_decision = raw["quality_gate_decision"]
+    if terminal_reason not in _TERMINAL_REASONS or budget_kind not in _BUDGET_EXHAUSTION_KINDS:
+        raise protocol.ProtocolError("turn terminal or budget reason is outside the sealed vocabulary")
+    if status not in {"completed", "incomplete", "model_error", "timeout"}:
+        raise protocol.ProtocolError("turn status is outside the sealed vocabulary")
+    if quality_decision not in {"not_applicable", "satisfied", "incomplete"}:
+        raise protocol.ProtocolError("checkpoint quality decision is outside the sealed vocabulary")
+    if any(
+        not isinstance(raw[name], bool)
+        for name in ("trajectory_complete", "counters_observed", "tool_telemetry_complete")
+    ):
+        raise protocol.ProtocolError("turn telemetry-completeness flags must be boolean")
+    wall_ns = _nonnegative_integer(
+        raw["wall_elapsed_ns"],
+        "turn wall_elapsed_ns",
+        maximum=int(protocol.MAX_AGENT_WALL_SECONDS * 1_000_000_000) + _EXECUTOR_WALL_OVERHEAD_NS,
+    )
+    completion_tokens = _nonnegative_integer(
+        raw["completion_tokens"],
+        "turn completion_tokens",
+        maximum=protocol.MAX_OUTPUT_TOKENS_PER_ARM,
+    )
+    tool_calls = _nonnegative_integer(raw["tool_calls"], "turn tool_calls", maximum=protocol.MAX_TOOL_CALLS_PER_ARM)
+    tool_result_chars = _nonnegative_integer(raw["tool_result_chars"], "turn tool_result_chars", maximum=100_000)
+    if completion_tokens != sum(item["completion_tokens"] for item in rounds) or tool_calls != len(tools):
+        raise protocol.ProtocolError("turn token/tool totals differ from raw streams")
+    if raw["trajectory_complete"] and raw["tool_telemetry_complete"] != all(
+        item["telemetry_complete"] for item in tools
+    ):
+        raise protocol.ProtocolError("turn tool_telemetry_complete differs from raw tool traces")
+    if quality["enabled"] and quality["phase"] != "model_error":
+        successful_reads = sum(
+            item["tool_name"] == "read" and item["allowed"] and item["outcome"] == "ok" for item in tools
+        )
+        validate_calls = sum(item["tool_name"] == "validate" for item in tools)
+        successful_validations = sum(
+            item["tool_name"] == "validate" and item["allowed"] and item["outcome"] == "ok" for item in tools
+        )
+        if quality["successful_reads"] != successful_reads:
+            raise protocol.ProtocolError("quality successful-read count differs from admitted tool telemetry")
+        if quality["validation_attempts"] > validate_calls:
+            raise protocol.ProtocolError("quality validation attempts exceed admitted validate tool calls")
+        if sum(quality["validation_counts"].values()) > successful_validations:
+            raise protocol.ProtocolError("quality validation successes exceed successful validate tool traces")
+    round_total_ns = sum(math.ceil(item["total_time_s"] * 1_000_000_000) for item in rounds)
+    tool_total_ns = sum(item["duration_ns"] for item in tools)
+    if round_total_ns + tool_total_ns > wall_ns:
+        raise protocol.ProtocolError("round and tool total durations exceed complete arm wall time")
+    timeout_tools = [item for item in tools if item["outcome"] == "timeout"]
+    deadline_rounds = [item for item in rounds if item["deadline_hit"]]
+    if terminal_reason == "model_error":
+        if (
+            status != "model_error"
+            or rounds
+            or tools
+            or budget_kind != "none"
+            or raw["trajectory_complete"] is not False
+            or raw["counters_observed"] is not False
+            or raw["tool_telemetry_complete"] is not False
+            or (quality["enabled"] and quality["phase"] != "model_error")
+        ):
+            raise protocol.ProtocolError("model_error terminal topology is inconsistent")
+    elif raw["trajectory_complete"] is not True or raw["counters_observed"] is not True:
+        raise protocol.ProtocolError("structured terminal outcome lacks a complete observed trajectory")
+    elif terminal_reason == "tool_timeout":
+        if (
+            status != "timeout"
+            or len(timeout_tools) != 1
+            or timeout_tools[0] is not tools[-1]
+            or timeout_tools[0]["round_index"] != rounds[-1]["round_index"]
+            or deadline_rounds
+        ):
+            raise protocol.ProtocolError("tool_timeout terminal topology is inconsistent")
+    elif timeout_tools:
+        raise protocol.ProtocolError("non-timeout turn contains a tool timeout")
+    if deadline_rounds:
+        if (
+            len(deadline_rounds) != 1
+            or deadline_rounds[0] is not rounds[-1]
+            or terminal_reason not in {"budget_exhausted", "budget_finalization", "quality_incomplete"}
+            or any(item["round_index"] >= rounds[-1]["round_index"] for item in tools)
+        ):
+            raise protocol.ProtocolError("model deadline topology is inconsistent")
+    expected_status = (
+        "model_error"
+        if terminal_reason == "model_error"
+        else (
+            "timeout"
+            if terminal_reason == "tool_timeout"
+            else ("completed" if terminal_reason == "model_final" and quality["satisfied"] else "incomplete")
+        )
+    )
+    expected_quality_decision = (
+        "not_applicable" if not quality["enabled"] else ("satisfied" if quality["satisfied"] else "incomplete")
+    )
+    if status != expected_status or quality_decision != expected_quality_decision:
+        raise protocol.ProtocolError(
+            "turn status or checkpoint quality decision is not derivable from terminal evidence"
+        )
+    if terminal_reason == "model_final" and tools and tools[-1]["round_index"] >= rounds[-1]["round_index"]:
+        raise protocol.ProtocolError("completed model_final must end with a tool-free final round")
+    if (
+        quality["enabled"]
+        and not quality["satisfied"]
+        and terminal_reason not in {"model_error", "quality_incomplete", "tool_timeout"}
+    ):
+        raise protocol.ProtocolError("unsatisfied quality gate must produce quality_incomplete termination")
+    if terminal_reason == "quality_incomplete" and (not quality["enabled"] or quality["satisfied"]):
+        raise protocol.ProtocolError("quality_incomplete termination lacks an unsatisfied gate")
+    if terminal_reason in {"budget_exhausted", "budget_finalization"} and budget_kind == "none":
+        raise protocol.ProtocolError("turn budget classification disagrees with terminal reason")
+    if (
+        terminal_reason not in {"budget_exhausted", "budget_finalization", "quality_incomplete"}
+        and budget_kind != "none"
+    ):
+        raise protocol.ProtocolError("non-budget turn unexpectedly carries a budget classification")
+    if budget_kind == "completion_tokens" and completion_tokens < protocol.MAX_OUTPUT_TOKENS_PER_ARM:
+        raise protocol.ProtocolError("completion-token exhaustion is below its frozen limit")
+    if budget_kind == "context_tokens" and (
+        rounds[-1]["prompt_tokens"] + rounds[-1]["completion_tokens"] < TARGET_CONTEXT_TOKENS
+    ):
+        raise protocol.ProtocolError("context exhaustion is below its frozen limit")
+    if budget_kind == "model_rounds" and len(rounds) != TARGET_MAX_ROUNDS:
+        raise protocol.ProtocolError("model-round exhaustion differs from its frozen limit")
+    if budget_kind == "tool_calls" and tool_calls != protocol.MAX_TOOL_CALLS_PER_ARM:
+        raise protocol.ProtocolError("tool-call exhaustion differs from its frozen limit")
+    if budget_kind == "tool_output" and tool_result_chars != 100_000:
+        raise protocol.ProtocolError("tool-output exhaustion differs from its frozen limit")
+    if budget_kind == "wall_time" and wall_ns < int(protocol.MAX_AGENT_WALL_SECONDS * 1_000_000_000):
+        raise protocol.ProtocolError("wall-time exhaustion is below its frozen limit")
+    return dict(raw)
+
+
+@dataclass(frozen=True)
+class ValidatedArmTelemetry:
+    """Canonical content-free traces admitted only by the native executor."""
+
+    payload: bytes = field(repr=False)
+    _seal: object = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._seal is not _VALIDATED_TELEMETRY_SEAL:
+            raise protocol.ProtocolError("arm telemetry must be validated by the native executor")
+        try:
+            raw = json.loads(self.payload)
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise protocol.ProtocolError("validated arm telemetry is not JSON") from exc
+        if protocol.canonical_json_bytes(raw) != self.payload or set(raw) != {
+            "turn",
+            "quality_gate",
+            "rounds",
+            "tools",
+        }:
+            raise protocol.ProtocolError("validated arm telemetry is not canonical")
+        self._validated_document(raw)
+
+    @staticmethod
+    def _validated_document(
+        raw: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any], tuple[dict[str, Any], ...], tuple[dict[str, Any], ...]]:
+        raw_rounds = raw.get("rounds")
+        raw_tools = raw.get("tools")
+        if not isinstance(raw_rounds, list):
+            raise protocol.ProtocolError("arm round telemetry must be a list")
+        if not isinstance(raw_tools, list):
+            raise protocol.ProtocolError("arm tool telemetry must be a list")
+        rounds = tuple(_validate_round_trace_record(item) for item in raw_rounds)
+        tools = tuple(_validate_tool_trace_record(item) for item in raw_tools)
+        if tuple(item["round_index"] for item in rounds) != tuple(range(len(rounds))):
+            raise protocol.ProtocolError("round telemetry indices must be contiguous and ordered")
+        if tuple(item["sequence"] for item in tools) != tuple(range(len(tools))):
+            raise protocol.ProtocolError("tool telemetry sequence must be contiguous and ordered")
+        tool_rounds = tuple(item["round_index"] for item in tools)
+        if any(index >= len(rounds) for index in tool_rounds) or tool_rounds != tuple(sorted(tool_rounds)):
+            raise protocol.ProtocolError("tool telemetry round references are invalid or reordered")
+        quality = raw.get("quality_gate")
+        turn = raw.get("turn")
+        if not isinstance(quality, Mapping) or not isinstance(turn, Mapping):
+            raise protocol.ProtocolError("turn or quality telemetry is malformed")
+        validated_quality = _validate_normalized_quality_document(quality)
+        validated_turn = _validate_turn_and_topology(turn, rounds, tools, validated_quality)
+        return validated_turn, validated_quality, rounds, tools
+
+    @classmethod
+    def from_result(
+        cls,
+        result: Any,
+        *,
+        quality_gate_enabled: bool,
+        wall_elapsed_s: float,
+    ) -> "ValidatedArmTelemetry":
+        rounds = [{name: getattr(trace, name, None) for name in _ROUND_TRACE_FIELDS} for trace in result.rounds]
+        tools = [{name: getattr(trace, name, None) for name in _TOOL_TRACE_FIELDS} for trace in result.tool_events]
+        validated_rounds = tuple(_validate_round_trace_record(item) for item in rounds)
+        validated_tools = tuple(_validate_tool_trace_record(item) for item in tools)
+        quality = _validate_quality_gate_report(
+            getattr(result, "quality_gate", None),
+            quality_gate_enabled=quality_gate_enabled,
+        )
+        terminal_reason = getattr(result, "terminal_reason", None)
+        if terminal_reason not in _TERMINAL_REASONS:
+            raise protocol.ProtocolError("agent terminal reason is outside the sealed vocabulary")
+        reported_wall_seconds = _finite_nonnegative_number(getattr(result, "wall_time_s", None), "agent wall time")
+        wall_seconds = _finite_nonnegative_number(wall_elapsed_s, "complete executor wall time")
+        if reported_wall_seconds > wall_seconds:
+            raise protocol.ProtocolError("agent-reported wall time exceeds complete executor wall time")
+        wall_ns = math.ceil(wall_seconds * 1_000_000_000)
+        budget_kind = _budget_exhaustion_kind(getattr(result, "budget_exhaustion", None), terminal_reason)
+        status = (
+            "timeout"
+            if terminal_reason == "tool_timeout"
+            else ("completed" if terminal_reason == "model_final" and quality["satisfied"] else "incomplete")
+        )
+        quality_decision = (
+            "not_applicable" if not quality_gate_enabled else ("satisfied" if quality["satisfied"] else "incomplete")
+        )
+        turn = {
+            "terminal_reason": terminal_reason,
+            "budget_exhaustion_kind": budget_kind,
+            "trajectory_complete": True,
+            "counters_observed": True,
+            "tool_telemetry_complete": getattr(result, "tool_telemetry_complete", None),
+            "wall_elapsed_ns": wall_ns,
+            "completion_tokens": getattr(result, "completion_tokens", None),
+            "tool_calls": getattr(result, "tool_calls", None),
+            "tool_result_chars": getattr(result, "tool_result_chars", None),
+            "status": status,
+            "quality_gate_decision": quality_decision,
+        }
+        validated_turn = _validate_turn_and_topology(turn, validated_rounds, validated_tools, quality)
+        return cls(
+            payload=protocol.canonical_json_bytes(
+                {
+                    "turn": validated_turn,
+                    "quality_gate": quality,
+                    "rounds": list(validated_rounds),
+                    "tools": list(validated_tools),
+                }
+            ),
+            _seal=_VALIDATED_TELEMETRY_SEAL,
+        )
+
+    @classmethod
+    def for_model_error(
+        cls,
+        *,
+        quality_gate_enabled: bool,
+        request_sha256: str,
+        wall_elapsed_s: float,
+    ) -> "ValidatedArmTelemetry":
+        """Seal a content-free terminal record when model execution raises.
+
+        This constructor is intentionally separate from ``from_result``: no
+        round, tool, quality snapshot, or token counter is invented after an
+        unstructured model exception.
+        """
+
+        _require_sha256(request_sha256, "model-error request digest")
+        wall_seconds = _finite_nonnegative_number(wall_elapsed_s, "complete executor wall time")
+        wall_ns = math.ceil(wall_seconds * 1_000_000_000)
+        if quality_gate_enabled:
+            quality = {
+                "enabled": True,
+                "effort": "medium",
+                "intent": "general",
+                "decision": "incomplete",
+                "status": "incomplete",
+                "phase": "model_error",
+                "activated": False,
+                "satisfied": False,
+                "mutation_epoch": 0,
+                "request_sha256": request_sha256,
+                "initial_revision_sha256": None,
+                "current_revision_sha256": None,
+                "snapshot": None,
+                "changed_kinds": [],
+                "required": [],
+                "missing": [],
+                "validation_counts": {name: 0 for name in _VALIDATION_KINDS},
+                "validation_attempts": 0,
+                "successful_reads": 0,
+            }
+        else:
+            quality = _validate_quality_gate_report(None, quality_gate_enabled=False)
+        turn = {
+            "terminal_reason": "model_error",
+            "budget_exhaustion_kind": "none",
+            "trajectory_complete": False,
+            "counters_observed": False,
+            "tool_telemetry_complete": False,
+            "wall_elapsed_ns": wall_ns,
+            "completion_tokens": 0,
+            "tool_calls": 0,
+            "tool_result_chars": 0,
+            "status": "model_error",
+            "quality_gate_decision": "incomplete" if quality_gate_enabled else "not_applicable",
+        }
+        validated_quality = _validate_normalized_quality_document(quality)
+        validated_turn = _validate_turn_and_topology(turn, (), (), validated_quality)
+        return cls(
+            payload=protocol.canonical_json_bytes(
+                {
+                    "turn": validated_turn,
+                    "quality_gate": validated_quality,
+                    "rounds": [],
+                    "tools": [],
+                }
+            ),
+            _seal=_VALIDATED_TELEMETRY_SEAL,
+        )
+
+    def document(
+        self,
+    ) -> tuple[dict[str, Any], dict[str, Any], tuple[dict[str, Any], ...], tuple[dict[str, Any], ...]]:
+        return self._validated_document(json.loads(self.payload))
+
+
 @dataclass(frozen=True)
 class ArmRunOutcome:
     """Content-free terminal outcome returned by an executor."""
@@ -870,6 +2014,7 @@ class ArmRunOutcome:
     output_tokens: int = 0
     tool_calls: int = 0
     wall_seconds: float = 0.0
+    telemetry: ValidatedArmTelemetry | None = field(default=None, repr=False, compare=False)
 
 
 class ArmExecutor(Protocol):
@@ -1040,6 +2185,7 @@ def build_run_header(
     executor: ArmExecutor,
     workspace_factory: WorkspaceFactory,
     tier_config: Any,
+    sealed_runtime_manifest: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Bind smoke execution inputs before the first pair is admitted.
 
@@ -1050,6 +2196,33 @@ def build_run_header(
     """
 
     factor = factor_document(tool_surface_sha256)
+    if sealed_runtime_manifest is None:
+        artifact_audit = {
+            "portable": False,
+            "status": "legacy_or_dependency_injected_layout_without_persisted_runtime_and_telemetry",
+            "cross_process_verifiable": False,
+            "current_environment_reattestation_is_separate": True,
+        }
+    else:
+        if binding.binding_source != AUTOMATIC_BINDING_SOURCE:
+            raise protocol.ProtocolError("portable artifact audit requires an automatic generation binding")
+        if sealed_runtime_manifest.get("sha256") != binding.runtime_digest:
+            raise protocol.ProtocolError("run header runtime manifest differs from the generation binding")
+        artifact_audit = {
+            "portable": True,
+            "status": "sealed_original_artifacts_cross_process_verifiable",
+            "cross_process_verifiable": True,
+            "current_environment_reattestation_is_separate": True,
+            "runtime_manifest": dict(sealed_runtime_manifest),
+            "arm_telemetry_schema": ARM_TELEMETRY_SCHEMA,
+            "telemetry_manifest_schema": TELEMETRY_MANIFEST_SCHEMA,
+            "content_free_telemetry": True,
+        }
+    loaded_target_binding = _executor_model_binding_document(binding, executor, tier_config)
+    if sealed_runtime_manifest is not None:
+        if loaded_target_binding.get("raw_target_telemetry_required") is not True:
+            raise protocol.ProtocolError("portable run header requires native raw target telemetry")
+        loaded_target_binding["raw_target_telemetry_receipt_bound"] = True
     return {
         "schema": GENERATION_RUN_HEADER_SCHEMA,
         "evidence_class": str(schedule_document["evidence_class"]),
@@ -1061,13 +2234,14 @@ def build_run_header(
         "dataset_public_snapshot_sha256": str(schedule_document["dataset_public_snapshot_sha256"]),
         "generation_binding": binding.as_dict(),
         "generation_binding_attestation": binding.attestation_dict(),
-        "loaded_target_binding": _executor_model_binding_document(binding, executor, tier_config),
+        "loaded_target_binding": loaded_target_binding,
         "tool_surface_sha256": tool_surface_sha256,
         "factor_sha256": protocol.sha256_bytes(protocol.canonical_json_bytes(factor)),
         "factor": factor,
         "runner_source_sha256": protocol.sha256_file(Path(__file__)),
         "executor": _implementation_identity(executor),
         "workspace_factory": _implementation_identity(workspace_factory),
+        "sealed_artifact_audit": artifact_audit,
     }
 
 
@@ -1188,9 +2362,13 @@ class GenerationLayout:
     root: Path
     attempts: Path
     canonical: Path
+    telemetry: Path
     ledger: Path
     run_header: Path
+    runtime_manifest: Path
+    artifact_profile: Path
     receipt: Path
+    portable_artifacts: bool
 
     def validated(self) -> "GenerationLayout":
         root = protocol.require_private_directory(self.root)
@@ -1198,9 +2376,29 @@ class GenerationLayout:
         canonical = protocol.require_private_directory(self.canonical)
         if attempts.parent != root or canonical.parent != root:
             raise protocol.ProtocolError("generation layout directories must be direct private children")
+        if not isinstance(self.portable_artifacts, bool):
+            raise protocol.ProtocolError("generation layout portability flag must be boolean")
+        if self.portable_artifacts:
+            telemetry = protocol.require_private_directory(self.telemetry)
+            if telemetry.parent != root:
+                raise protocol.ProtocolError("telemetry directory must be a direct private layout child")
+            profile_payload = protocol._read_immutable_file(self.artifact_profile)
+            assert profile_payload is not None
+            try:
+                profile = json.loads(profile_payload)
+            except (UnicodeDecodeError, ValueError) as exc:
+                raise protocol.ProtocolError("portable layout profile is not valid JSON") from exc
+            if profile != _PORTABLE_LAYOUT_PROFILE or protocol.canonical_json_bytes(profile) != profile_payload:
+                raise protocol.ProtocolError("portable layout profile differs from the sealed schema")
+        else:
+            telemetry = self.telemetry.absolute()
+            if any(os.path.lexists(path) for path in (self.telemetry, self.runtime_manifest, self.artifact_profile)):
+                raise protocol.ProtocolError("legacy layout contains an ambiguous portable-artifact marker")
         for path, label in (
             (self.ledger, "attempt ledger"),
             (self.run_header, "run header"),
+            (self.runtime_manifest, "runtime manifest"),
+            (self.artifact_profile, "portable layout profile"),
             (self.receipt, "generation receipt"),
         ):
             if path.absolute().parent.resolve(strict=True) != root:
@@ -1210,48 +2408,81 @@ class GenerationLayout:
         if (
             self.ledger.name != "pair-attempt-ledger.jsonl"
             or self.run_header.name != "generation-run-header.json"
+            or self.runtime_manifest.name != "sealed-runtime-manifest.json"
+            or self.artifact_profile.name != "portable-layout-profile.json"
             or self.receipt.name != "generation-receipt.json"
+            or self.telemetry.name != "sealed-telemetry"
         ):
             raise protocol.ProtocolError("generation layout artifact names differ from the sealed design")
         return GenerationLayout(
             root,
             attempts,
             canonical,
+            telemetry,
             self.ledger.absolute(),
             self.run_header.absolute(),
+            self.runtime_manifest.absolute(),
+            self.artifact_profile.absolute(),
             self.receipt.absolute(),
+            self.portable_artifacts,
         )
 
     @classmethod
-    def create(cls, root: Path) -> "GenerationLayout":
+    def create(cls, root: Path, *, portable_artifacts: bool = False) -> "GenerationLayout":
+        if not isinstance(portable_artifacts, bool):
+            raise protocol.ProtocolError("portable_artifacts must be boolean")
         root = protocol.create_private_directory(root)
         attempts = _mkdir_private(root / "attempts")
         canonical = _mkdir_private(root / "canonical")
+        telemetry = root / "sealed-telemetry"
+        artifact_profile = root / "portable-layout-profile.json"
+        runtime_manifest = root / "sealed-runtime-manifest.json"
+        if portable_artifacts:
+            telemetry = _mkdir_private(telemetry)
+            protocol._atomic_write(artifact_profile, protocol.canonical_json_bytes(_PORTABLE_LAYOUT_PROFILE))
         return cls(
             root=root,
             attempts=attempts,
             canonical=canonical,
+            telemetry=telemetry,
             ledger=root / "pair-attempt-ledger.jsonl",
             run_header=root / "generation-run-header.json",
+            runtime_manifest=runtime_manifest,
+            artifact_profile=artifact_profile,
             receipt=root / "generation-receipt.json",
-        )
+            portable_artifacts=portable_artifacts,
+        ).validated()
 
     @classmethod
     def open(cls, root: Path) -> "GenerationLayout":
         root = protocol.require_private_directory(root)
         attempts = protocol.require_private_directory(root / "attempts")
         canonical = protocol.require_private_directory(root / "canonical")
+        artifact_profile = root / "portable-layout-profile.json"
+        runtime_manifest = root / "sealed-runtime-manifest.json"
+        telemetry = root / "sealed-telemetry"
+        portable_artifacts = os.path.lexists(artifact_profile)
+        if not portable_artifacts and (os.path.lexists(runtime_manifest) or os.path.lexists(telemetry)):
+            raise protocol.ProtocolError("legacy layout contains incomplete portable-artifact state")
         return cls(
             root=root,
             attempts=attempts,
             canonical=canonical,
+            telemetry=telemetry,
             ledger=root / "pair-attempt-ledger.jsonl",
             run_header=root / "generation-run-header.json",
+            runtime_manifest=runtime_manifest,
+            artifact_profile=artifact_profile,
             receipt=root / "generation-receipt.json",
-        )
+            portable_artifacts=portable_artifacts,
+        ).validated()
 
 
-def _load_run_header(layout: GenerationLayout) -> dict[str, Any]:
+def _load_run_header(
+    layout: GenerationLayout,
+    *,
+    verify_current_runner: bool = True,
+) -> dict[str, Any]:
     layout = layout.validated()
     path = protocol.require_private_path(layout.run_header, must_exist=True)
     if path.stat().st_mode & 0o077:
@@ -1268,18 +2499,115 @@ def _load_run_header(layout: GenerationLayout) -> dict[str, Any]:
         raise protocol.ProtocolError("generation run header is not canonical JSON")
     if header.get("schema") != GENERATION_RUN_HEADER_SCHEMA:
         raise protocol.ProtocolError("unexpected generation run header schema")
-    if header.get("runner_source_sha256") != protocol.sha256_file(Path(__file__)):
+    if verify_current_runner and header.get("runner_source_sha256") != protocol.sha256_file(Path(__file__)):
         raise protocol.ProtocolError("current runner source differs from the immutable run header")
     return header
 
 
+def _sealed_runtime_descriptor(layout: GenerationLayout, binding: GenerationBinding) -> dict[str, Any]:
+    layout = layout.validated()
+    if not layout.portable_artifacts:
+        raise protocol.ProtocolError("legacy generation layout is non-portable and has no sealed runtime manifest")
+    attestation = binding.automatic_attestation
+    if binding.binding_source != AUTOMATIC_BINDING_SOURCE or attestation is None:
+        raise protocol.ProtocolError("portable smoke artifacts require an automatic runtime attestation")
+    payload = attestation.private_runtime_payload
+    try:
+        document = json.loads(payload)
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise protocol.ProtocolError("private runtime manifest is not valid JSON") from exc
+    if protocol.canonical_json_bytes(document) != payload or document.get("schema") != RUNTIME_ATTESTATION_SCHEMA:
+        raise protocol.ProtocolError("private runtime manifest is not canonical or has the wrong schema")
+    digest = protocol.sha256_bytes(payload)
+    if digest != binding.runtime_digest:
+        raise protocol.ProtocolError("private runtime manifest differs from the automatic runtime digest")
+    protocol._atomic_write(layout.runtime_manifest, payload)
+    profile_payload = protocol._read_immutable_file(layout.artifact_profile)
+    observed = protocol._read_immutable_file(layout.runtime_manifest)
+    assert profile_payload is not None and observed is not None
+    if observed != payload:
+        raise protocol.ProtocolError("sealed runtime manifest publication changed bytes")
+    return {
+        "schema": SEALED_RUNTIME_BINDING_SCHEMA,
+        "filename": layout.runtime_manifest.name,
+        "sha256": digest,
+        "size_bytes": len(payload),
+        "runtime_schema": RUNTIME_ATTESTATION_SCHEMA,
+        "layout_profile_sha256": protocol.sha256_bytes(profile_payload),
+    }
+
+
+def _verify_sealed_runtime_manifest(
+    layout: GenerationLayout,
+    descriptor: Mapping[str, Any],
+    *,
+    expected_runtime_digest: str,
+) -> dict[str, Any]:
+    layout = layout.validated()
+    if not layout.portable_artifacts:
+        raise protocol.ProtocolError(
+            "legacy generation layout is non-portable and cannot attest original runtime bytes"
+        )
+    expected_keys = {
+        "schema",
+        "filename",
+        "sha256",
+        "size_bytes",
+        "runtime_schema",
+        "layout_profile_sha256",
+    }
+    if not isinstance(descriptor, Mapping) or set(descriptor) != expected_keys:
+        raise protocol.ProtocolError("sealed runtime descriptor fields are invalid")
+    if (
+        descriptor.get("schema") != SEALED_RUNTIME_BINDING_SCHEMA
+        or descriptor.get("filename") != layout.runtime_manifest.name
+        or descriptor.get("runtime_schema") != RUNTIME_ATTESTATION_SCHEMA
+    ):
+        raise protocol.ProtocolError("sealed runtime descriptor differs from the portable layout")
+    payload = protocol._read_immutable_file(layout.runtime_manifest)
+    profile_payload = protocol._read_immutable_file(layout.artifact_profile)
+    assert payload is not None and profile_payload is not None
+    try:
+        document = json.loads(payload)
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise protocol.ProtocolError("sealed runtime manifest is not valid JSON") from exc
+    digest = protocol.sha256_bytes(payload)
+    if protocol.canonical_json_bytes(document) != payload or document.get("schema") != RUNTIME_ATTESTATION_SCHEMA:
+        raise protocol.ProtocolError("sealed runtime manifest is not canonical or has the wrong schema")
+    if (
+        descriptor.get("sha256") != digest
+        or descriptor.get("size_bytes") != len(payload)
+        or descriptor.get("layout_profile_sha256") != protocol.sha256_bytes(profile_payload)
+        or digest != expected_runtime_digest
+    ):
+        raise protocol.ProtocolError("sealed runtime manifest digest binding mismatch")
+    return dict(descriptor)
+
+
 def _seal_run_header(layout: GenerationLayout, expected: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
     payload = protocol.canonical_json_bytes(dict(expected))
+    existing = protocol._read_immutable_file(layout.run_header, allow_missing=True)
+    if existing is not None:
+        observed = _load_run_header(layout)
+        if observed != dict(expected):
+            raise protocol.ProtocolError("generation run header differs from current execution inputs")
+        return observed, protocol.sha256_bytes(existing)
     protocol._atomic_write(layout.run_header, payload)
     observed = _load_run_header(layout)
     if observed != dict(expected):
         raise protocol.ProtocolError("generation run header differs from current execution inputs")
     return observed, protocol.sha256_bytes(payload)
+
+
+def _require_pristine_layout_before_first_header(layout: GenerationLayout) -> None:
+    """Reject ambiguous recovery instead of creating a header over prior bytes."""
+
+    artifacts = (layout.ledger, layout.runtime_manifest, layout.receipt)
+    if any(os.path.lexists(path) for path in artifacts):
+        raise protocol.ProtocolError("headerless generation layout already contains run artifacts")
+    for directory in (layout.attempts, layout.canonical, layout.telemetry if layout.portable_artifacts else None):
+        if directory is not None and any(directory.iterdir()):
+            raise protocol.ProtocolError("headerless generation layout already contains run state")
 
 
 def _pairs(schedule: Sequence[protocol.ScheduleEntry]) -> tuple[tuple[protocol.ScheduleEntry, ...], ...]:
@@ -1327,22 +2655,252 @@ def _checkpoint_hashes(
     return hashes
 
 
+def _pair_artifact_binding_sha256(checkpoint_sha256: str, telemetry_sha256: str) -> str:
+    _require_sha256(checkpoint_sha256, "pair checkpoint digest")
+    _require_sha256(telemetry_sha256, "pair telemetry digest")
+    return protocol.sha256_bytes(
+        protocol.canonical_json_bytes(
+            {
+                "schema": PAIR_ARTIFACT_BINDING_SCHEMA,
+                "checkpoint_sha256": checkpoint_sha256,
+                "telemetry_sha256": telemetry_sha256,
+            }
+        )
+    )
+
+
+def _completed_pair_hashes(
+    store: protocol.CheckpointStore,
+    pair: Sequence[protocol.ScheduleEntry],
+    *,
+    require_telemetry: bool,
+    telemetry_root: Path | None = None,
+) -> dict[str, str]:
+    """Return ledger commitments, binding sidecars for portable attempts."""
+
+    checkpoint_hashes = _checkpoint_hashes(store, pair)
+    if not require_telemetry:
+        if telemetry_root is not None:
+            raise protocol.ProtocolError("legacy pair cannot bind a telemetry root")
+        return checkpoint_hashes
+    if telemetry_root is None:
+        raise protocol.ProtocolError("portable completed pair lacks a telemetry root")
+    hashes: dict[str, str] = {}
+    for entry in pair:
+        checkpoint = store.load(entry)
+        _document, telemetry_sha256 = _load_telemetry_sidecar(
+            telemetry_root,
+            entry,
+            checkpoint,
+            checkpoint_hashes[entry.condition],
+        )
+        hashes[entry.condition] = _pair_artifact_binding_sha256(
+            checkpoint_hashes[entry.condition],
+            telemetry_sha256,
+        )
+    return hashes
+
+
+def _telemetry_path(root: Path, entry: protocol.ScheduleEntry) -> Path:
+    return root / f"{entry.execution_index:04d}-{entry.condition}.telemetry.json"
+
+
+def _telemetry_sidecar_document(
+    entry: protocol.ScheduleEntry,
+    checkpoint: protocol.ArmCheckpoint,
+    checkpoint_sha256: str,
+    telemetry: ValidatedArmTelemetry,
+) -> dict[str, Any]:
+    if not isinstance(telemetry, ValidatedArmTelemetry) or telemetry._seal is not _VALIDATED_TELEMETRY_SEAL:
+        raise protocol.ProtocolError("portable arm outcome lacks native validated telemetry")
+    turn, quality, rounds, tools = telemetry.document()
+    document = {
+        "schema": ARM_TELEMETRY_SCHEMA,
+        "execution_index": entry.execution_index,
+        "pair_index": entry.pair_index,
+        "position_in_pair": entry.position_in_pair,
+        "condition": entry.condition,
+        "instance_digest": entry.instance_digest,
+        "checkpoint_sha256": checkpoint_sha256,
+        "turn": turn,
+        "quality_gate": quality,
+        "round_count": len(rounds),
+        "tool_trace_count": len(tools),
+        "rounds": list(rounds),
+        "tools": list(tools),
+        "privacy": {
+            "content_free": True,
+            "only_counters_vocabulary_and_sha256_commitments": True,
+        },
+    }
+    _validate_telemetry_sidecar(document, entry, checkpoint, checkpoint_sha256)
+    return document
+
+
+def _validate_telemetry_sidecar(
+    raw: Mapping[str, Any],
+    entry: protocol.ScheduleEntry,
+    checkpoint: protocol.ArmCheckpoint,
+    checkpoint_sha256: str,
+) -> dict[str, Any]:
+    expected_keys = {
+        "schema",
+        "execution_index",
+        "pair_index",
+        "position_in_pair",
+        "condition",
+        "instance_digest",
+        "checkpoint_sha256",
+        "turn",
+        "quality_gate",
+        "round_count",
+        "tool_trace_count",
+        "rounds",
+        "tools",
+        "privacy",
+    }
+    if not isinstance(raw, Mapping) or set(raw) != expected_keys or raw.get("schema") != ARM_TELEMETRY_SCHEMA:
+        raise protocol.ProtocolError("arm telemetry sidecar fields or schema are invalid")
+    expected_binding = {
+        "execution_index": entry.execution_index,
+        "pair_index": entry.pair_index,
+        "position_in_pair": entry.position_in_pair,
+        "condition": entry.condition,
+        "instance_digest": entry.instance_digest,
+        "checkpoint_sha256": checkpoint_sha256,
+    }
+    if any(raw.get(name) != value for name, value in expected_binding.items()):
+        raise protocol.ProtocolError("arm telemetry sidecar differs from its schedule or checkpoint")
+    if checkpoint.execution_index != entry.execution_index or checkpoint.condition != entry.condition:
+        raise protocol.ProtocolError("arm telemetry checkpoint object differs from its schedule")
+    raw_rounds = raw.get("rounds")
+    raw_tools = raw.get("tools")
+    if not isinstance(raw_rounds, list) or not isinstance(raw_tools, list):
+        raise protocol.ProtocolError("arm telemetry sidecar streams are malformed")
+    rounds = tuple(_validate_round_trace_record(item) for item in raw_rounds)
+    tools = tuple(_validate_tool_trace_record(item) for item in raw_tools)
+    if tuple(item["round_index"] for item in rounds) != tuple(range(len(rounds))):
+        raise protocol.ProtocolError("arm telemetry round indices are not contiguous")
+    if tuple(item["sequence"] for item in tools) != tuple(range(len(tools))):
+        raise protocol.ProtocolError("arm telemetry tool sequences are not contiguous")
+    tool_rounds = tuple(item["round_index"] for item in tools)
+    if any(index >= len(rounds) for index in tool_rounds) or tool_rounds != tuple(sorted(tool_rounds)):
+        raise protocol.ProtocolError("arm telemetry tool round topology is invalid")
+    if raw.get("round_count") != len(rounds) or raw.get("tool_trace_count") != len(tools):
+        raise protocol.ProtocolError("arm telemetry sidecar counts differ from its streams")
+    quality_raw = raw.get("quality_gate")
+    turn_raw = raw.get("turn")
+    if not isinstance(quality_raw, Mapping) or not isinstance(turn_raw, Mapping):
+        raise protocol.ProtocolError("arm telemetry turn or quality document is malformed")
+    quality = _validate_normalized_quality_document(quality_raw)
+    turn = _validate_turn_and_topology(turn_raw, rounds, tools, quality)
+    checkpoint_wall_ns = round(checkpoint.wall_seconds * 1_000_000_000)
+    expected_checkpoint_wall_ns = min(
+        turn["wall_elapsed_ns"],
+        int(protocol.MAX_AGENT_WALL_SECONDS * 1_000_000_000),
+    )
+    if (
+        turn["completion_tokens"] != checkpoint.output_tokens
+        or turn["tool_calls"] != checkpoint.tool_calls
+        or turn["status"] != checkpoint.status
+        or turn["quality_gate_decision"] != checkpoint.quality_gate_decision
+        or abs(expected_checkpoint_wall_ns - checkpoint_wall_ns) > 1
+    ):
+        raise protocol.ProtocolError("arm telemetry terminal evidence differs from checkpoint")
+    if quality["enabled"] != (entry.condition == "gate_on"):
+        raise protocol.ProtocolError("arm telemetry Quality condition differs from the schedule")
+    expected_privacy = {
+        "content_free": True,
+        "only_counters_vocabulary_and_sha256_commitments": True,
+    }
+    if raw.get("privacy") != expected_privacy:
+        raise protocol.ProtocolError("arm telemetry privacy declaration is invalid")
+    return dict(raw)
+
+
+def _save_telemetry_sidecar(
+    root: Path,
+    entry: protocol.ScheduleEntry,
+    checkpoint: protocol.ArmCheckpoint,
+    checkpoint_sha256: str,
+    telemetry: ValidatedArmTelemetry,
+) -> Path:
+    protocol._reject_symlink_path_components(root)
+    if root.exists():
+        root = protocol.require_private_directory(root)
+    else:
+        root = _mkdir_private(root)
+    payload = protocol.canonical_json_bytes(
+        _telemetry_sidecar_document(entry, checkpoint, checkpoint_sha256, telemetry)
+    )
+    destination = _telemetry_path(root, entry)
+    protocol._atomic_write(destination, payload)
+    if protocol._read_immutable_file(destination) != payload:
+        raise protocol.ProtocolError("arm telemetry sidecar publication changed bytes")
+    return destination
+
+
+def _load_telemetry_sidecar(
+    root: Path,
+    entry: protocol.ScheduleEntry,
+    checkpoint: protocol.ArmCheckpoint,
+    checkpoint_sha256: str,
+) -> tuple[dict[str, Any], str]:
+    path = _telemetry_path(root, entry)
+    payload = protocol._read_immutable_file(path)
+    assert payload is not None
+    try:
+        document = json.loads(payload)
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise protocol.ProtocolError("arm telemetry sidecar is not valid JSON") from exc
+    if protocol.canonical_json_bytes(document) != payload:
+        raise protocol.ProtocolError("arm telemetry sidecar is not canonical JSON")
+    validated = _validate_telemetry_sidecar(document, entry, checkpoint, checkpoint_sha256)
+    return validated, protocol.sha256_bytes(payload)
+
+
 def _promote_completed_pair(
     layout: GenerationLayout,
     pair: Sequence[protocol.ScheduleEntry],
     completed: Mapping[str, Any],
+    *,
+    require_telemetry: bool,
 ) -> None:
     attempt_index = int(completed["attempt_index"])
     attempt_store = protocol.pair_attempt_store(layout.attempts, pair[0].pair_index, attempt_index)
-    hashes = _checkpoint_hashes(attempt_store, pair)
-    if hashes != completed["checkpoint_sha256s"]:
-        raise protocol.ProtocolError("completed ledger event differs from retained attempt")
+    checkpoint_hashes = _checkpoint_hashes(attempt_store, pair)
+    completed_hashes = _completed_pair_hashes(
+        attempt_store,
+        pair,
+        require_telemetry=require_telemetry,
+        telemetry_root=(attempt_store.root / "telemetry" if require_telemetry else None),
+    )
+    if completed_hashes != completed["checkpoint_sha256s"]:
+        raise protocol.ProtocolError("completed ledger event differs from retained checkpoint/telemetry pair")
     canonical_store = protocol.CheckpointStore(layout.canonical)
     for entry in pair:
         checkpoint = attempt_store.load(entry)
         destination = canonical_store.save(checkpoint)
-        if protocol._immutable_file_sha256(destination) != hashes[entry.condition]:
+        if protocol._immutable_file_sha256(destination) != checkpoint_hashes[entry.condition]:
             raise protocol.ProtocolError("canonical promotion changed checkpoint bytes")
+        if require_telemetry:
+            source_document, source_sha256 = _load_telemetry_sidecar(
+                attempt_store.root / "telemetry",
+                entry,
+                checkpoint,
+                checkpoint_hashes[entry.condition],
+            )
+            telemetry_payload = protocol.canonical_json_bytes(source_document)
+            telemetry_destination = _telemetry_path(layout.telemetry, entry)
+            protocol._atomic_write(telemetry_destination, telemetry_payload)
+            _document, promoted_sha256 = _load_telemetry_sidecar(
+                layout.telemetry,
+                entry,
+                checkpoint,
+                checkpoint_hashes[entry.condition],
+            )
+            if promoted_sha256 != source_sha256:
+                raise protocol.ProtocolError("canonical promotion changed arm telemetry bytes")
 
 
 def pending_pairs(
@@ -1350,10 +2908,15 @@ def pending_pairs(
     layout: GenerationLayout,
     *,
     repair_completed_promotions: bool = True,
+    require_telemetry: bool | None = None,
 ) -> tuple[tuple[protocol.ScheduleEntry, ...], ...]:
     """Resume only complete pairs; never continue after one arm."""
 
     layout = layout.validated()
+    if require_telemetry is None:
+        require_telemetry = layout.portable_artifacts
+    if not isinstance(require_telemetry, bool) or require_telemetry != layout.portable_artifacts:
+        raise protocol.ProtocolError("generation layout portability differs from telemetry requirements")
     digest = protocol.schedule_digest(schedule)
     ledger = protocol.AttemptLedger(layout.ledger, digest)
     canonical_store = protocol.CheckpointStore(layout.canonical)
@@ -1376,12 +2939,18 @@ def pending_pairs(
             pending.append(pair)
             continue
         if repair_completed_promotions:
-            _promote_completed_pair(layout, pair, completed)
+            _promote_completed_pair(layout, pair, completed, require_telemetry=require_telemetry)
         elif not all(existing):
             raise protocol.ProtocolError("sealed canonical pair is incomplete")
         expected_hashes = completed["checkpoint_sha256s"]
-        if _checkpoint_hashes(canonical_store, pair) != expected_hashes:
-            raise protocol.ProtocolError("canonical pair differs from completed attempt")
+        observed_hashes = _completed_pair_hashes(
+            canonical_store,
+            pair,
+            require_telemetry=require_telemetry,
+            telemetry_root=(layout.telemetry if require_telemetry else None),
+        )
+        if observed_hashes != expected_hashes:
+            raise protocol.ProtocolError("canonical checkpoint/telemetry pair differs from completed attempt")
     return tuple(pending)
 
 
@@ -1464,6 +3033,7 @@ def run_generation_pairs(
     binding: GenerationBinding,
     tier_config: Any,
     agent_module: Any | None = None,
+    require_portable_artifacts: bool = False,
 ) -> str:
     """Run every missing *whole pair* and return the frozen factor digest.
 
@@ -1473,6 +3043,8 @@ def run_generation_pairs(
     """
 
     layout = layout.validated()
+    if not isinstance(require_portable_artifacts, bool) or require_portable_artifacts != layout.portable_artifacts:
+        raise protocol.ProtocolError("runner portability requirement differs from the generation layout")
     by_id, evidence_run = _validate_schedule_document(schedule_document, schedule)
     binding.validate_for_run(
         evidence_run=evidence_run,
@@ -1488,8 +3060,26 @@ def run_generation_pairs(
     if evidence_run and len(schedule) != protocol.EXPECTED_INSTANCES * 2:
         raise protocol.ProtocolError("confirmatory generation requires all 500 complete pairs")
     validate_target_only_tier(tier_config)
+    if require_portable_artifacts and (
+        type(executor) is not NativeMioArmExecutor or executor.require_raw_target_telemetry is not True
+    ):
+        raise protocol.ProtocolError("portable smoke artifacts require the native raw-telemetry executor")
     registry, specs, surface_sha256 = build_identical_tool_surface(agent_module)
-    pending = pending_pairs(schedule, layout)
+    header_exists = os.path.lexists(layout.run_header)
+    if header_exists:
+        retained_header = _load_run_header(layout)
+        runtime_descriptor = retained_header.get("sealed_artifact_audit", {}).get("runtime_manifest")
+        if require_portable_artifacts:
+            _verify_sealed_runtime_manifest(
+                layout,
+                runtime_descriptor,
+                expected_runtime_digest=binding.runtime_digest,
+            )
+        elif runtime_descriptor is not None:
+            raise protocol.ProtocolError("legacy generation header unexpectedly binds a portable runtime manifest")
+    else:
+        _require_pristine_layout_before_first_header(layout)
+        runtime_descriptor = _sealed_runtime_descriptor(layout, binding) if require_portable_artifacts else None
     run_header, _run_header_sha256 = _seal_run_header(
         layout,
         build_run_header(
@@ -1500,7 +3090,15 @@ def run_generation_pairs(
             executor=executor,
             workspace_factory=workspace_factory,
             tier_config=tier_config,
+            sealed_runtime_manifest=runtime_descriptor,
         ),
+    )
+    # Only a byte-for-byte header/runtime match may authorize idempotent
+    # canonical promotion repair or a new ledger append.
+    pending = pending_pairs(
+        schedule,
+        layout,
+        require_telemetry=require_portable_artifacts,
     )
     study_factor_sha256 = str(run_header["factor_sha256"])
     schedule_sha256 = protocol.schedule_digest(schedule)
@@ -1608,9 +3206,24 @@ def run_generation_pairs(
                 tool_calls=outcome.tool_calls,
                 wall_seconds=outcome.wall_seconds,
             )
-            attempt_store.save(checkpoint)
+            checkpoint_path = attempt_store.save(checkpoint)
+            if require_portable_artifacts:
+                if outcome.telemetry is None:
+                    raise protocol.ProtocolError("portable smoke arm lacks native validated telemetry")
+                _save_telemetry_sidecar(
+                    attempt_store.root / "telemetry",
+                    entry,
+                    checkpoint,
+                    protocol._immutable_file_sha256(checkpoint_path),
+                    outcome.telemetry,
+                )
 
-        hashes = _checkpoint_hashes(attempt_store, pair)
+        hashes = _completed_pair_hashes(
+            attempt_store,
+            pair,
+            require_telemetry=require_portable_artifacts,
+            telemetry_root=(attempt_store.root / "telemetry" if require_portable_artifacts else None),
+        )
         completed = ledger.append(
             pair_index=pair_index,
             attempt_index=attempt_index,
@@ -1618,7 +3231,12 @@ def run_generation_pairs(
             reason_code="completed",
             checkpoint_sha256s=hashes,
         )
-        _promote_completed_pair(layout, pair, completed)
+        _promote_completed_pair(
+            layout,
+            pair,
+            completed,
+            require_telemetry=require_portable_artifacts,
+        )
     return study_factor_sha256
 
 
@@ -1631,6 +3249,11 @@ def _generation_manifest(
     if pending_pairs(schedule, layout, repair_completed_promotions=False):
         raise protocol.ProtocolError("generation receipt requires every pair to be complete")
     store = protocol.CheckpointStore(layout.canonical)
+    if layout.portable_artifacts:
+        expected_telemetry = {_telemetry_path(layout.telemetry, entry).name for entry in schedule}
+        observed_telemetry = {path.name for path in layout.telemetry.iterdir()}
+        if observed_telemetry != expected_telemetry:
+            raise protocol.ProtocolError("sealed telemetry directory is missing an arm or contains an extra artifact")
     rows = []
     expected_binding = run_header.get("generation_binding")
     expected_schedule_sha256 = str(run_header.get("schedule_sha256", ""))
@@ -1647,51 +3270,74 @@ def _generation_manifest(
             or checkpoint_binding != expected_binding
         ):
             raise protocol.ProtocolError("canonical checkpoint differs from the immutable run header")
-        rows.append(
-            {
-                "execution_index": entry.execution_index,
-                "pair_index": entry.pair_index,
-                "position_in_pair": entry.position_in_pair,
-                "condition": entry.condition,
-                "instance_digest": checkpoint.instance_digest,
-                "checkpoint_sha256": protocol._immutable_file_sha256(store.path_for(entry)),
-            }
-        )
+        checkpoint_sha256 = protocol._immutable_file_sha256(store.path_for(entry))
+        row = {
+            "execution_index": entry.execution_index,
+            "pair_index": entry.pair_index,
+            "position_in_pair": entry.position_in_pair,
+            "condition": entry.condition,
+            "instance_digest": checkpoint.instance_digest,
+            "checkpoint_sha256": checkpoint_sha256,
+        }
+        if layout.portable_artifacts:
+            telemetry, telemetry_sha256 = _load_telemetry_sidecar(
+                layout.telemetry,
+                entry,
+                checkpoint,
+                checkpoint_sha256,
+            )
+            row.update(
+                {
+                    "telemetry_filename": _telemetry_path(layout.telemetry, entry).name,
+                    "telemetry_sha256": telemetry_sha256,
+                    "completed_artifact_binding_sha256": _pair_artifact_binding_sha256(
+                        checkpoint_sha256,
+                        telemetry_sha256,
+                    ),
+                    "round_count": telemetry["round_count"],
+                    "tool_trace_count": telemetry["tool_trace_count"],
+                }
+            )
+        rows.append(row)
     return rows
 
 
-def build_generation_receipt(
+def _telemetry_manifest(manifest: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    entries = []
+    for row in manifest:
+        required = {
+            "execution_index",
+            "condition",
+            "checkpoint_sha256",
+            "telemetry_filename",
+            "telemetry_sha256",
+            "completed_artifact_binding_sha256",
+            "round_count",
+            "tool_trace_count",
+        }
+        if not required.issubset(row):
+            raise protocol.ProtocolError("portable canonical manifest lacks arm telemetry bindings")
+        entries.append({name: row[name] for name in sorted(required)})
+    document = {
+        "schema": TELEMETRY_MANIFEST_SCHEMA,
+        "arm_count": len(entries),
+        "entries": entries,
+        "content_free": True,
+    }
+    document["entries_sha256"] = protocol.sha256_bytes(protocol.canonical_json_bytes(entries))
+    return document
+
+
+def _build_generation_receipt_from_artifacts(
     *,
     schedule: Sequence[protocol.ScheduleEntry],
     layout: GenerationLayout,
-    binding: GenerationBinding,
-    tool_surface_sha256: str,
-    observed_model_identity_before: str,
-    observed_model_identity_after: str,
+    run_header: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Build a canonical, content-free receipt after all pairs are sealed."""
+    """Recompute a receipt from sealed bytes without inspecting the host."""
 
-    if {
-        observed_model_identity_before,
-        observed_model_identity_after,
-    } != {protocol.EXPECTED_MODEL_IDENTITY}:
-        raise protocol.ProtocolError("generation receipt target identity checks differ")
-    run_header = _load_run_header(layout)
-    if run_header.get("generation_binding") != binding.as_dict():
-        raise protocol.ProtocolError("receipt binding differs from the immutable run header")
-    evidence_run = run_header.get("evidence_class") == "confirmatory"
-    binding.validate_for_run(evidence_run=evidence_run)
-    if run_header.get("generation_binding_attestation") != binding.attestation_dict():
-        raise protocol.ProtocolError("receipt attestation differs from the immutable run header")
-    if run_header.get("tool_surface_sha256") != tool_surface_sha256:
-        raise protocol.ProtocolError("receipt tool surface differs from the immutable run header")
     if run_header.get("schedule_sha256") != protocol.schedule_digest(schedule):
         raise protocol.ProtocolError("receipt schedule differs from the immutable run header")
-    if {
-        observed_model_identity_before,
-        observed_model_identity_after,
-    } != {str(run_header["generation_binding"]["model_identity"])}:
-        raise protocol.ProtocolError("receipt identity observations differ from the immutable run header")
     manifest = _generation_manifest(schedule, layout, run_header)
     ledger = protocol.AttemptLedger(layout.ledger, protocol.schedule_digest(schedule))
     records = ledger.read()
@@ -1702,6 +3348,39 @@ def build_generation_receipt(
     run_header_payload = protocol._read_immutable_file(layout.run_header)
     assert ledger_payload is not None and run_header_payload is not None
     run_header_sha256 = protocol.sha256_bytes(run_header_payload)
+    artifact_header = run_header.get("sealed_artifact_audit")
+    if not isinstance(artifact_header, Mapping) or not isinstance(artifact_header.get("portable"), bool):
+        raise protocol.ProtocolError("run header lacks an explicit sealed-artifact audit mode")
+    if artifact_header["portable"] != layout.portable_artifacts:
+        raise protocol.ProtocolError("run header portability differs from the retained layout")
+    if layout.portable_artifacts:
+        binding = run_header.get("generation_binding")
+        if not isinstance(binding, Mapping) or not isinstance(binding.get("runtime_digest"), str):
+            raise protocol.ProtocolError("portable run header lacks its runtime binding")
+        runtime_descriptor = artifact_header.get("runtime_manifest")
+        _verify_sealed_runtime_manifest(
+            layout,
+            runtime_descriptor,
+            expected_runtime_digest=str(binding["runtime_digest"]),
+        )
+        telemetry_manifest = _telemetry_manifest(manifest)
+        receipt_artifact_audit = {
+            "portable": True,
+            "cross_process_sealed_artifact_verification_supported": True,
+            "runtime_manifest": dict(runtime_descriptor),
+            "telemetry_manifest": telemetry_manifest,
+            "telemetry_manifest_sha256": protocol.sha256_bytes(protocol.canonical_json_bytes(telemetry_manifest)),
+            "current_environment_reattestation_is_separate": True,
+            "sealed_artifact_verification_does_not_claim_current_environment_identity": True,
+        }
+    else:
+        receipt_artifact_audit = {
+            "portable": False,
+            "cross_process_sealed_artifact_verification_supported": False,
+            "legacy_non_portable": True,
+            "current_environment_reattestation_is_separate": True,
+        }
+    model_identity = str(run_header["generation_binding"]["model_identity"])
     return {
         "schema": GENERATION_RECEIPT_SCHEMA,
         "preregistration_sha256": run_header["preregistration_sha256"],
@@ -1713,8 +3392,8 @@ def build_generation_receipt(
         "generation_binding_attestation": run_header["generation_binding_attestation"],
         "loaded_target_binding": run_header["loaded_target_binding"],
         "model_identity_checks": {
-            "before_first_generation": observed_model_identity_before,
-            "after_last_generation": observed_model_identity_after,
+            "before_first_generation": model_identity,
+            "after_last_generation": model_identity,
         },
         "attempt_ledger": {
             "sha256": protocol.sha256_bytes(ledger_payload),
@@ -1725,11 +3404,45 @@ def build_generation_receipt(
         "arm_count": len(schedule),
         "canonical_manifest_sha256": protocol.sha256_bytes(protocol.canonical_json_bytes(manifest)),
         "canonical_manifest": manifest,
+        "sealed_artifact_audit": receipt_artifact_audit,
         "contains_model_text_or_evaluator_output": False,
         "evidence_class": run_header["evidence_class"],
         "confirmatory_evidence_admissible": False,
-        "confirmatory_blockers": list(CONFIRMATORY_BLOCKERS),
+        "confirmatory_blockers": list(run_header["confirmatory_blockers"]),
     }
+
+
+def build_generation_receipt(
+    *,
+    schedule: Sequence[protocol.ScheduleEntry],
+    layout: GenerationLayout,
+    binding: GenerationBinding,
+    tool_surface_sha256: str,
+    observed_model_identity_before: str,
+    observed_model_identity_after: str,
+) -> dict[str, Any]:
+    """Build a receipt after separately re-attesting the current environment."""
+
+    if {observed_model_identity_before, observed_model_identity_after} != {protocol.EXPECTED_MODEL_IDENTITY}:
+        raise protocol.ProtocolError("generation receipt target identity checks differ")
+    run_header = _load_run_header(layout, verify_current_runner=True)
+    if run_header.get("generation_binding") != binding.as_dict():
+        raise protocol.ProtocolError("receipt binding differs from the immutable run header")
+    evidence_run = run_header.get("evidence_class") == "confirmatory"
+    binding.validate_for_run(evidence_run=evidence_run)
+    if run_header.get("generation_binding_attestation") != binding.attestation_dict():
+        raise protocol.ProtocolError("receipt attestation differs from the immutable run header")
+    if run_header.get("tool_surface_sha256") != tool_surface_sha256:
+        raise protocol.ProtocolError("receipt tool surface differs from the immutable run header")
+    if {observed_model_identity_before, observed_model_identity_after} != {
+        str(run_header["generation_binding"]["model_identity"])
+    }:
+        raise protocol.ProtocolError("receipt identity observations differ from the immutable run header")
+    return _build_generation_receipt_from_artifacts(
+        schedule=schedule,
+        layout=layout,
+        run_header=run_header,
+    )
 
 
 def seal_generation_receipt(
@@ -1766,10 +3479,40 @@ def verify_generation_receipt(
     binding: GenerationBinding,
     tool_surface_sha256: str,
 ) -> str:
-    """Recompute every ledger/checkpoint/factor binding without evaluation data."""
+    """Verify sealed bytes, then independently re-attest the current host."""
 
     layout = layout.validated()
+    if not layout.portable_artifacts:
+        raise protocol.ProtocolError("legacy generation receipt cannot support current-environment reattestation")
+    digest = _verify_generation_artifacts(
+        receipt_path=receipt_path,
+        schedule=schedule,
+        layout=layout,
+        tool_surface_sha256=tool_surface_sha256,
+        require_portable=True,
+    )
+    reattest_current_generation_environment(layout=layout, binding=binding)
+    return digest
+
+
+def _verify_generation_artifacts(
+    *,
+    receipt_path: Path,
+    schedule: Sequence[protocol.ScheduleEntry],
+    layout: GenerationLayout,
+    tool_surface_sha256: str,
+    require_portable: bool,
+) -> str:
+    """Verify only retained bytes; never compare them with the current host."""
+
+    layout = layout.validated()
+    if require_portable and not layout.portable_artifacts:
+        raise protocol.ProtocolError(
+            "legacy generation layout is non-portable; original runtime and telemetry were not retained"
+        )
     path = protocol.require_private_path(receipt_path, must_exist=True)
+    if path != layout.receipt.resolve(strict=True):
+        raise protocol.ProtocolError("generation receipt path differs from the sealed layout receipt")
     if path.stat().st_mode & 0o077:
         raise protocol.ProtocolError("private generation receipt must use 0600 permissions")
     payload = protocol._read_immutable_file(path)
@@ -1784,17 +3527,91 @@ def verify_generation_receipt(
         raise protocol.ProtocolError("generation receipt is not canonical JSON")
     if observed.get("schema") != GENERATION_RECEIPT_SCHEMA:
         raise protocol.ProtocolError("unexpected generation receipt schema")
-    expected = build_generation_receipt(
+    run_header = _load_run_header(layout, verify_current_runner=False)
+    runner_source_sha256 = run_header.get("runner_source_sha256")
+    if not isinstance(runner_source_sha256, str):
+        raise protocol.ProtocolError("run header runner source digest is malformed")
+    _require_sha256(runner_source_sha256, "sealed runner source digest")
+    if run_header.get("tool_surface_sha256") != tool_surface_sha256:
+        raise protocol.ProtocolError("sealed tool surface differs from the requested artifact audit")
+    expected = _build_generation_receipt_from_artifacts(
         schedule=schedule,
         layout=layout,
-        binding=binding,
-        tool_surface_sha256=tool_surface_sha256,
-        observed_model_identity_before=protocol.EXPECTED_MODEL_IDENTITY,
-        observed_model_identity_after=protocol.EXPECTED_MODEL_IDENTITY,
+        run_header=run_header,
     )
     if observed != expected:
-        raise protocol.ProtocolError("generation receipt differs from current sealed artifacts")
+        raise protocol.ProtocolError("generation receipt differs from the retained sealed artifacts")
     return protocol.sha256_bytes(payload)
+
+
+def verify_sealed_generation_artifacts(
+    *,
+    receipt_path: Path,
+    schedule: Sequence[protocol.ScheduleEntry],
+    layout: GenerationLayout,
+    tool_surface_sha256: str,
+) -> str:
+    """Cross-process audit of original sealed bytes, with no current-env claim."""
+
+    return _verify_generation_artifacts(
+        receipt_path=receipt_path,
+        schedule=schedule,
+        layout=layout,
+        tool_surface_sha256=tool_surface_sha256,
+        require_portable=True,
+    )
+
+
+def verify_legacy_generation_artifacts(
+    *,
+    receipt_path: Path,
+    schedule: Sequence[protocol.ScheduleEntry],
+    layout: GenerationLayout,
+    tool_surface_sha256: str,
+) -> str:
+    """Audit retained legacy bytes without claiming runtime reattestation."""
+
+    layout = layout.validated()
+    if layout.portable_artifacts:
+        raise protocol.ProtocolError("portable generation must use the sealed cross-process verifier")
+    return _verify_generation_artifacts(
+        receipt_path=receipt_path,
+        schedule=schedule,
+        layout=layout,
+        tool_surface_sha256=tool_surface_sha256,
+        require_portable=False,
+    )
+
+
+def reattest_current_generation_environment(
+    *,
+    layout: GenerationLayout,
+    binding: GenerationBinding,
+) -> dict[str, Any]:
+    """Fail closed if the *current* source/model/runtime differs from capture."""
+
+    layout = layout.validated()
+    if (
+        not layout.portable_artifacts
+        or binding.binding_source != AUTOMATIC_BINDING_SOURCE
+        or binding.automatic_attestation is None
+    ):
+        raise protocol.ProtocolError(
+            "legacy or caller-supplied generation binding cannot support current-environment reattestation"
+        )
+    run_header = _load_run_header(layout, verify_current_runner=True)
+    if run_header.get("generation_binding") != binding.as_dict():
+        raise protocol.ProtocolError("current binding differs from the immutable run header")
+    evidence_run = run_header.get("evidence_class") == "confirmatory"
+    current = binding.validate_for_run(evidence_run=evidence_run)
+    if run_header.get("generation_binding_attestation") != binding.attestation_dict():
+        raise protocol.ProtocolError("current attestation differs from the immutable run header")
+    return {
+        "sealed_artifact_verification_not_performed_here": True,
+        "current_environment_reverified": True,
+        "binding": binding.as_dict(),
+        "attestation_result": current,
+    }
 
 
 class NativeMioArmExecutor:
@@ -1803,8 +3620,8 @@ class NativeMioArmExecutor:
     ``require_raw_target_telemetry`` is opt-in so existing non-benchmark callers
     remain compatible.  When enabled, every arm must expose contiguous,
     content-free raw round/tool traces before an outcome can be returned.  The
-    v1 checkpoint and receipt do not persist those traces, so this runtime
-    admission check does not make a smoke result confirmatory evidence.
+    portable smoke layout persists those validated traces beside the unchanged
+    v1 checkpoint; this still does not make a smoke result confirmatory evidence.
     """
 
     def __init__(
@@ -1832,9 +3649,15 @@ class NativeMioArmExecutor:
             raise protocol.ProtocolError(f"raw target round {name} must be a non-negative integer")
         return value
 
-    def _validate_raw_target_result(self, result: Any) -> None:
+    def _validate_raw_target_result(
+        self,
+        result: Any,
+        request: ArmRunRequest,
+        *,
+        wall_elapsed_s: float,
+    ) -> ValidatedArmTelemetry | None:
         if not self.require_raw_target_telemetry:
-            return
+            return None
         rounds = tuple(getattr(result, "rounds", ()) or ())
         if not rounds:
             raise protocol.ProtocolError("raw target telemetry requires at least one model round")
@@ -1865,21 +3688,22 @@ class NativeMioArmExecutor:
         if isinstance(tool_calls, bool) or not isinstance(tool_calls, int) or tool_calls < 0:
             raise protocol.ProtocolError("raw target tool-call count is invalid")
         tool_events = tuple(getattr(result, "tool_events", ()) or ())
-        if getattr(result, "tool_telemetry_complete", None) is not True:
-            raise protocol.ProtocolError("raw target tool telemetry is incomplete")
         if len(tool_events) != tool_calls:
             raise protocol.ProtocolError("raw target telemetry requires exactly one trace per tool call")
         for sequence, trace in enumerate(tool_events):
             if getattr(trace, "sequence", None) != sequence:
                 raise protocol.ProtocolError("raw target tool traces must be zero-based and contiguous")
-            if getattr(trace, "telemetry_complete", None) is not True:
-                raise protocol.ProtocolError("raw target tool trace is incomplete")
 
         delivered = getattr(result, "completion_tokens", None)
         if isinstance(delivered, bool) or not isinstance(delivered, int) or delivered < 0:
             raise protocol.ProtocolError("raw target delivered-token count is invalid")
         if delivered != sum(self._trace_nonnegative_int(trace, "completion_tokens") for trace in rounds):
             raise protocol.ProtocolError("raw target delivered-token total differs from round completion tokens")
+        return ValidatedArmTelemetry.from_result(
+            result,
+            quality_gate_enabled=request.quality_gate_enabled,
+            wall_elapsed_s=wall_elapsed_s,
+        )
 
     def _assert_manager_engine_identity(self) -> None:
         loaded_tiers = getattr(self.manager, "loaded_tiers", None)
@@ -1942,28 +3766,57 @@ class NativeMioArmExecutor:
                     self.config,
                     state,
                 )
+            except protocol.ProtocolError:
+                # Protocol violations are never model outcomes and must leave
+                # the pair open for explicit fail-closed adjudication.
+                raise
+            except (MemoryError, OSError) as exc:
+                raise protocol.ProtocolError("model execution suffered an infrastructure failure") from exc
             except Exception:
                 # Ordinary Python exceptions from target generation are sealed
                 # as a non-retryable model outcome. Host/process loss never
                 # reaches this branch and leaves the whole pair explicitly open
                 # for blinded infrastructure adjudication.
                 elapsed = time.perf_counter() - started
-                if elapsed > protocol.MAX_AGENT_WALL_SECONDS:
+                maximum_complete_wall = protocol.MAX_AGENT_WALL_SECONDS + (_EXECUTOR_WALL_OVERHEAD_NS / 1_000_000_000)
+                if elapsed > maximum_complete_wall:
                     raise protocol.ProtocolError(
-                        "model exception exceeded the frozen wall cap; v2 overrun adjudication is required"
+                        "model exception exceeded the bounded executor wall cap; overrun adjudication is required"
                     ) from None
+                telemetry = None
                 if self.require_raw_target_telemetry:
-                    raise protocol.ProtocolError(
-                        "raw target telemetry-required arm ended without a structured result"
-                    ) from None
+                    telemetry = ValidatedArmTelemetry.for_model_error(
+                        quality_gate_enabled=request.quality_gate_enabled,
+                        request_sha256=protocol.sha256_bytes(request.instruction.encode("utf-8")),
+                        wall_elapsed_s=elapsed,
+                    )
                 return ArmRunOutcome(
                     status="model_error",
                     quality_gate_decision=("incomplete" if request.quality_gate_enabled else "not_applicable"),
-                    wall_seconds=elapsed,
+                    wall_seconds=min(elapsed, protocol.MAX_AGENT_WALL_SECONDS),
+                    telemetry=telemetry,
                 )
         finally:
             agent.console = previous_console
-        self._validate_raw_target_result(result)
+        complete_wall_seconds = time.perf_counter() - started
+        telemetry = self._validate_raw_target_result(
+            result,
+            request,
+            wall_elapsed_s=complete_wall_seconds,
+        )
+        if telemetry is not None:
+            turn, _quality, _rounds, _tools = telemetry.document()
+            return ArmRunOutcome(
+                status=turn["status"],
+                quality_gate_decision=turn["quality_gate_decision"],
+                output_tokens=turn["completion_tokens"],
+                tool_calls=turn["tool_calls"],
+                wall_seconds=min(
+                    turn["wall_elapsed_ns"] / 1_000_000_000,
+                    protocol.MAX_AGENT_WALL_SECONDS,
+                ),
+                telemetry=telemetry,
+            )
         rounds = tuple(getattr(result, "rounds", ()) or ())
         output_tokens = int(
             getattr(result, "completion_tokens", 0)
@@ -1983,7 +3836,11 @@ class NativeMioArmExecutor:
             quality_gate_decision=quality_decision,
             output_tokens=output_tokens,
             tool_calls=int(getattr(result, "tool_calls", 0) or 0),
-            wall_seconds=float(getattr(result, "wall_time_s", 0.0) or 0.0),
+            wall_seconds=min(
+                float(getattr(result, "wall_time_s", 0.0) or 0.0),
+                protocol.MAX_AGENT_WALL_SECONDS,
+            ),
+            telemetry=telemetry,
         )
 
 

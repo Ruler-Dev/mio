@@ -145,9 +145,12 @@ _SKIP_DIRS = frozenset(
         "spd",
     }
 )
+_SKIP_DIR_KEYS = frozenset(name.casefold() for name in _SKIP_DIRS)
 _MAX_GIT_OUTPUT_BYTES = 8 * 1024 * 1024
 _MAX_MANIFEST_FILES = 20_000
 _MAX_MANIFEST_BYTES = 256 * 1024 * 1024
+_MAX_SYMLINK_DEPTH = 64
+_MAX_DIRECTORY_SYMLINKS = 256
 _GIT_TIMEOUT_S = 8.0
 
 
@@ -535,6 +538,18 @@ class RevisionEntry:
 
 
 @dataclass(frozen=True)
+class SymlinkEvidence:
+    """Internal, revision-bound metadata for one safely attested symlink."""
+
+    root_index: int
+    relative: str
+    target: str
+    state_sha256: str
+    resolved_target: str
+    target_kind: str
+
+
+@dataclass(frozen=True)
 class WorkspaceSnapshot:
     revision_sha256: str
     entries: tuple[RevisionEntry, ...]
@@ -542,16 +557,224 @@ class WorkspaceSnapshot:
     root_count: int
     method: str
     error_codes: tuple[str, ...] = ()
+    symlinks: tuple[SymlinkEvidence, ...] = ()
 
     def entry_map(self) -> dict[str, RevisionEntry]:
         return {entry.path_sha256: entry for entry in self.entries}
+
+
+def _stat_identity(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _validated_relative(path: Path) -> Path:
+    if path.is_absolute() or not path.parts:
+        raise OSError("manifest_path_escape")
+    if any(part in {"", ".", ".."} for part in path.parts):
+        raise OSError("manifest_path_escape")
+    return path
+
+
+def _open_parent_no_follow(root: Path, relative: Path) -> tuple[int, int, str]:
+    """Open a path's parent from ``root`` without traversing a symlink."""
+
+    relative = _validated_relative(relative)
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    root_fd = os.open(root, directory_flags)
+    directory_fd = root_fd
+    try:
+        for part in relative.parts[:-1]:
+            next_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+            if directory_fd != root_fd:
+                os.close(directory_fd)
+            directory_fd = next_fd
+        return root_fd, directory_fd, relative.parts[-1]
+    except BaseException:
+        if directory_fd != root_fd:
+            os.close(directory_fd)
+        os.close(root_fd)
+        raise
+
+
+def _lstat_no_follow(root: Path, relative: Path) -> os.stat_result:
+    root_fd, directory_fd, name = _open_parent_no_follow(root, relative)
+    try:
+        return os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    finally:
+        if directory_fd != root_fd:
+            os.close(directory_fd)
+        os.close(root_fd)
+
+
+def _lexical_symlink_target(link_relative: Path, target: str) -> Path:
+    """Resolve only ``.``/``..`` syntax, never filesystem symlinks."""
+
+    rendered = Path(target)
+    if not target or "\x00" in target or rendered.is_absolute():
+        raise OSError("manifest_symlink_absolute_target")
+    parts: list[str] = []
+    for part in (*link_relative.parent.parts, *rendered.parts):
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not parts:
+                raise OSError("manifest_symlink_target_escape")
+            parts.pop()
+            continue
+        parts.append(part)
+    if not parts:
+        raise OSError("manifest_symlink_directory_cycle")
+    return Path(*parts)
+
+
+def _read_symlink_no_follow(root: Path, relative: Path) -> tuple[str, os.stat_result]:
+    """Read stable link text with lstat/readlink/lstat race detection."""
+
+    root_fd, directory_fd, name = _open_parent_no_follow(root, relative)
+    try:
+        before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if not stat.S_ISLNK(before.st_mode):
+            raise OSError("manifest_not_symlink")
+        if before.st_nlink != 1:
+            raise OSError("manifest_hardlink_symlink")
+        target = os.readlink(name, dir_fd=directory_fd)
+        after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if _stat_identity(before) != _stat_identity(after):
+            raise OSError("manifest_symlink_changed_during_read")
+        return target, before
+    finally:
+        if directory_fd != root_fd:
+            os.close(directory_fd)
+        os.close(root_fd)
+
+
+def _attest_symlink_target(
+    root: Path,
+    link_relative: Path,
+    target: str,
+    *,
+    seen: frozenset[Path],
+) -> tuple[Path, str]:
+    observed = {tuple(part.casefold() for part in path.parts) for path in seen}
+    current_link = link_relative
+    current_target = target
+    for _depth in range(_MAX_SYMLINK_DEPTH):
+        target_relative = _lexical_symlink_target(current_link, current_target)
+        target_key = tuple(part.casefold() for part in target_relative.parts)
+        if target_key in observed:
+            raise OSError("manifest_symlink_cycle")
+        # APFS is commonly case-insensitive: a textual ``.GIT`` component can
+        # resolve to the skipped ``.git`` metadata tree. Conservatively reject
+        # every case variant on all platforms rather than certify unscanned data.
+        if any(part.casefold() in _SKIP_DIR_KEYS for part in target_relative.parts[:-1]):
+            raise OSError("manifest_symlink_unattested_target")
+
+        before = _lstat_no_follow(root, target_relative)
+        after = _lstat_no_follow(root, target_relative)
+        if _stat_identity(before) != _stat_identity(after):
+            raise OSError("manifest_symlink_target_changed")
+        if stat.S_ISLNK(before.st_mode):
+            observed.add(target_key)
+            current_target, _nested_stat = _read_symlink_no_follow(root, target_relative)
+            current_link = target_relative
+            continue
+        if stat.S_ISREG(before.st_mode):
+            if before.st_nlink != 1:
+                raise OSError("manifest_hardlink_target")
+            return target_relative, "file"
+        if stat.S_ISDIR(before.st_mode):
+            if target_relative.name.casefold() in _SKIP_DIR_KEYS:
+                raise OSError("manifest_symlink_unattested_target")
+            # A directory target is attestable only when its canonical lexical
+            # location is independently traversed by the bounded manifest. Links
+            # back to an ancestor would make that topology cyclic if followed.
+            parent_parts = tuple(part.casefold() for part in current_link.parent.parts)
+            target_parts = target_key
+            if parent_parts[: len(target_parts)] == target_parts:
+                raise OSError("manifest_symlink_directory_cycle")
+            return target_relative, "directory"
+        raise OSError("manifest_symlink_non_regular_target")
+    raise OSError("manifest_symlink_depth_limit")
+
+
+def attest_workspace_symlink(
+    path: Path,
+    *,
+    root: Path,
+    byte_budget: list[int],
+) -> tuple[str, str, str, str]:
+    """Hash safe symlink metadata without opening or hashing its target."""
+
+    relative = _validated_relative(path.relative_to(root))
+    target, link_stat = _read_symlink_no_follow(root, relative)
+    resolved_target, target_kind = _attest_symlink_target(
+        root,
+        relative,
+        target,
+        seen=frozenset({relative}),
+    )
+    target_bytes = os.fsencode(target)
+    byte_budget[0] += len(target_bytes)
+    if byte_budget[0] > _MAX_MANIFEST_BYTES:
+        raise OverflowError("manifest_byte_limit")
+    digest = hashlib.sha256()
+    digest.update(b"symlink\0")
+    digest.update(target_bytes)
+    digest.update(f"\0mode:{link_stat.st_mode & 0o777}".encode())
+    return digest.hexdigest(), target, resolved_target.as_posix(), target_kind
+
+
+def _validate_symlink_topology(symlinks: Sequence[SymlinkEvidence]) -> None:
+    """Reject cycles formed by multiple otherwise-safe directory links."""
+
+    directory_links = [item for item in symlinks if item.target_kind == "directory"]
+    if len(directory_links) > _MAX_DIRECTORY_SYMLINKS:
+        raise OverflowError("manifest_directory_symlink_limit")
+    graph: dict[tuple[int, str], set[tuple[int, str]]] = {}
+    for item in directory_links:
+        key = (item.root_index, item.relative)
+        target = Path(item.resolved_target)
+        target_parts = tuple(part.casefold() for part in target.parts)
+        dependencies: set[tuple[int, str]] = set()
+        for candidate in directory_links:
+            if candidate.root_index != item.root_index:
+                continue
+            candidate_parts = tuple(part.casefold() for part in Path(candidate.relative).parts)
+            if candidate_parts[: len(target_parts)] == target_parts:
+                dependencies.add((candidate.root_index, candidate.relative))
+        graph[key] = dependencies
+
+    dependency_counts = {key: len(dependencies) for key, dependencies in graph.items()}
+    dependents: dict[tuple[int, str], set[tuple[int, str]]] = {key: set() for key in graph}
+    for key, dependencies in graph.items():
+        for dependency in dependencies:
+            dependents.setdefault(dependency, set()).add(key)
+    ready = [key for key, count in dependency_counts.items() if count == 0]
+    processed = 0
+    while ready:
+        dependency = ready.pop()
+        processed += 1
+        for dependent in dependents.get(dependency, ()):
+            dependency_counts[dependent] -= 1
+            if dependency_counts[dependent] == 0:
+                ready.append(dependent)
+    if processed != len(graph):
+        raise OSError("manifest_symlink_directory_cycle")
 
 
 def _hash_file(path: Path, *, root: Path, byte_budget: list[int]) -> str:
     """Hash one path through an openat no-follow walk rooted in ``root``."""
 
     digest = hashlib.sha256()
-    relative = path.relative_to(root)
+    relative = _validated_relative(path.relative_to(root))
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     root_fd = os.open(root, directory_flags)
     directory_fd = root_fd
@@ -616,6 +839,11 @@ def _safe_suffix(path: Path) -> str:
     return ""
 
 
+def _revision_path_sha256(root_index: int, relative: str) -> str:
+    normalized = f"{root_index}:{relative}"
+    return hashlib.sha256(normalized.encode("utf-8", errors="replace")).hexdigest()
+
+
 def _entry(
     root_index: int,
     relative: str,
@@ -623,17 +851,39 @@ def _entry(
     byte_budget: list[int],
     *,
     root: Path,
-) -> RevisionEntry:
-    normalized = f"{root_index}:{relative}"
-    path_digest = hashlib.sha256(normalized.encode("utf-8", errors="replace")).hexdigest()
-    if not absolute.exists() and not absolute.is_symlink():
+) -> tuple[RevisionEntry, SymlinkEvidence | None]:
+    path_digest = _revision_path_sha256(root_index, relative)
+    relative_path = _validated_relative(Path(relative))
+    try:
+        path_stat = _lstat_no_follow(root, relative_path)
+    except FileNotFoundError:
         state_digest = hashlib.sha256(b"deleted").hexdigest()
+        symlink = None
     else:
-        state_digest = _hash_file(absolute, root=root, byte_budget=byte_budget)
-    return RevisionEntry(
-        path_sha256=path_digest,
-        suffix=_safe_suffix(Path(relative)),
-        state_sha256=state_digest,
+        if stat.S_ISLNK(path_stat.st_mode):
+            state_digest, target, resolved_target, target_kind = attest_workspace_symlink(
+                absolute,
+                root=root,
+                byte_budget=byte_budget,
+            )
+            symlink = SymlinkEvidence(
+                root_index=root_index,
+                relative=relative_path.as_posix(),
+                target=target,
+                state_sha256=state_digest,
+                resolved_target=resolved_target,
+                target_kind=target_kind,
+            )
+        else:
+            state_digest = _hash_file(absolute, root=root, byte_budget=byte_budget)
+            symlink = None
+    return (
+        RevisionEntry(
+            path_sha256=path_digest,
+            suffix=_safe_suffix(relative_path),
+            state_sha256=state_digest,
+        ),
+        symlink,
     )
 
 
@@ -713,7 +963,11 @@ def _run_git(
     return completed.stdout
 
 
-def _git_entries(root: Path, root_index: int, byte_budget: list[int]) -> tuple[list[RevisionEntry], bytes]:
+def _git_entries(
+    root: Path,
+    root_index: int,
+    byte_budget: list[int],
+) -> tuple[list[RevisionEntry], bytes, list[SymlinkEvidence]]:
     probe = _prepare_git_probe(root)
     inside = _run_git(root, "rev-parse", "--is-inside-work-tree", probe=probe).strip()
     if inside != b"true":
@@ -765,44 +1019,90 @@ def _git_entries(root: Path, root_index: int, byte_budget: list[int]) -> tuple[l
             continue
         decoded = os.fsdecode(raw_path)
         candidate = Path(decoded)
-        if not any(part in _SKIP_DIRS for part in candidate.parts):
+        if not any(part.casefold() in _SKIP_DIR_KEYS for part in candidate.parts[:-1]):
             raw_paths.add(raw_path)
     raw_paths.discard(b"")
     if len(raw_paths) > _MAX_MANIFEST_FILES:
         raise OverflowError("manifest_file_limit")
 
     entries: list[RevisionEntry] = []
+    symlinks: list[SymlinkEvidence] = []
     root_resolved = root.resolve()
     for raw_path in sorted(raw_paths):
         relative = os.fsdecode(raw_path)
-        absolute = root / relative
-        try:
-            absolute.resolve(strict=False).relative_to(root_resolved)
-        except (OSError, ValueError) as exc:
-            raise OSError("git_path_escape") from exc
-        if absolute.is_symlink():
-            raise OSError("git_symlink_path")
-        entries.append(_entry(root_index, relative, absolute, byte_budget, root=root_resolved))
+        relative_path = _validated_relative(Path(relative))
+        absolute = root_resolved / relative_path
+        entry, symlink = _entry(
+            root_index,
+            relative_path.as_posix(),
+            absolute,
+            byte_budget,
+            root=root_resolved,
+        )
+        entries.append(entry)
+        if symlink is not None:
+            symlinks.append(symlink)
     metadata = hashlib.sha256(head).digest()
-    return entries, metadata
+    _validate_symlink_topology(symlinks)
+    return entries, metadata, symlinks
 
 
-def _fallback_entries(root: Path, root_index: int, byte_budget: list[int]) -> list[RevisionEntry]:
+def _fallback_entries(
+    root: Path,
+    root_index: int,
+    byte_budget: list[int],
+) -> tuple[list[RevisionEntry], list[SymlinkEvidence]]:
     entries: list[RevisionEntry] = []
+    symlinks: list[SymlinkEvidence] = []
     root_resolved = root.resolve()
-    for directory, dirnames, filenames in os.walk(root, followlinks=False):
-        if any((Path(directory) / name).is_symlink() for name in dirnames):
-            raise OSError("manifest_symlink_directory")
-        dirnames[:] = sorted(name for name in dirnames if name not in _SKIP_DIRS)
+
+    def reject_incomplete_walk(error: OSError) -> None:
+        raise OSError("manifest_walk_incomplete") from error
+
+    for directory, dirnames, filenames in os.walk(
+        root,
+        followlinks=False,
+        onerror=reject_incomplete_walk,
+    ):
+        retained_directories: list[str] = []
+        for name in sorted(dirnames):
+            absolute = Path(directory) / name
+            relative_path = _validated_relative(absolute.relative_to(root_resolved))
+            directory_stat = _lstat_no_follow(root_resolved, relative_path)
+            if stat.S_ISLNK(directory_stat.st_mode):
+                entry, symlink = _entry(
+                    root_index,
+                    relative_path.as_posix(),
+                    absolute,
+                    byte_budget,
+                    root=root_resolved,
+                )
+                entries.append(entry)
+                if symlink is None:
+                    raise OSError("manifest_symlink_race")
+                symlinks.append(symlink)
+            elif name.casefold() not in _SKIP_DIR_KEYS:
+                retained_directories.append(name)
+        dirnames[:] = retained_directories
         for filename in sorted(filenames):
             absolute = Path(directory) / filename
-            if absolute.is_symlink():
-                raise OSError("manifest_symlink_file")
-            relative = absolute.relative_to(root_resolved).as_posix()
-            entries.append(_entry(root_index, relative, absolute, byte_budget, root=root_resolved))
+            relative = _validated_relative(absolute.relative_to(root_resolved)).as_posix()
+            entry, symlink = _entry(
+                root_index,
+                relative,
+                absolute,
+                byte_budget,
+                root=root_resolved,
+            )
+            entries.append(entry)
+            if symlink is not None:
+                symlinks.append(symlink)
             if len(entries) > _MAX_MANIFEST_FILES:
                 raise OverflowError("manifest_file_limit")
-    return entries
+        if len(entries) > _MAX_MANIFEST_FILES:
+            raise OverflowError("manifest_file_limit")
+    _validate_symlink_topology(symlinks)
+    return entries, symlinks
 
 
 def snapshot_workspaces(roots: Iterable[str | os.PathLike[str]]) -> WorkspaceSnapshot:
@@ -819,6 +1119,7 @@ def snapshot_workspaces(roots: Iterable[str | os.PathLike[str]]) -> WorkspaceSna
         raise ValueError("at least one workspace root is required")
 
     entries: list[RevisionEntry] = []
+    symlinks: list[SymlinkEvidence] = []
     metadata: list[bytes] = []
     error_codes: list[str] = []
     methods: list[str] = []
@@ -826,13 +1127,16 @@ def snapshot_workspaces(roots: Iterable[str | os.PathLike[str]]) -> WorkspaceSna
     complete = True
     for root_index, root in enumerate(normalized):
         try:
-            root_entries, root_metadata = _git_entries(root, root_index, byte_budget)
+            root_entries, root_metadata, root_symlinks = _git_entries(root, root_index, byte_budget)
             methods.append("git")
             metadata.append(root_metadata)
             entries.extend(root_entries)
+            symlinks.extend(root_symlinks)
         except (OSError, subprocess.TimeoutExpired):
             try:
-                entries.extend(_fallback_entries(root, root_index, byte_budget))
+                root_entries, root_symlinks = _fallback_entries(root, root_index, byte_budget)
+                entries.extend(root_entries)
+                symlinks.extend(root_symlinks)
                 methods.append("manifest")
                 metadata.append(b"manifest")
             except (OSError, OverflowError):
@@ -863,6 +1167,7 @@ def snapshot_workspaces(roots: Iterable[str | os.PathLike[str]]) -> WorkspaceSna
         root_count=len(normalized),
         method="+".join(methods),
         error_codes=tuple(sorted(set(error_codes))),
+        symlinks=tuple(sorted(symlinks, key=lambda item: (item.root_index, item.relative))),
     )
 
 
@@ -1084,8 +1389,21 @@ class CodingQualityGate:
         *,
         before: WorkspaceSnapshot | None = None,
         audit_events: Sequence[AgentAuditEvent] = (),
+        trusted_non_mutating: bool = False,
     ) -> WorkspaceSnapshot:
         before_snapshot = before or self.current_snapshot or snapshot_workspaces(self.roots)
+        if trusted_non_mutating:
+            if name != "read" or not audit_events or any(event.operation != "read" for event in audit_events):
+                raise ValueError("trusted non-mutating tool evidence is invalid")
+            for event in audit_events:
+                self.record_audit_event(
+                    event,
+                    tool_name=name,
+                    args=args,
+                    snapshot=before_snapshot,
+                )
+            self.current_snapshot = before_snapshot
+            return before_snapshot
         after_snapshot = snapshot_workspaces(self.roots)
         unsafe = name in {"bash", "call_mcp_tool", "validate", "write", "edit"}
         changed, suffixes = _snapshot_delta(before_snapshot, after_snapshot)
@@ -1139,6 +1457,39 @@ class CodingQualityGate:
             and evidence.allowed
             and evidence.outcome == "ok"
         ]
+
+    def trusted_unchanged_symlinks(self) -> tuple[SymlinkEvidence, ...]:
+        """Return safe baseline links that are identical in the live revision.
+
+        The returned paths are dispatcher-only authority for the hygiene scan;
+        they are deliberately absent from serialized quality reports. New or
+        retargeted links never inherit trust merely because their target is
+        currently inside the workspace.
+        """
+
+        initial = self.initial_snapshot
+        current = self.current_snapshot
+        if initial is None or current is None or not initial.complete or not current.complete:
+            return ()
+        baseline = {(item.root_index, item.relative): item for item in initial.symlinks}
+        return tuple(item for item in current.symlinks if baseline.get((item.root_index, item.relative)) == item)
+
+    def trusted_unchanged_regular_path_hashes(self) -> frozenset[str]:
+        """Return baseline regular paths unchanged in the current revision."""
+
+        initial = self.initial_snapshot
+        current = self.current_snapshot
+        if initial is None or current is None or not initial.complete or not current.complete:
+            return frozenset()
+        initial_entries = initial.entry_map()
+        symlink_paths = {
+            _revision_path_sha256(item.root_index, item.relative) for item in (*initial.symlinks, *current.symlinks)
+        }
+        return frozenset(
+            path_sha256
+            for path_sha256, item in current.entry_map().items()
+            if path_sha256 not in symlink_paths and initial_entries.get(path_sha256) == item
+        )
 
     def _requirements(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
         successes = self._current_successes()
@@ -1230,6 +1581,23 @@ class CodingQualityGate:
             "validate tool with direct argv. Bash output and assistant prose do not count."
         )
 
+    def feedback_signature(self) -> str:
+        """Content-free identity of the live obligation shown to the model."""
+
+        verdict = self.decision()
+        current = self.current_snapshot or self.initial_snapshot
+        fields = (
+            self.effort.value,
+            str(verdict.activated).lower(),
+            current.revision_sha256 if current is not None else "",
+            str(self.mutation_epoch),
+            verdict.phase,
+            *verdict.required,
+            "--missing--",
+            *verdict.missing,
+        )
+        return hashlib.sha256("\0".join(fields).encode("utf-8")).hexdigest()
+
     def system_instructions(self) -> str:
         return (
             "\nMANDATORY CODING-QUALITY GATE: after every workspace mutation, use the "
@@ -1241,6 +1609,8 @@ class CodingQualityGate:
     def report(self) -> dict[str, object]:
         verdict = self.decision()
         current = self.current_snapshot or self.initial_snapshot
+        if current is None:  # defensive: __post_init__ always materializes one
+            raise RuntimeError("coding quality report has no workspace snapshot")
         successes = self._current_successes()
         validation_counts = {kind.value: sum(item.kind is kind for item in successes) for kind in ValidationKind}
         return {
@@ -1255,9 +1625,11 @@ class CodingQualityGate:
             "satisfied": verdict.satisfied,
             "mutation_epoch": self.mutation_epoch,
             "changed_kinds": sorted(self.changed_kinds),
-            "snapshot_complete": not self.snapshot_failed_closed,
+            "snapshot_complete": current.complete,
+            "snapshot_method": current.method,
+            "snapshot_error_codes": list(current.error_codes),
             "initial_revision_sha256": (self.initial_snapshot.revision_sha256 if self.initial_snapshot else ""),
-            "current_revision_sha256": current.revision_sha256 if current else "",
+            "current_revision_sha256": current.revision_sha256,
             "required": list(verdict.required),
             "missing": list(verdict.missing),
             "validation_counts": validation_counts,

@@ -510,10 +510,14 @@ def run_smoke(
         if getattr(binding, "model_identity", None) != protocol.EXPECTED_MODEL_IDENTITY:
             raise protocol.ProtocolError("automatic binding differs from the frozen 27B identity")
         layout = (
-            generation.GenerationLayout.create(layout_root)
+            generation.GenerationLayout.create(layout_root, portable_artifacts=True)
             if options.layout_mode == "new"
             else generation.GenerationLayout.open(layout_root)
         )
+        if not layout.portable_artifacts:
+            raise protocol.ProtocolError(
+                "legacy smoke layout is non-portable; resume cannot invent missing runtime or arm telemetry"
+            )
         manager = deps.manager_factory(config)
         try:
             manager.load_tier(options.tier_name)
@@ -529,7 +533,13 @@ def run_smoke(
             workspace_factory = deps.workspace_factory(source_for)
             _registry, _specs, surface_before = deps.build_tool_surface()
             _require_sha256(surface_before, "pre-run tool surface digest")
-            pending_before = generation.pending_pairs(schedule, layout)
+            # Observation only: promotion repair is authorized inside
+            # run_generation_pairs *after* header/runtime byte equality.
+            pending_before = generation.pending_pairs(
+                schedule,
+                layout,
+                repair_completed_promotions=False,
+            )
             factor_sha256 = deps.run_pairs(
                 schedule_document=schedule_document,
                 schedule=schedule,
@@ -538,6 +548,7 @@ def run_smoke(
                 executor=executor,
                 binding=binding,
                 tier_config=tier,
+                require_portable_artifacts=True,
             )
             _require_sha256(factor_sha256, "generation factor digest")
             if factor_sha256 != generation.factor_digest(surface_before):

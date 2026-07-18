@@ -576,6 +576,139 @@ def test_validate_diff_rejects_hardlinked_text_without_reading_outside_alias(
     assert events[-1].outcome == "nonzero"
 
 
+def test_validate_diff_only_skips_safe_unchanged_baseline_symlinks(tmp_path):
+    from mio.coding_quality import CodingEffort, CodingQualityGate
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "one.svg").write_text("<svg/>\n", encoding="utf-8")
+    (workspace / "two.svg").write_text("<svg id='two'/>\n", encoding="utf-8")
+    link = workspace / "icon-symbolic.png"
+    link.symlink_to("one.svg")
+    gate = CodingQualityGate.start(
+        [workspace],
+        "change",
+        effort=CodingEffort.XHIGH,
+    )
+    events: list[AgentAuditEvent] = []
+    policy = _policy(
+        workspace,
+        {AgentToolPermission.READ, AgentToolPermission.SHELL},
+        events,
+    )
+
+    public_result = agent.tool_validate(
+        ["git", "diff", "--check"],
+        policy=policy,
+    )
+    clean = agent._tool_validate_for_quality_gate(
+        ["git", "diff", "--check"],
+        policy=policy,
+        quality_gate=gate,
+    )
+    link.unlink()
+    link.symlink_to("two.svg")
+    changed = agent._tool_validate_for_quality_gate(
+        ["git", "diff", "--check"],
+        policy=policy,
+        quality_gate=gate,
+    )
+    (workspace / "new-symbolic.svg").symlink_to("one.svg")
+    new_link = agent._tool_validate_for_quality_gate(
+        ["git", "diff", "--check"],
+        policy=policy,
+        quality_gate=gate,
+    )
+
+    assert "validation diff: FAIL" in public_result
+    assert "validation diff: PASS" in clean
+    assert "validation diff: FAIL" in changed
+    assert "validation diff: FAIL" in new_link
+    assert [event.outcome for event in events[-3:]] == ["ok", "nonzero", "nonzero"]
+
+
+def test_quality_diff_ignores_only_unchanged_baseline_legacy_violations(tmp_path):
+    from mio.coding_quality import CodingEffort, CodingQualityGate
+
+    workspace = tmp_path / "matplotlib-style"
+    workspace.mkdir()
+    for index in range(36):
+        (workspace / f"legacy-{index:02d}.py").write_text(
+            f"VALUE_{index} = {index}  \n",
+            encoding="utf-8",
+        )
+    events: list[AgentAuditEvent] = []
+    policy = _policy(
+        workspace,
+        {AgentToolPermission.READ, AgentToolPermission.SHELL},
+        events,
+    )
+    gate = CodingQualityGate.start([workspace], "change", effort=CodingEffort.XHIGH)
+
+    pristine = agent._tool_validate_for_quality_gate(
+        ["git", "diff", "--check"],
+        policy=policy,
+        quality_gate=gate,
+    )
+    (workspace / "legacy-00.py").write_text("VALUE_0 = 100  \n", encoding="utf-8")
+    gate.refresh()
+    modified = agent._tool_validate_for_quality_gate(
+        ["git", "diff", "--check"],
+        policy=policy,
+        quality_gate=gate,
+    )
+
+    assert "validation diff: PASS" in pristine
+    assert "validation diff: FAIL" in modified
+
+    second = tmp_path / "matplotlib-new-violation"
+    second.mkdir()
+    (second / "legacy.py").write_text("LEGACY = 1  \n", encoding="utf-8")
+    second_events: list[AgentAuditEvent] = []
+    second_policy = _policy(
+        second,
+        {AgentToolPermission.READ, AgentToolPermission.SHELL},
+        second_events,
+    )
+    second_gate = CodingQualityGate.start([second], "change", effort=CodingEffort.XHIGH)
+    (second / "new.py").write_text("NEW = 1  \n", encoding="utf-8")
+    second_gate.refresh()
+    added = agent._tool_validate_for_quality_gate(
+        ["git", "diff", "--check"],
+        policy=second_policy,
+        quality_gate=second_gate,
+    )
+    assert "validation diff: FAIL" in added
+
+
+def test_quality_validation_rejects_gate_from_different_canonical_roots(tmp_path):
+    from mio.coding_quality import CodingEffort, CodingQualityGate
+
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    (first / "legacy.py").write_text("LEGACY = 1  \n", encoding="utf-8")
+    (second / "clean.py").write_text("CLEAN = 1\n", encoding="utf-8")
+    gate = CodingQualityGate.start([first], "change", effort=CodingEffort.XHIGH)
+    events: list[AgentAuditEvent] = []
+    policy = _policy(
+        second,
+        {AgentToolPermission.READ, AgentToolPermission.SHELL},
+        events,
+    )
+
+    result = agent._tool_validate_for_quality_gate(
+        ["git", "diff", "--check"],
+        policy=policy,
+        quality_gate=gate,
+    )
+
+    assert "validation rejected" in result
+    assert events[-1].allowed is False
+    assert events[-1].outcome == "denied"
+
+
 def test_validate_diff_covers_build_files_and_each_conflict_marker(tmp_path):
     (tmp_path / "broken.py").write_text("<<<<<<<\n", encoding="utf-8")
     (tmp_path / "module.kt").write_text(

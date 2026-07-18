@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shlex
 import subprocess
 from pathlib import Path
@@ -477,6 +478,445 @@ def test_snapshot_falls_back_to_bounded_manifest_when_git_is_unavailable(
     )
     assert "module.py" not in serialized
     assert "VALUE = 2" not in serialized
+
+
+@pytest.mark.parametrize(
+    "links",
+    [
+        {
+            "docs/_theme/epub/static/note.png": "../../main/static/note.png",
+            "docs/_theme/epub/static/warning.png": "../../main/static/warning.png",
+        },
+        {
+            "lib/data/images/back-symbolic.svg": "back.svg",
+            "lib/data/images/save-symbolic.svg": "save.svg",
+        },
+    ],
+    ids=("django-relative-links", "matplotlib-relative-links"),
+)
+def test_manifest_snapshot_attests_swe_style_relative_file_symlinks_without_following(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    links: dict[str, str],
+) -> None:
+    root = tmp_path / "external-git-worktree"
+    root.mkdir()
+    for relative, target in links.items():
+        link = root / relative
+        link.parent.mkdir(parents=True, exist_ok=True)
+        target_path = link.parent / target
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text("safe target\n", encoding="utf-8")
+        link.symlink_to(target)
+    monkeypatch.setattr(
+        coding_quality,
+        "_run_git",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("external metadata unavailable")),
+    )
+
+    first = snapshot_workspaces([root])
+    second = snapshot_workspaces([root])
+
+    assert first.complete is True
+    assert first.method == "manifest"
+    assert len(first.symlinks) == len(links)
+    assert {item.relative for item in first.symlinks} == set(links)
+    assert {item.target for item in first.symlinks} == set(links.values())
+    assert first.revision_sha256 == second.revision_sha256
+
+
+def test_git_snapshot_attests_tracked_relative_symlink_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "git-symlink"
+    root.mkdir()
+    (root / "target.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (root / "current.py").symlink_to("target.py")
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.name=Mio Test",
+            "-c",
+            "user.email=mio@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "tracked symlink",
+        ],
+        check=True,
+    )
+
+    def raw_git(repository, *args, probe=None):
+        del probe
+        completed = subprocess.run(
+            ["git", "-C", str(repository), *args],
+            check=True,
+            stdout=subprocess.PIPE,
+        )
+        return completed.stdout
+
+    monkeypatch.setattr(coding_quality, "_prepare_git_probe", lambda _root: (("git",), {}))
+    monkeypatch.setattr(coding_quality, "_run_git", raw_git)
+
+    snapshot = snapshot_workspaces([root])
+
+    assert snapshot.complete is True
+    assert snapshot.method == "git"
+    assert tuple(item.relative for item in snapshot.symlinks) == ("current.py",)
+    assert snapshot.symlinks[0].target == "target.py"
+    expected_state = hashlib.sha256(
+        b"symlink\0target.py" + f"\0mode:{os.lstat(root / 'current.py').st_mode & 0o777}".encode()
+    ).hexdigest()
+    assert snapshot.symlinks[0].state_sha256 == expected_state
+
+
+def test_manifest_snapshot_accepts_only_independently_attestable_directory_links(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "directory-links"
+    (root / "real" / "nested").mkdir(parents=True)
+    (root / "real" / "nested" / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (root / "alias").symlink_to("real", target_is_directory=True)
+    monkeypatch.setattr(
+        coding_quality,
+        "_run_git",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("git unavailable")),
+    )
+
+    snapshot = snapshot_workspaces([root])
+
+    assert snapshot.complete is True
+    assert tuple(item.relative for item in snapshot.symlinks) == ("alias",)
+
+    (root / "alias").unlink()
+    (root / ".git").mkdir()
+    (root / "alias").symlink_to(".git", target_is_directory=True)
+    rejected = snapshot_workspaces([root])
+    assert rejected.complete is False
+    assert rejected.method == "incomplete"
+
+    variant_root = tmp_path / "case-variant-directory-link"
+    (variant_root / ".GIT").mkdir(parents=True)
+    (variant_root / ".GIT" / "hidden.py").write_text("TRAILING = 1  \n", encoding="utf-8")
+    (variant_root / "alias").symlink_to(".GIT", target_is_directory=True)
+    case_variant = snapshot_workspaces([variant_root])
+    assert case_variant.complete is False
+
+
+def test_manifest_snapshot_rejects_multi_link_directory_cycle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "directory-cycle"
+    (root / "a").mkdir(parents=True)
+    (root / "b").mkdir()
+    (root / "a" / "to-b").symlink_to("../b", target_is_directory=True)
+    (root / "b" / "to-a").symlink_to("../a", target_is_directory=True)
+    monkeypatch.setattr(
+        coding_quality,
+        "_run_git",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("git unavailable")),
+    )
+
+    snapshot = snapshot_workspaces([root])
+
+    assert snapshot.complete is False
+    assert snapshot.method == "incomplete"
+
+
+def test_manifest_snapshot_rejects_case_variant_ancestor_directory_cycle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "case-cycle"
+    (root / "Real" / "sub").mkdir(parents=True)
+    # On case-insensitive APFS this names the ancestor itself. On a
+    # case-sensitive filesystem the separate directory keeps the regression
+    # deterministic and the conservative case-folded rule still rejects it.
+    try:
+        (root / "REAL").mkdir()
+    except FileExistsError:
+        pass
+    (root / "Real" / "sub" / "loop").symlink_to("../../REAL", target_is_directory=True)
+    monkeypatch.setattr(
+        coding_quality,
+        "_run_git",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("git unavailable")),
+    )
+
+    snapshot = snapshot_workspaces([root])
+
+    assert snapshot.complete is False
+
+
+def test_manifest_snapshot_deep_symlink_chain_fails_closed_without_recursion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "deep-chain"
+    root.mkdir()
+    (root / "target.py").write_text("VALUE = 1\n", encoding="utf-8")
+    depth = coding_quality._MAX_SYMLINK_DEPTH + 2
+    for index in range(depth):
+        target = f"link-{index + 1:04d}" if index + 1 < depth else "target.py"
+        (root / f"link-{index:04d}").symlink_to(target)
+    monkeypatch.setattr(
+        coding_quality,
+        "_run_git",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("git unavailable")),
+    )
+
+    snapshot = snapshot_workspaces([root])
+
+    assert snapshot.complete is False
+    assert snapshot.error_codes == ("snapshot_incomplete",)
+
+
+def test_manifest_snapshot_propagates_walk_errors_as_incomplete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "walk-error"
+    (root / "target").mkdir(parents=True)
+    (root / "alias").symlink_to("target", target_is_directory=True)
+    monkeypatch.setattr(
+        coding_quality,
+        "_run_git",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("git unavailable")),
+    )
+
+    def failed_walk(*_args, onerror, **_kwargs):
+        onerror(PermissionError("simulated incomplete traversal"))
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(coding_quality.os, "walk", failed_walk)
+
+    snapshot = snapshot_workspaces([root])
+
+    assert snapshot.complete is False
+    assert snapshot.method == "incomplete"
+
+
+@pytest.mark.parametrize(
+    "target_kind",
+    ("absolute", "escape", "dangling", "cycle", "hardlink-target"),
+)
+def test_manifest_snapshot_rejects_unsafe_symlink_topologies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target_kind: str,
+) -> None:
+    root = tmp_path / target_kind
+    root.mkdir()
+    outside = tmp_path / f"outside-{target_kind}.py"
+    outside.write_text("SECRET = 1\n", encoding="utf-8")
+    link = root / "link.py"
+    if target_kind == "absolute":
+        link.symlink_to(outside)
+    elif target_kind == "escape":
+        link.symlink_to("../outside-escape.py")
+    elif target_kind == "dangling":
+        link.symlink_to("missing.py")
+    elif target_kind == "cycle":
+        link.symlink_to("other.py")
+        (root / "other.py").symlink_to("link.py")
+    else:
+        hardlinked = root / "hardlinked.py"
+        os.link(outside, hardlinked)
+        link.symlink_to("hardlinked.py")
+    monkeypatch.setattr(
+        coding_quality,
+        "_run_git",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("git unavailable")),
+    )
+
+    snapshot = snapshot_workspaces([root])
+
+    assert snapshot.complete is False
+    assert snapshot.method == "incomplete"
+    assert snapshot.error_codes == ("snapshot_incomplete",)
+
+
+def test_symlink_lstat_readlink_lstat_race_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "race"
+    root.mkdir()
+    (root / "one.py").write_text("ONE = 1\n", encoding="utf-8")
+    (root / "second-target.py").write_text("TWO = 2\n", encoding="utf-8")
+    link = root / "current.py"
+    link.symlink_to("one.py")
+    monkeypatch.setattr(
+        coding_quality,
+        "_run_git",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("git unavailable")),
+    )
+    original_readlink = coding_quality.os.readlink
+    swapped = False
+
+    def swap_during_readlink(path, *args, **kwargs):
+        nonlocal swapped
+        if not swapped and path == "current.py":
+            swapped = True
+            link.unlink()
+            link.symlink_to("second-target.py")
+        return original_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(coding_quality.os, "readlink", swap_during_readlink)
+
+    snapshot = snapshot_workspaces([root])
+
+    assert swapped is True
+    assert snapshot.complete is False
+
+
+def test_only_unchanged_baseline_symlinks_receive_hygiene_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "baseline"
+    root.mkdir()
+    (root / "one.py").write_text("ONE = 1\n", encoding="utf-8")
+    (root / "two.py").write_text("TWO = 2\n", encoding="utf-8")
+    link = root / "current.py"
+    link.symlink_to("one.py")
+    monkeypatch.setattr(
+        coding_quality,
+        "_run_git",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("git unavailable")),
+    )
+    gate = CodingQualityGate.start([root], "change", effort=CodingEffort.XHIGH)
+
+    assert tuple(item.relative for item in gate.trusted_unchanged_symlinks()) == ("current.py",)
+
+    link.unlink()
+    link.symlink_to("two.py")
+    gate.refresh()
+
+    assert gate.trusted_unchanged_symlinks() == ()
+
+
+def test_only_unchanged_baseline_regular_files_receive_hygiene_authority(
+    tmp_path: Path,
+) -> None:
+    unchanged = tmp_path / "unchanged.py"
+    changed = tmp_path / "changed.py"
+    unchanged.write_text("UNCHANGED = 1\n", encoding="utf-8")
+    changed.write_text("CHANGED = 1\n", encoding="utf-8")
+    gate = CodingQualityGate.start([tmp_path], "change", effort=CodingEffort.XHIGH)
+    initial_trust = gate.trusted_unchanged_regular_path_hashes()
+
+    assert coding_quality._revision_path_sha256(0, "unchanged.py") in initial_trust
+    assert coding_quality._revision_path_sha256(0, "changed.py") in initial_trust
+
+    changed.write_text("CHANGED = 2\n", encoding="utf-8")
+    (tmp_path / "new.py").write_text("NEW = 1\n", encoding="utf-8")
+    gate.refresh()
+    current_trust = gate.trusted_unchanged_regular_path_hashes()
+
+    assert coding_quality._revision_path_sha256(0, "unchanged.py") in current_trust
+    assert coding_quality._revision_path_sha256(0, "changed.py") not in current_trust
+    assert coding_quality._revision_path_sha256(0, "new.py") not in current_trust
+
+
+def test_trusted_builtin_read_can_defer_snapshot_but_unknown_or_unaudited_cannot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "module.py"
+    target.write_text("VALUE = 1\n", encoding="utf-8")
+    gate = CodingQualityGate.start([tmp_path], "inspect", effort=CodingEffort.MEDIUM)
+    current = gate.current_snapshot
+    assert current is not None
+    snapshots = 0
+
+    def counted_snapshot(_roots):
+        nonlocal snapshots
+        snapshots += 1
+        return current
+
+    monkeypatch.setattr(coding_quality, "snapshot_workspaces", counted_snapshot)
+    read_event = AgentAuditEvent(
+        timestamp=1.0,
+        operation="read",
+        permission="read",
+        target=str(target),
+        allowed=True,
+        outcome="ok",
+    )
+
+    gate.after_tool(
+        "read",
+        {"path": "module.py"},
+        before=current,
+        audit_events=(read_event,),
+        trusted_non_mutating=True,
+    )
+    assert snapshots == 0
+    assert gate.successful_reads == 1
+
+    gate.after_tool("read", {"path": "module.py"}, before=current, audit_events=())
+    gate.after_tool("unknown", {}, before=current, audit_events=())
+    assert snapshots == 2
+
+
+def test_quality_report_exposes_only_closed_snapshot_attestation_fields(tmp_path: Path) -> None:
+    gate = CodingQualityGate.start([tmp_path], "inspect", effort=CodingEffort.LOW)
+
+    report = gate.report()
+
+    assert report["snapshot_method"] in {"git", "manifest"}
+    assert report["snapshot_error_codes"] == []
+
+    incomplete = coding_quality.WorkspaceSnapshot(
+        revision_sha256="a" * 64,
+        entries=(),
+        complete=False,
+        root_count=1,
+        method="incomplete",
+        error_codes=("snapshot_incomplete",),
+    )
+    failed = CodingQualityGate(
+        roots=(tmp_path,),
+        initial_snapshot=incomplete,
+        current_snapshot=incomplete,
+    ).report()
+    assert failed["snapshot_method"] == "incomplete"
+    assert failed["snapshot_error_codes"] == ["snapshot_incomplete"]
+
+
+def test_feedback_signature_changes_with_revision_epoch_phase_and_obligation(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "module.py"
+    target.write_text("VALUE = 1\n", encoding="utf-8")
+    gate = CodingQualityGate.start([tmp_path], "change", effort=CodingEffort.HIGH)
+    observing = gate.feedback_signature()
+    _record_edit(gate, target, "VALUE = 2\n")
+    dirty = gate.feedback_signature()
+    assert dirty != observing
+    assert dirty == gate.feedback_signature()
+
+    gate.record_validation(
+        ValidationKind.TEST,
+        argv=("pytest", "-q"),
+        allowed=True,
+        outcome="nonzero",
+    )
+    failed = gate.feedback_signature()
+    assert failed != dirty
+
+    _record_edit(gate, target, "VALUE = 3\n")
+    next_epoch = gate.feedback_signature()
+    assert next_epoch not in {observing, dirty, failed}
 
 
 def test_requested_change_without_a_workspace_diff_remains_observational(tmp_path: Path) -> None:

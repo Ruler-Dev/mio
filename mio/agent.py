@@ -859,10 +859,33 @@ def _validation_execution_argv(argv: tuple[str, ...]) -> tuple[str, ...]:
     return (*argv[:insertion], "-o", "addopts=", *argv[insertion:])
 
 
-def _validate_workspace_hygiene(policy: AgentToolPolicy) -> _BoundedCommandResult:
+def _validate_workspace_hygiene(
+    policy: AgentToolPolicy,
+    *,
+    trusted_symlink_states: tuple[object, ...] = (),
+    trusted_regular_path_hashes: frozenset[str] = frozenset(),
+) -> _BoundedCommandResult:
     """Check the complete current text workspace, including staged/untracked files."""
 
     policy.require(AgentToolPermission.READ)
+    from mio.coding_quality import (
+        SymlinkEvidence,
+        _revision_path_sha256,
+        attest_workspace_symlink,
+    )
+
+    attested_links: dict[tuple[int, str], SymlinkEvidence] = {}
+    for item in trusted_symlink_states:
+        if not isinstance(item, SymlinkEvidence):
+            raise TypeError("trusted symlink state must contain SymlinkEvidence")
+        key = (item.root_index, item.relative)
+        if key in attested_links:
+            raise ValueError("trusted symlink state contains duplicate paths")
+        attested_links[key] = item
+    if not isinstance(trusted_regular_path_hashes, frozenset) or any(
+        not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value) for value in trusted_regular_path_hashes
+    ):
+        raise TypeError("trusted regular path state is malformed")
     skipped_directories = {
         ".git",
         ".hg",
@@ -879,6 +902,7 @@ def _validate_workspace_hygiene(policy: AgentToolPolicy) -> _BoundedCommandResul
         "node_modules",
         "spd",
     }
+    skipped_directory_keys = {name.casefold() for name in skipped_directories}
     binary_suffixes = {
         ".7z",
         ".a",
@@ -928,7 +952,7 @@ def _validate_workspace_hygiene(policy: AgentToolPolicy) -> _BoundedCommandResul
         nonlocal traversal_failed
         traversal_failed = True
 
-    for root in policy.workspace_roots:
+    for root_index, root in enumerate(policy.workspace_roots):
         try:
             walker = os.fwalk(
                 root,
@@ -936,7 +960,31 @@ def _validate_workspace_hygiene(policy: AgentToolPolicy) -> _BoundedCommandResul
                 onerror=mark_traversal_failure,
                 follow_symlinks=False,
             )
-            for _directory, dirnames, filenames, directory_fd in walker:
+            for directory, dirnames, filenames, directory_fd in walker:
+                directory_relative = Path(directory).relative_to(root)
+
+                def symlink_is_unchanged(name: str) -> bool:
+                    relative = (directory_relative / name).as_posix()
+                    expected = attested_links.get((root_index, relative))
+                    if expected is None:
+                        return False
+                    try:
+                        state_sha256, target, resolved_target, target_kind = attest_workspace_symlink(
+                            Path(directory) / name,
+                            root=root,
+                            byte_budget=[0],
+                        )
+                    except (OSError, OverflowError, ValueError):
+                        return False
+                    return expected == SymlinkEvidence(
+                        root_index=root_index,
+                        relative=relative,
+                        target=target,
+                        state_sha256=state_sha256,
+                        resolved_target=resolved_target,
+                        target_kind=target_kind,
+                    )
+
                 retained: list[str] = []
                 for name in sorted(dirnames):
                     try:
@@ -949,14 +997,12 @@ def _validate_workspace_hygiene(policy: AgentToolPolicy) -> _BoundedCommandResul
                         violations += 1
                         continue
                     if stat.S_ISLNK(directory_stat.st_mode):
-                        violations += 1
-                    elif name not in skipped_directories:
+                        if not symlink_is_unchanged(name):
+                            violations += 1
+                    elif name.casefold() not in skipped_directory_keys:
                         retained.append(name)
                 dirnames[:] = retained
                 for name in sorted(filenames):
-                    suffix = Path(name).suffix.lower()
-                    if suffix in binary_suffixes:
-                        continue
                     try:
                         file_stat = os.stat(
                             name,
@@ -966,8 +1012,18 @@ def _validate_workspace_hygiene(policy: AgentToolPolicy) -> _BoundedCommandResul
                     except OSError:
                         violations += 1
                         continue
-                    if stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink > 1:
+                    if stat.S_ISLNK(file_stat.st_mode):
+                        if not symlink_is_unchanged(name):
+                            violations += 1
+                        continue
+                    if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink > 1:
                         violations += 1
+                        continue
+                    relative = (directory_relative / name).as_posix()
+                    if _revision_path_sha256(root_index, relative) in trusted_regular_path_hashes:
+                        continue
+                    suffix = Path(name).suffix.lower()
+                    if suffix in binary_suffixes:
                         continue
                     checked_files += 1
                     if checked_files > 20_000 or file_stat.st_size > policy.file_limit_chars:
@@ -1056,10 +1112,12 @@ def _validate_workspace_hygiene(policy: AgentToolPolicy) -> _BoundedCommandResul
     )
 
 
-def tool_validate(
+def _tool_validate_impl(
     argv: list[str] | tuple[str, ...],
     *,
     policy: AgentToolPolicy | None = None,
+    trusted_symlink_states: tuple[object, ...] = (),
+    trusted_regular_path_hashes: frozenset[str] = frozenset(),
 ) -> str:
     """Run one recognized validation as direct argv and audit its true status.
 
@@ -1117,7 +1175,11 @@ def tool_validate(
             # repository Git would omit staged/untracked files and cannot work
             # reliably in plain or linked workspaces.  The trusted dispatcher
             # instead scans the complete bounded current text tree.
-            result = _validate_workspace_hygiene(active_policy)
+            result = _validate_workspace_hygiene(
+                active_policy,
+                trusted_symlink_states=trusted_symlink_states,
+                trusted_regular_path_hashes=trusted_regular_path_hashes,
+            )
         else:
             execution_argv = _validation_execution_argv(normalized)
             sandboxed_argv, command_env = sandboxed_command(
@@ -1219,6 +1281,50 @@ def tool_validate(
             detail=f"{type(exc).__name__}: {exc}",
         )
         return _capped(active_policy, f"(validation error: {exc})")
+
+
+def tool_validate(
+    argv: list[str] | tuple[str, ...],
+    *,
+    policy: AgentToolPolicy | None = None,
+) -> str:
+    """Run validation without coding-gate-only baseline-link authority."""
+
+    return _tool_validate_impl(argv, policy=policy)
+
+
+def _tool_validate_for_quality_gate(
+    argv: list[str] | tuple[str, ...],
+    *,
+    policy: AgentToolPolicy,
+    quality_gate: object,
+) -> str:
+    """Dispatcher-only adapter deriving link authority from the live gate."""
+
+    from mio.coding_quality import CodingQualityGate
+
+    if not isinstance(quality_gate, CodingQualityGate):
+        raise TypeError("quality_gate must be CodingQualityGate")
+    if tuple(policy.workspace_roots) != tuple(quality_gate.roots):
+        target = "root_mismatch:invalid sha256:" + hashlib.sha256(b"").hexdigest()[:32]
+        policy.audit(
+            operation="validate",
+            permission=AgentToolPermission.SHELL,
+            target=target,
+            allowed=False,
+            outcome="denied",
+            detail="quality gate roots do not exactly match current policy roots",
+        )
+        return _capped(
+            policy,
+            "(validation rejected: coding-quality gate roots do not match current workspace authority)",
+        )
+    return _tool_validate_impl(
+        argv,
+        policy=policy,
+        trusted_symlink_states=quality_gate.trusted_unchanged_symlinks(),
+        trusted_regular_path_hashes=quality_gate.trusted_unchanged_regular_path_hashes(),
+    )
 
 
 def tool_read(path: str, *, policy: AgentToolPolicy | None = None) -> str:
@@ -2297,12 +2403,15 @@ def _process_user_input(
         from mio.coding_quality import CodingQualityGate
 
         pending_gate = state.get("_quality_gate")
-        if isinstance(pending_gate, CodingQualityGate):
+        pending_roots_match = isinstance(pending_gate, CodingQualityGate) and tuple(pending_gate.roots) == tuple(
+            execution_policy.workspace_roots
+        )
+        if pending_roots_match:
             # A prior generation may have failed after validation while a late
             # workspace mutation was still landing. Reconcile before deciding
             # that the stored certificate can be discarded.
             pending_gate.refresh()
-        if isinstance(pending_gate, CodingQualityGate) and not pending_gate.decision().satisfied:
+        if pending_roots_match and not pending_gate.decision().satisfied:
             quality_gate = pending_gate
         else:
             quality_gate = CodingQualityGate.start(
@@ -2342,6 +2451,8 @@ def _process_user_input(
     tool_event_traces: list[AgentToolTrace] = []
     tool_telemetry_complete = True
     tool_timeout_terminal = False
+    last_post_tool_quality_signature: str | None = None
+    no_tool_reprompted_signatures: set[str] = set()
 
     for _round_idx in range(execution_budget.max_rounds):
         if wall_deadline is not None and time.perf_counter() >= wall_deadline:
@@ -2536,7 +2647,19 @@ def _process_user_input(
                 quality_gate.refresh()
                 state["quality_gate_pending"] = not quality_gate.decision().satisfied
             if quality_gate is not None and not quality_gate.decision().satisfied:
+                quality_signature = quality_gate.feedback_signature()
+                if quality_signature in no_tool_reprompted_signatures:
+                    quality_notice = (
+                        "Coding-quality gate: INCOMPLETE. The unchanged validation "
+                        "obligation was already reprompted once; no success is certified."
+                    )
+                    console.print(quality_notice, style="yellow")
+                    terminal_assistant_text = "\n\n".join(text for text in (visible_text, quality_notice) if text)
+                    terminal_reason = "quality_incomplete"
+                    break
                 feedback = quality_gate.feedback()
+                no_tool_reprompted_signatures.add(quality_signature)
+                last_post_tool_quality_signature = quality_signature
                 console.print(feedback, style="yellow")
                 current_messages = list(current_messages) + [
                     {"role": "assistant", "content": visible_text or None},
@@ -2605,9 +2728,7 @@ def _process_user_input(
                 result = "(tool result budget exhausted for this turn)"
                 forced_finalization_reason = f"tool result limit {_MAX_TOOL_RESULT_CHARS_PER_TURN} characters reached"
             if admitted:
-                gate_before = (
-                    quality_gate.before_tool(name, args) if quality_gate is not None and spec is not None else None
-                )
+                gate_before = quality_gate.before_tool(name, args) if quality_gate is not None else None
                 if wall_deadline is not None:
                     # Snapshotting the workspace for the quality gate can take
                     # measurable time. Recheck immediately before admission so
@@ -2720,7 +2841,14 @@ def _process_user_input(
                             # admissible timeout evidence.
                             invocation_telemetry_complete = False
                         else:
-                            result = spec["fn"](**kwargs)
+                            if name == "validate" and spec["fn"] is tool_validate and quality_gate is not None:
+                                result = _tool_validate_for_quality_gate(
+                                    kwargs["argv"],
+                                    policy=call_policy,
+                                    quality_gate=quality_gate,
+                                )
+                            else:
+                                result = spec["fn"](**kwargs)
                             fallback_outcome = "ok"
                 except Exception as e:
                     result = f"(tool error: {type(e).__name__}: {e})"
@@ -2738,12 +2866,22 @@ def _process_user_input(
                 # Every known callable, including catalog/MCP tools without a
                 # permission field, needs an audit to make its trace complete.
                 invocation_telemetry_complete = False
-            if admitted and quality_gate is not None and spec is not None and gate_before is not None:
+            if admitted and quality_gate is not None and gate_before is not None:
+                trusted_non_mutating = (
+                    spec is not None
+                    and name == "read"
+                    and spec["fn"] is tool_read
+                    and invocation_telemetry_complete
+                    and not effect_unknown
+                    and len(invocation_audits) == 1
+                    and invocation_audits[0].operation == "read"
+                )
                 quality_gate.after_tool(
                     name,
                     args,
                     before=gate_before,
                     audit_events=invocation_audits,
+                    trusted_non_mutating=trusted_non_mutating,
                 )
                 state["quality_gate_pending"] = not quality_gate.decision().satisfied
             remaining_result_chars = max(
@@ -2825,12 +2963,15 @@ def _process_user_input(
         if quality_gate is not None:
             quality_decision = quality_gate.decision()
             if quality_decision.activated and not quality_decision.satisfied:
-                current_messages.append(
-                    {
-                        "role": "user",
-                        "content": quality_gate.feedback(),
-                    }
-                )
+                quality_signature = quality_gate.feedback_signature()
+                if quality_signature != last_post_tool_quality_signature:
+                    current_messages.append(
+                        {
+                            "role": "user",
+                            "content": quality_gate.feedback(),
+                        }
+                    )
+                    last_post_tool_quality_signature = quality_signature
 
     if quality_gate is not None:
         quality_gate.refresh()
