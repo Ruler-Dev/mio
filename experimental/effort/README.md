@@ -13,6 +13,29 @@ effort feature yet. The profiles below are initial resource envelopes to be
 calibrated, not benchmark results. More permitted work does not imply more
 work on every request, and neither implies monotonically better quality.
 
+## Verified engineering checkpoint (2026-07-18)
+
+The current evidence is summarized in
+[`RESULTS_2026-07-18.md`](RESULTS_2026-07-18.md). Its claim boundary is narrow:
+the agentic tool-loop repair worked on one real coding fixture, the HumanEval
+verifier passed its complete canonical-solution parity check, and two
+calibration-only uncertainty configurations were measured. No held-out task
+was opened and no speed, quality, or breakthrough claim follows from these
+pilots.
+
+| Area | Verified observation | Consequence |
+| --- | --- | --- |
+| Agentic tool replay | The baseline repeated `find` then four `cat` calls in 10.28 s of model time without editing or testing. Native `assistant.tool_calls` followed by `role=tool` replay, multi-call support, and a bounded final synthesis restored a complete edit/test path. | Caveman completed `read + read -> edit -> test (pass)` in 5.65 s model / 6.28 s wall time with 3/3 tests passing. Ponytail reached the same correct result in 11.47 s model / 12.61 s wall time. This single fixture does not establish a policy ranking. |
+| Hidden verifier | The committed, source-bound certificate verifies all 164/164 pinned HumanEval canonical solutions. Protocol `mio-markov-humaneval-two-phase-v2` rejects a missing, stale, tampered, or source-mismatched certificate before calibration or evaluation. | Hidden evaluation is eligible for calibration use under the pinned protocol; it is not evidence that an adaptive policy improves quality. |
+| Model identity | The local `Qwen3-4B-8bit` content fingerprint is `local-sha256-v1:daee7cf817887ab096be809ba598f9811376a225a95358c6567c846446fc6902`. | Runs bind to model contents rather than trusting a mutable local path. |
+| Native uncertainty | On the 32-task calibration split: 320 candidates, 320 post-generation hidden evaluations, eight direct errors, 13 exact-zero uncertainty values, and 16 observed selector transitions. | No transition stratum met the support gate; zero estimates were published. |
+| FP32, stride 8 | The same split and direct error count produced no exact-zero uncertainty values but only five observed selector transitions. | Numerical dynamic range improved, routing support did not; again zero strata and zero estimates were eligible. |
+
+The held-out split remains sealed. The next admissible work is a paired
+uncertainty ablation on the calibration split, followed by coarser hierarchical
+pooling or an external calibration corpus. A held-out run requires a new,
+frozen preregistration and must occur only after those gates pass.
+
 Public provider documentation establishes only a user-facing pattern: an
 effort control trades response thoroughness or reasoning work against latency
 and token use. OpenAI documents model-dependent effort values and Anthropic
