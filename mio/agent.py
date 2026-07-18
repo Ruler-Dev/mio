@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
+import multiprocessing
 import os
 import re
 import selectors
@@ -44,6 +46,9 @@ console = Console()
 _MAX_TOOL_CALLS_PER_TURN = 32
 _MAX_TOOL_RESULT_CHARS_PER_TURN = 100_000
 _MAX_AGENT_ROUNDS_PER_TURN = 12
+_FILE_TOOL_TIMEOUT_S = 30.0
+_FILE_WORKER_SHUTDOWN_GRACE_S = 1.0
+_PARTIALLY_BOUNDED_COMMAND_TOOLS = frozenset({"bash", "validate"})
 _FINALIZE_TOOL_LOOP = (
     "Tool execution must stop now ({reason}). Do not call another tool. "
     "Give a concise, evidence-based status with files changed, latest validation "
@@ -102,12 +107,34 @@ class AgentRoundTrace:
     generation_tps: float
     generation_backend: str
     fallback_ar: bool
+    prefill_ns: int = 0
+    decode_ns: int = 0
+    model_total_ns: int = 0
+    logical_prompt_tokens: int = 0
+    physical_prefill_tokens: int = 0
+    physical_decode_tokens: int = 0
+    warm_offset: int = 0
+    warm_offset_tokens: int = 0
+    timing_source: str = "unavailable"
+    drafter_requested: str = "auto"
+    drafter_selected: str = "baseline"
+    drafter_ref: str | None = None
+    phase_censored: bool = False
+    deadline_hit: bool = False
 
 
 @dataclass(frozen=True)
 class AgentToolTrace:
-    """Sanitized evidence for one dispatcher/audit event."""
+    """Sanitized evidence for exactly one admitted tool invocation.
 
+    ``sequence`` is zero-based and contiguous within one turn.  Audit sinks may
+    emit more than one event while implementing an invocation; those events are
+    committed and conservatively folded into this single record so elapsed time
+    is never duplicated.  No model argument, target path, or tool output is
+    retained in the trace.
+    """
+
+    sequence: int
     round_index: int
     tool_name: str
     operation: str
@@ -115,6 +142,15 @@ class AgentToolTrace:
     allowed: bool
     outcome: str
     target_sha256: str
+    duration_ns: int = 0
+    effective_timeout_ns: int | None = None
+    exit_code_or_signal: int | str | None = None
+    output_chars: int = 0
+    audit_count: int = 0
+    audit_sha256: str = ""
+    timeout_enforced: bool = False
+    telemetry_complete: bool = True
+    effect_unknown: bool = False
 
 
 @dataclass(frozen=True)
@@ -136,35 +172,254 @@ class AgentTurnResult:
     quality_gate: dict[str, object] | None = None
     completion_tokens: int = 0
     budget_exhaustion: str | None = None
+    tool_telemetry_complete: bool = True
+
+
+def _trace_nonnegative_int(metrics: object, name: str, default: int = 0) -> int:
+    value = getattr(metrics, name, default)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"round metric {name} must be a non-negative integer")
+    return value
+
+
+def _trace_bool(metrics: object, name: str, default: bool = False) -> bool:
+    value = getattr(metrics, name, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"round metric {name} must be boolean")
+    return value
 
 
 def _round_trace(round_index: int, metrics: object) -> AgentRoundTrace:
+    prompt_tokens = _trace_nonnegative_int(metrics, "prompt_tokens")
+    logical_prompt_tokens = _trace_nonnegative_int(
+        metrics,
+        "logical_prompt_tokens",
+        prompt_tokens,
+    )
+    if logical_prompt_tokens != prompt_tokens:
+        raise ValueError("round metric logical_prompt_tokens must equal prompt_tokens")
+    warm_offset = _trace_nonnegative_int(metrics, "warm_offset")
+    if warm_offset > logical_prompt_tokens:
+        raise ValueError("round metric warm_offset exceeds logical_prompt_tokens")
+    expected_physical_tokens = logical_prompt_tokens - warm_offset
+    physical_prefill_tokens = _trace_nonnegative_int(
+        metrics,
+        "physical_prefill_tokens",
+        expected_physical_tokens,
+    )
+    if physical_prefill_tokens != expected_physical_tokens:
+        raise ValueError("round metric physical_prefill_tokens must equal logical_prompt_tokens - warm_offset")
+    prefill_ns = _trace_nonnegative_int(metrics, "prefill_ns")
+    decode_ns = _trace_nonnegative_int(metrics, "decode_ns")
+    model_total_ns = _trace_nonnegative_int(metrics, "model_total_ns")
+    if model_total_ns != prefill_ns + decode_ns:
+        raise ValueError("round metric model_total_ns must equal prefill_ns + decode_ns")
+    total_time_s = float(getattr(metrics, "total_time_s", 0.0))
+    if not math.isfinite(total_time_s) or total_time_s < 0:
+        raise ValueError("round metric total_time_s must be finite and non-negative")
+    if model_total_ns > math.ceil(total_time_s * 1e9):
+        raise ValueError("round metric model_total_ns exceeds total_time_s")
+    completion_tokens = _trace_nonnegative_int(metrics, "completion_tokens")
+    physical_decode_tokens = _trace_nonnegative_int(
+        metrics,
+        "physical_decode_tokens",
+        completion_tokens,
+    )
+    if physical_decode_tokens < completion_tokens:
+        raise ValueError("round metric physical_decode_tokens is below completion_tokens")
+    drafter_ref = getattr(metrics, "drafter_ref", None)
+    if drafter_ref is not None and not isinstance(drafter_ref, str):
+        raise ValueError("round metric drafter_ref must be a string or None")
     return AgentRoundTrace(
         round_index=round_index,
-        prompt_tokens=int(getattr(metrics, "prompt_tokens", 0) or 0),
-        completion_tokens=int(getattr(metrics, "completion_tokens", 0) or 0),
-        total_time_s=float(getattr(metrics, "total_time_s", 0.0) or 0.0),
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_time_s=total_time_s,
         prompt_tps=float(getattr(metrics, "prompt_tps", 0.0) or 0.0),
         generation_tps=float(getattr(metrics, "generation_tps", 0.0) or 0.0),
         generation_backend=str(getattr(metrics, "generation_backend", "unknown")),
-        fallback_ar=bool(getattr(metrics, "fallback_ar", False)),
+        fallback_ar=_trace_bool(metrics, "fallback_ar"),
+        prefill_ns=prefill_ns,
+        decode_ns=decode_ns,
+        model_total_ns=model_total_ns,
+        logical_prompt_tokens=logical_prompt_tokens,
+        physical_prefill_tokens=physical_prefill_tokens,
+        physical_decode_tokens=physical_decode_tokens,
+        warm_offset=warm_offset,
+        warm_offset_tokens=warm_offset,
+        timing_source=str(getattr(metrics, "timing_source", "unavailable") or "unavailable"),
+        drafter_requested=str(getattr(metrics, "drafter_requested", "auto")),
+        drafter_selected=str(getattr(metrics, "drafter_selected", "baseline")),
+        drafter_ref=drafter_ref,
+        phase_censored=_trace_bool(metrics, "phase_censored"),
+        deadline_hit=_trace_bool(metrics, "deadline_hit"),
     )
 
 
+def _sha256_commitment(parts: tuple[str, ...]) -> str:
+    """Commit a sequence without ambiguous concatenation or retaining content."""
+
+    digest = hashlib.sha256()
+    for part in parts:
+        encoded = part.encode("utf-8", errors="replace")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+    return digest.hexdigest()
+
+
+def _invocation_target_sha256(tool_name: str, args: Mapping[str, object]) -> str:
+    """Return an argument commitment for unaudited/unknown invocations."""
+
+    try:
+        rendered = json.dumps(
+            {"tool_name": tool_name, "arguments": args},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    except (TypeError, ValueError):
+        # Parsed model arguments are JSON-compatible in the normal dispatcher.
+        # A custom trusted registry may still introduce unusual objects; their
+        # type shape is a stable, content-free fallback rather than repr(),
+        # which could leak a target or carry nondeterministic addresses.
+        rendered = json.dumps(
+            {
+                "tool_name": tool_name,
+                "argument_types": sorted(
+                    (str(key), f"{type(value).__module__}.{type(value).__qualname__}") for key, value in args.items()
+                ),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    return _sha256_commitment((rendered,))
+
+
+_OUTCOME_PRECEDENCE = {
+    "error": 0,
+    "timeout": 1,
+    "denied": 2,
+    "unscoped": 3,
+    "unrecognized": 4,
+    "output_limit": 5,
+    "nonzero": 6,
+    "no_work": 7,
+    "ok": 8,
+}
+
+
+def _fold_audit_text(events: tuple[AgentAuditEvent, ...], field: str, fallback: str) -> str:
+    values = tuple(dict.fromkeys(str(getattr(event, field, ""))[:64] for event in events))
+    if not values:
+        return fallback
+    if len(values) == 1:
+        return values[0]
+    return "multiple"
+
+
+def _fold_audit_outcome(events: tuple[AgentAuditEvent, ...], fallback: str) -> str:
+    values = tuple(dict.fromkeys(event.outcome for event in events))
+    if not values:
+        return fallback
+    if "timeout" in values:
+        # A timeout is terminal even when cleanup or a secondary audit also
+        # reports an error. Never let fold ordering hide that censoring event.
+        return "timeout"
+    return min(values, key=lambda value: (_OUTCOME_PRECEDENCE.get(value, -1), value))
+
+
+def _audit_exit_code(events: tuple[AgentAuditEvent, ...]) -> int | str | None:
+    values: list[int | str] = []
+    for event in events:
+        signal_match = re.search(r"(?:^|;\s*)signal=([1-9][0-9]*)", event.detail)
+        returncode_match = re.search(r"(?:^|;\s*)returncode=(-?[0-9]+)", event.detail)
+        if signal_match is not None:
+            value: int | str = f"signal:{int(signal_match.group(1))}"
+        elif returncode_match is not None:
+            returncode = int(returncode_match.group(1))
+            value = f"signal:{abs(returncode)}" if returncode < 0 else returncode
+        else:
+            continue
+        if value not in values:
+            values.append(value)
+    return values[0] if len(values) == 1 else None
+
+
 def _tool_trace(
+    *,
+    sequence: int,
     round_index: int,
     tool_name: str,
-    event: AgentAuditEvent,
+    args: Mapping[str, object],
+    events: tuple[AgentAuditEvent, ...],
+    result: str,
+    fallback_outcome: str,
+    duration_ns: int,
+    effective_timeout_ns: int | None,
+    timeout_enforced: bool,
+    telemetry_complete: bool,
+    known_tool: bool,
+    permission_fallback: str = "none",
+    effect_unknown: bool = False,
 ) -> AgentToolTrace:
-    target_digest = hashlib.sha256(event.target.encode("utf-8", errors="replace")).hexdigest()
+    if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0:
+        raise ValueError("tool sequence must be a non-negative integer")
+    if isinstance(duration_ns, bool) or not isinstance(duration_ns, int) or duration_ns < 0:
+        raise ValueError("tool duration_ns must be a non-negative integer")
+    if effective_timeout_ns is not None and (
+        isinstance(effective_timeout_ns, bool) or not isinstance(effective_timeout_ns, int) or effective_timeout_ns <= 0
+    ):
+        raise ValueError("effective_timeout_ns must be a positive integer or None")
+    if (
+        not isinstance(timeout_enforced, bool)
+        or not isinstance(telemetry_complete, bool)
+        or not isinstance(effect_unknown, bool)
+    ):
+        raise ValueError("tool telemetry flags must be boolean")
+    if known_tool and tool_name in _PARTIALLY_BOUNDED_COMMAND_TOOLS and timeout_enforced:
+        raise ValueError("bash/validate timeout_enforced cannot cover unsupervised preflight")
+    if events:
+        target_digest = _sha256_commitment(tuple(event.target for event in events))
+        audit_digest = _sha256_commitment(
+            tuple(
+                json.dumps(
+                    {
+                        "operation": event.operation,
+                        "permission": event.permission,
+                        "target_sha256": hashlib.sha256(event.target.encode("utf-8", errors="replace")).hexdigest(),
+                        "allowed": event.allowed,
+                        "outcome": event.outcome,
+                        "detail_sha256": hashlib.sha256(event.detail.encode("utf-8", errors="replace")).hexdigest(),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                for event in events
+            )
+        )
+    else:
+        target_digest = _invocation_target_sha256(tool_name, args)
+        audit_digest = _sha256_commitment(())
+    sanitized_name = tool_name[:64] if known_tool else "unknown"
+    allowed = all(event.allowed for event in events) if events else fallback_outcome == "ok"
     return AgentToolTrace(
+        sequence=sequence,
         round_index=round_index,
-        tool_name=tool_name[:64],
-        operation=event.operation,
-        permission=event.permission,
-        allowed=event.allowed,
-        outcome=event.outcome,
+        tool_name=sanitized_name,
+        operation=_fold_audit_text(events, "operation", sanitized_name),
+        permission=_fold_audit_text(events, "permission", permission_fallback),
+        allowed=allowed,
+        outcome=_fold_audit_outcome(events, fallback_outcome),
         target_sha256=target_digest,
+        duration_ns=duration_ns,
+        effective_timeout_ns=effective_timeout_ns,
+        exit_code_or_signal=_audit_exit_code(events),
+        output_chars=len(result),
+        audit_count=len(events),
+        audit_sha256=audit_digest,
+        timeout_enforced=timeout_enforced,
+        telemetry_complete=telemetry_complete,
+        effect_unknown=effect_unknown,
     )
 
 
@@ -1258,6 +1513,231 @@ AGENT_TOOLS = {
     },
 }
 
+_TERMINABLE_FILE_TOOL_FUNCTIONS = {
+    "read": tool_read,
+    "write": tool_write,
+    "edit": tool_edit,
+}
+
+
+@dataclass(frozen=True)
+class _TerminableToolResult:
+    result: str
+    events: tuple[AgentAuditEvent, ...]
+    outcome: str
+    timed_out: bool
+    duration_ns: int
+    termination_confirmed: bool
+    telemetry_complete: bool
+
+
+def _file_tool_worker(
+    connection: object,
+    tool_name: str,
+    kwargs: dict[str, object],
+    policy_payload: dict[str, object],
+) -> None:
+    """Run one built-in file primitive in an independently killable process."""
+
+    events: list[AgentAuditEvent] = []
+    try:
+        policy = AgentToolPolicy(
+            workspace_roots=tuple(Path(value) for value in policy_payload["workspace_roots"]),
+            permissions=frozenset(AgentToolPermission(value) for value in policy_payload["permissions"]),
+            output_limit_chars=int(policy_payload["output_limit_chars"]),
+            file_limit_chars=int(policy_payload["file_limit_chars"]),
+            command_timeout_s=float(policy_payload["command_timeout_s"]),
+            audit_sink=events.append,
+        )
+        function = _TERMINABLE_FILE_TOOL_FUNCTIONS[tool_name]
+        result = function(**kwargs, policy=policy)
+        message: tuple[str, str, tuple[AgentAuditEvent, ...]] = (
+            "ok",
+            str(result),
+            tuple(events),
+        )
+    except BaseException as exc:  # pragma: no cover - parent tests supervisor path
+        # The parent only needs a bounded classification. Exception messages
+        # can contain workspace paths or model content and must not cross the
+        # telemetry boundary.
+        message = (
+            "error",
+            f"(tool worker error: {type(exc).__name__})",
+            tuple(events),
+        )
+    try:
+        connection.send(message)  # type: ignore[attr-defined]
+    except (BrokenPipeError, EOFError, OSError):
+        pass
+    finally:
+        connection.close()  # type: ignore[attr-defined]
+
+
+def _terminate_tool_worker(
+    process: multiprocessing.Process,
+    *,
+    deadline_monotonic: float | None = None,
+) -> bool:
+    """Stop one worker without ever allocating more than one shared grace."""
+
+    deadline = time.monotonic() + _FILE_WORKER_SHUTDOWN_GRACE_S if deadline_monotonic is None else deadline_monotonic
+    if process.is_alive():
+        process.terminate()
+        remaining_s = max(0.0, deadline - time.monotonic())
+        process.join(timeout=min(0.2, remaining_s))
+    if process.is_alive():
+        process.kill()
+        remaining_s = max(0.0, deadline - time.monotonic())
+        process.join(timeout=remaining_s)
+    return not process.is_alive()
+
+
+def _run_terminable_file_tool(
+    tool_name: str,
+    kwargs: dict[str, object],
+    policy: AgentToolPolicy,
+    *,
+    timeout_ns: int,
+) -> _TerminableToolResult:
+    """Execute a frozen file tool with a hard supervisor lifetime.
+
+    A thread timeout cannot stop a blocked filesystem syscall.  ``spawn`` gives
+    the supervisor a process it can terminate without inheriting the model
+    loop's threads or its unpickleable audit closure.  Only the three frozen
+    built-ins enter this path. Custom registry callables fail closed unless a
+    trusted compatibility flag explicitly permits in-process execution; either
+    way their trace is ineligible as terminable-timeout evidence.
+    """
+
+    if tool_name not in _TERMINABLE_FILE_TOOL_FUNCTIONS:
+        raise ValueError("terminable worker only supports frozen file tools")
+    if isinstance(timeout_ns, bool) or not isinstance(timeout_ns, int) or timeout_ns <= 0:
+        raise ValueError("terminable worker timeout_ns must be positive")
+    context = multiprocessing.get_context("spawn")
+    receive, send = context.Pipe(duplex=False)
+    payload: dict[str, object] = {
+        "workspace_roots": tuple(str(root) for root in policy.workspace_roots),
+        "permissions": tuple(sorted(permission.value for permission in policy.permissions)),
+        "output_limit_chars": policy.output_limit_chars,
+        "file_limit_chars": policy.file_limit_chars,
+        "command_timeout_s": policy.command_timeout_s,
+    }
+    process = context.Process(
+        target=_file_tool_worker,
+        args=(send, tool_name, kwargs, payload),
+        daemon=False,
+    )
+    started_ns = time.perf_counter_ns()
+    deadline_ns = started_ns + timeout_ns
+    try:
+        process.start()
+    except Exception:
+        receive.close()
+        send.close()
+        return _TerminableToolResult(
+            result="(tool worker unavailable)",
+            events=(),
+            outcome="error",
+            timed_out=False,
+            duration_ns=max(0, time.perf_counter_ns() - started_ns),
+            termination_confirmed=False,
+            telemetry_complete=False,
+        )
+    send.close()
+    shutdown_deadline_monotonic: float | None = None
+
+    def stop_worker() -> bool:
+        nonlocal shutdown_deadline_monotonic
+        if shutdown_deadline_monotonic is None:
+            shutdown_deadline_monotonic = time.monotonic() + _FILE_WORKER_SHUTDOWN_GRACE_S
+        return _terminate_tool_worker(
+            process,
+            deadline_monotonic=shutdown_deadline_monotonic,
+        )
+
+    try:
+        remaining_ns = deadline_ns - time.perf_counter_ns()
+        try:
+            ready = remaining_ns > 0 and receive.poll(remaining_ns / 1_000_000_000)
+        except (EOFError, OSError):
+            ready = False
+        if not ready:
+            termination_confirmed = stop_worker()
+            return _TerminableToolResult(
+                result=f"(tool timed out after {timeout_ns / 1_000_000_000:g}s)",
+                events=(),
+                outcome="timeout",
+                timed_out=True,
+                duration_ns=max(timeout_ns, time.perf_counter_ns() - started_ns),
+                termination_confirmed=termination_confirmed,
+                telemetry_complete=False,
+            )
+        try:
+            status, result, events = receive.recv()
+            received_ns = time.perf_counter_ns()
+        except (EOFError, OSError, TypeError, ValueError):
+            termination_confirmed = stop_worker()
+            return _TerminableToolResult(
+                result="(tool worker failed without a valid result)",
+                events=(),
+                outcome="error",
+                timed_out=False,
+                duration_ns=max(0, time.perf_counter_ns() - started_ns),
+                termination_confirmed=termination_confirmed,
+                telemetry_complete=False,
+            )
+        termination_confirmed = stop_worker()
+        full_duration_ns = max(0, time.perf_counter_ns() - started_ns)
+        if received_ns > deadline_ns:
+            return _TerminableToolResult(
+                result=f"(tool timed out after {timeout_ns / 1_000_000_000:g}s)",
+                events=(),
+                outcome="timeout",
+                timed_out=True,
+                duration_ns=full_duration_ns,
+                termination_confirmed=termination_confirmed,
+                telemetry_complete=False,
+            )
+        valid_events = isinstance(events, tuple) and all(isinstance(event, AgentAuditEvent) for event in events)
+        if status not in {"ok", "error"} or not isinstance(result, str) or not valid_events:
+            return _TerminableToolResult(
+                result="(tool worker returned malformed data)",
+                events=(),
+                outcome="error",
+                timed_out=False,
+                duration_ns=full_duration_ns,
+                termination_confirmed=termination_confirmed,
+                telemetry_complete=False,
+            )
+        return _TerminableToolResult(
+            result=result,
+            events=events,
+            outcome="ok" if status == "ok" else "error",
+            timed_out=False,
+            duration_ns=full_duration_ns,
+            termination_confirmed=termination_confirmed,
+            telemetry_complete=status == "ok" and termination_confirmed,
+        )
+    finally:
+        receive.close()
+        if process.is_alive():
+            stop_worker()
+
+
+def _relay_worker_audits(policy: AgentToolPolicy, events: tuple[AgentAuditEvent, ...]) -> None:
+    """Replay child audit facts through the parent policy's trusted sink."""
+
+    for event in events:
+        policy.audit(
+            operation=event.operation,
+            permission=AgentToolPermission(event.permission),
+            target=event.target,
+            allowed=event.allowed,
+            outcome=event.outcome,
+            detail=event.detail,
+        )
+
+
 AGENT_TOOLS_SPEC = [
     {
         "type": "function",
@@ -1860,6 +2340,8 @@ def _process_user_input(
     budget_exhaustion: str | None = None
     round_traces: list[AgentRoundTrace] = []
     tool_event_traces: list[AgentToolTrace] = []
+    tool_telemetry_complete = True
+    tool_timeout_terminal = False
 
     for _round_idx in range(execution_budget.max_rounds):
         if wall_deadline is not None and time.perf_counter() >= wall_deadline:
@@ -2098,6 +2580,13 @@ def _process_user_input(
             audit_start = len(audit_events)
             gate_before = None
             call_policy = execution_policy
+            invocation_duration_ns = 0
+            effective_timeout_ns: int | None = None
+            timeout_enforced = False
+            invocation_telemetry_complete = True
+            fallback_outcome = "error"
+            permission_fallback = "none"
+            effect_unknown = False
             remaining_wall_seconds: float | None = None
             if wall_deadline is not None:
                 remaining_wall_seconds = wall_deadline - time.perf_counter()
@@ -2139,19 +2628,116 @@ def _process_user_input(
                         )
             if admitted:
                 tool_calls_used += 1
-                if not spec:
-                    result = f"(unknown tool: {name})"
-                else:
-                    try:
+                invocation_started_ns = time.perf_counter_ns()
+                try:
+                    if not spec:
+                        result = f"(unknown tool: {name})"
+                        fallback_outcome = "unrecognized"
+                    else:
                         kwargs = {k: args[k] for k in spec["args"] if k in args}
+                        permission = spec.get("permission")
+                        if isinstance(permission, AgentToolPermission):
+                            permission_fallback = permission.value
                         if "permission" in spec or spec.get("inject_policy"):
                             kwargs["policy"] = call_policy
-                        result = spec["fn"](**kwargs)
-                    except Exception as e:
-                        result = f"(tool error: {type(e).__name__}: {e})"
+                        if name in _PARTIALLY_BOUNDED_COMMAND_TOOLS and "policy" in kwargs:
+                            effective_timeout_ns = max(
+                                1,
+                                math.floor(float(call_policy.command_timeout_s) * 1e9),
+                            )
+                            # The child command is bounded, but dispatcher
+                            # preflight and validate's in-process hygiene scan
+                            # are not supervised by that child deadline.
+                            timeout_enforced = False
+                        elif name in _TERMINABLE_FILE_TOOL_FUNCTIONS:
+                            file_timeout_s = _FILE_TOOL_TIMEOUT_S
+                            if remaining_wall_seconds is not None:
+                                file_timeout_s = min(
+                                    file_timeout_s,
+                                    remaining_wall_seconds,
+                                )
+                            effective_timeout_ns = max(
+                                1,
+                                math.floor(file_timeout_s * 1e9),
+                            )
+                        if (
+                            name in _TERMINABLE_FILE_TOOL_FUNCTIONS
+                            and _TERMINABLE_FILE_TOOL_FUNCTIONS[name] is spec["fn"]
+                        ):
+                            timeout_enforced = True
+                            worker_kwargs = dict(kwargs)
+                            worker_kwargs.pop("policy", None)
+                            worker_result = _run_terminable_file_tool(
+                                name,
+                                worker_kwargs,
+                                call_policy,
+                                timeout_ns=effective_timeout_ns,
+                            )
+                            worker_events = () if worker_result.timed_out else worker_result.events
+                            _relay_worker_audits(call_policy, worker_events)
+                            if worker_result.timed_out:
+                                timeout_permission = spec.get("permission")
+                                if isinstance(timeout_permission, AgentToolPermission):
+                                    timeout_allowed = timeout_permission in call_policy.permissions
+                                    if name == "edit":
+                                        timeout_allowed = {
+                                            AgentToolPermission.READ,
+                                            AgentToolPermission.WRITE,
+                                        }.issubset(call_policy.permissions)
+                                    call_policy.audit(
+                                        operation=name,
+                                        permission=timeout_permission,
+                                        target=("supervisor sha256:" + _invocation_target_sha256(name, args)),
+                                        allowed=timeout_allowed,
+                                        outcome="timeout",
+                                        detail=(
+                                            f"timeout_ns={effective_timeout_ns}; "
+                                            "worker_terminated="
+                                            f"{str(worker_result.termination_confirmed).lower()}"
+                                        ),
+                                    )
+                            result = worker_result.result
+                            fallback_outcome = worker_result.outcome
+                            timeout_enforced = worker_result.termination_confirmed
+                            effect_unknown = worker_result.timed_out
+                            invocation_telemetry_complete = (
+                                worker_result.telemetry_complete and not worker_result.timed_out
+                            )
+                        elif name in _TERMINABLE_FILE_TOOL_FUNCTIONS:
+                            # Arbitrary callables cannot be safely moved across
+                            # a spawn boundary with a reconstructed policy, and
+                            # running them in a thread would not be terminable.
+                            # Refuse the custom override by default instead of
+                            # pretending that the advertised timeout was enforced.
+                            if state.get("allow_unterminable_custom_file_tools") is True:
+                                result = spec["fn"](**kwargs)
+                                fallback_outcome = "ok"
+                            else:
+                                result = "(tool error: custom file tool is not terminably supervised)"
+                                fallback_outcome = "error"
+                            # Even a trusted caller's explicit compatibility
+                            # opt-in cannot turn an in-process callable into
+                            # admissible timeout evidence.
+                            invocation_telemetry_complete = False
+                        else:
+                            result = spec["fn"](**kwargs)
+                            fallback_outcome = "ok"
+                except Exception as e:
+                    result = f"(tool error: {type(e).__name__}: {e})"
+                    fallback_outcome = "error"
+                    invocation_telemetry_complete = False
+                finally:
+                    invocation_duration_ns = time.perf_counter_ns() - invocation_started_ns
+                    if invocation_duration_ns < 0:
+                        raise RuntimeError("monotonic tool clock moved backwards")
                 if tool_calls_used >= execution_budget.max_tool_calls:
                     forced_finalization_reason = f"tool call limit {execution_budget.max_tool_calls} reached"
-            invocation_audits = audit_events[audit_start:]
+            invocation_audits = tuple(audit_events[audit_start:])
+            if admitted and spec is not None and not invocation_audits:
+                # Unknown dispatch rejection is fully observed by the parent.
+                # Every known callable, including catalog/MCP tools without a
+                # permission field, needs an audit to make its trace complete.
+                invocation_telemetry_complete = False
             if admitted and quality_gate is not None and spec is not None and gate_before is not None:
                 quality_gate.after_tool(
                     name,
@@ -2160,7 +2746,6 @@ def _process_user_input(
                     audit_events=invocation_audits,
                 )
                 state["quality_gate_pending"] = not quality_gate.decision().satisfied
-            tool_event_traces.extend(_tool_trace(_round_idx, name, event) for event in invocation_audits)
             remaining_result_chars = max(
                 0,
                 _MAX_TOOL_RESULT_CHARS_PER_TURN - tool_result_chars,
@@ -2171,6 +2756,28 @@ def _process_user_input(
                 if per_call_limit
                 else "(tool result budget exhausted for this turn)"
             )
+            if admitted:
+                invocation_trace = _tool_trace(
+                    sequence=len(tool_event_traces),
+                    round_index=_round_idx,
+                    tool_name=name,
+                    args=args,
+                    events=invocation_audits,
+                    result=str(result),
+                    fallback_outcome=fallback_outcome,
+                    duration_ns=invocation_duration_ns,
+                    effective_timeout_ns=effective_timeout_ns,
+                    timeout_enforced=timeout_enforced,
+                    telemetry_complete=invocation_telemetry_complete,
+                    known_tool=spec is not None,
+                    permission_fallback=permission_fallback,
+                    effect_unknown=effect_unknown,
+                )
+                tool_event_traces.append(invocation_trace)
+                if not invocation_trace.telemetry_complete:
+                    tool_telemetry_complete = False
+                if invocation_trace.outcome == "timeout":
+                    tool_timeout_terminal = True
             tool_result_chars += len(result)
             if tool_result_chars >= _MAX_TOOL_RESULT_CHARS_PER_TURN:
                 forced_finalization_reason = forced_finalization_reason or (
@@ -2197,6 +2804,18 @@ def _process_user_input(
                     "content": safe_result,
                 }
             )
+            if tool_timeout_terminal:
+                timeout_notice = (
+                    "Tool execution timed out. The turn stopped immediately; "
+                    "no later model round or tool call was executed."
+                )
+                console.print(timeout_notice, style="yellow")
+                terminal_assistant_text = "\n\n".join(text for text in (visible_text, timeout_notice) if text)
+                terminal_reason = "tool_timeout"
+                break
+
+        if tool_timeout_terminal:
+            break
 
     if quality_gate is not None:
         quality_gate.refresh()
@@ -2210,7 +2829,8 @@ def _process_user_input(
                 terminal_assistant_text = "\n\n".join(
                     text for text in (terminal_assistant_text, quality_notice) if text
                 )
-            terminal_reason = "quality_incomplete"
+            if terminal_reason != "tool_timeout":
+                terminal_reason = "quality_incomplete"
         state["quality_gate_pending"] = not quality_gate.decision().satisfied
 
     console.print()
@@ -2238,6 +2858,11 @@ def _process_user_input(
         state.pop("_quality_gate", None)
         state["quality_gate_pending"] = False
 
+    if len(tool_event_traces) != tool_calls_used or any(
+        trace.sequence != sequence for sequence, trace in enumerate(tool_event_traces)
+    ):
+        tool_telemetry_complete = False
+
     return AgentTurnResult(
         assistant_text=terminal_assistant_text or "(tool-only turn)",
         terminal_reason=terminal_reason,
@@ -2249,4 +2874,5 @@ def _process_user_input(
         quality_gate=quality_report,
         completion_tokens=completion_tokens_used,
         budget_exhaustion=budget_exhaustion,
+        tool_telemetry_complete=tool_telemetry_complete,
     )

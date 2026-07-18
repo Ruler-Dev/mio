@@ -130,6 +130,716 @@ def _audited_test_validation(argv, *, policy):
     return "(validation test: PASS; returncode=0)"
 
 
+def test_round_trace_propagates_raw_model_telemetry():
+    trace = agent._round_trace(
+        3,
+        SimpleNamespace(
+            prompt_tokens=12,
+            completion_tokens=4,
+            total_time_s=0.5,
+            prompt_tps=24.0,
+            generation_tps=8.0,
+            generation_backend="baseline",
+            fallback_ar=False,
+            prefill_ns=100,
+            decode_ns=300,
+            model_total_ns=400,
+            logical_prompt_tokens=12,
+            physical_prefill_tokens=7,
+            physical_decode_tokens=4,
+            warm_offset=5,
+            timing_source="runtime_raw_ns",
+        ),
+    )
+
+    assert trace.prefill_ns == 100
+    assert trace.decode_ns == 300
+    assert trace.model_total_ns == 400
+    assert trace.logical_prompt_tokens == 12
+    assert trace.physical_prefill_tokens == 7
+    assert trace.physical_decode_tokens == 4
+    assert trace.warm_offset == 5
+    assert trace.warm_offset_tokens == 5
+    assert trace.timing_source == "runtime_raw_ns"
+
+
+def test_round_trace_rejects_instead_of_rewriting_incoherent_zero_values():
+    with pytest.raises(ValueError, match="logical_prompt_tokens"):
+        agent._round_trace(
+            0,
+            SimpleNamespace(
+                prompt_tokens=3,
+                logical_prompt_tokens=0,
+                physical_prefill_tokens=0,
+                warm_offset=0,
+                completion_tokens=0,
+                prefill_ns=0,
+                decode_ns=0,
+                model_total_ns=0,
+                total_time_s=0.0,
+            ),
+        )
+
+
+def test_builtin_validate_is_complete_but_does_not_claim_full_timeout_enforcement(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(
+        agent,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+    clock = iter([100, 160])
+    monkeypatch.setattr(agent.time, "perf_counter_ns", lambda: next(clock))
+    state = _state(tmp_path)
+    state["tool_registry"] = {
+        "validate": agent.AGENT_TOOLS["validate"],
+    }
+    engine = _ScriptedEngine(
+        [
+            _tool_call("validate", argv='["git", "diff", "--check"]'),
+            "Validation completed.",
+        ]
+    )
+
+    result = agent._process_user_input(
+        "Validate the workspace.",
+        engine,
+        _Manager(),
+        MioConfig.default(),
+        state,
+    )
+
+    assert len(result.tool_events) == 1
+    event = result.tool_events[0]
+    assert event.tool_name == "validate"
+    assert event.duration_ns == 60
+    assert event.effective_timeout_ns == 30_000_000_000
+    assert event.exit_code_or_signal == 0
+    assert event.output_chars > 0
+    assert event.audit_count == 1
+    assert event.timeout_enforced is False
+    assert event.telemetry_complete is True
+    assert result.tool_telemetry_complete is True
+
+
+def test_tool_exception_without_audit_marks_turn_telemetry_incomplete(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(
+        agent,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+
+    def unaudited_failure(argv, *, policy):
+        del argv, policy
+        raise RuntimeError("failed before audit")
+
+    state = _state(tmp_path)
+    state["tool_registry"] = {
+        "validate": {
+            "fn": unaudited_failure,
+            "args": ["argv"],
+            "permission": agent.AgentToolPermission.SHELL,
+        }
+    }
+    engine = _ScriptedEngine(
+        [
+            _tool_call("validate", argv='["python3", "-m", "pytest", "-q"]'),
+            "Validation could not be attested.",
+        ]
+    )
+
+    result = agent._process_user_input(
+        "Try validation.",
+        engine,
+        _Manager(),
+        MioConfig.default(),
+        state,
+    )
+
+    assert result.tool_calls == 1
+    assert len(result.tool_events) == 1
+    event = result.tool_events[0]
+    assert event.sequence == 0
+    assert event.tool_name == "validate"
+    assert event.outcome == "error"
+    assert event.audit_count == 0
+    assert event.telemetry_complete is False
+    assert result.tool_telemetry_complete is False
+
+
+def test_multiple_audits_fold_into_one_contiguous_tool_record(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(
+        agent,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+    clock = iter([1_000, 1_120, 2_000, 2_170])
+    monkeypatch.setattr(agent.time, "perf_counter_ns", lambda: next(clock))
+
+    def multiply_audited(command, *, policy):
+        for target in ("first", "second"):
+            policy.audit(
+                operation="bash",
+                permission=agent.AgentToolPermission.SHELL,
+                target=target,
+                allowed=True,
+                outcome="ok",
+                detail="returncode=0",
+            )
+        return command
+
+    state = _state(tmp_path)
+    state["tool_registry"] = {
+        "bash": {
+            "fn": multiply_audited,
+            "args": ["command"],
+            "permission": agent.AgentToolPermission.SHELL,
+        }
+    }
+    engine = _ScriptedEngine(
+        [
+            _tool_call("bash", command="one") + _tool_call("bash", command="second"),
+            "Both calls completed.",
+        ]
+    )
+
+    result = agent._process_user_input(
+        "Run both.",
+        engine,
+        _Manager(),
+        MioConfig.default(),
+        state,
+    )
+
+    assert result.tool_calls == 2
+    assert len(result.tool_events) == 2
+    assert [event.sequence for event in result.tool_events] == [0, 1]
+    assert [event.audit_count for event in result.tool_events] == [2, 2]
+    assert [event.duration_ns for event in result.tool_events] == [120, 170]
+    assert [event.exit_code_or_signal for event in result.tool_events] == [0, 0]
+    assert all(event.telemetry_complete is True for event in result.tool_events)
+    assert result.tool_telemetry_complete is True
+
+
+@pytest.mark.parametrize(
+    ("detail", "expected"),
+    [
+        ("returncode=7; output_chars=6", 7),
+        ("returncode=-15; output_chars=6", "signal:15"),
+        ("signal=9; output_chars=6", "signal:9"),
+    ],
+)
+def test_tool_trace_normalizes_exit_code_or_signal(detail, expected):
+    event = agent.AgentAuditEvent(
+        timestamp=1.0,
+        operation="bash",
+        permission="shell",
+        target="zsh sha256:test",
+        allowed=True,
+        outcome="nonzero",
+        detail=detail,
+    )
+
+    trace = agent._tool_trace(
+        sequence=0,
+        round_index=0,
+        tool_name="bash",
+        args={"command": "hidden"},
+        events=(event,),
+        result="result",
+        fallback_outcome="error",
+        duration_ns=10,
+        effective_timeout_ns=300_000_000_000,
+        timeout_enforced=False,
+        telemetry_complete=True,
+        known_tool=True,
+        permission_fallback="shell",
+    )
+
+    assert trace.exit_code_or_signal == expected
+    assert trace.output_chars == 6
+
+
+def test_unknown_tool_uses_sentinel_and_argument_commitment(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        agent,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+    engine = _ScriptedEngine(
+        [
+            _tool_call("secret-unregistered-tool", path="private.py"),
+            "Unknown tool was rejected.",
+        ]
+    )
+
+    result = agent._process_user_input(
+        "Try an unknown tool.",
+        engine,
+        _Manager(),
+        MioConfig.default(),
+        _state(tmp_path),
+    )
+
+    assert result.tool_calls == 1
+    assert len(result.tool_events) == 1
+    event = result.tool_events[0]
+    assert event.sequence == 0
+    assert event.tool_name == "unknown"
+    assert event.operation == "unknown"
+    assert event.allowed is False
+    assert event.outcome == "unrecognized"
+    assert len(event.target_sha256) == 64
+    assert "secret" not in event.target_sha256
+    assert event.audit_count == 0
+    assert event.telemetry_complete is True
+    assert result.tool_telemetry_complete is True
+
+
+def test_denied_file_invocation_has_one_terminable_trace(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        agent,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+    state = _state(tmp_path)
+    state["tool_policy"] = AgentToolPolicy.read_only(tmp_path)
+    engine = _ScriptedEngine(
+        [
+            _tool_call("write", path="blocked.py", content="VALUE = 1\n"),
+            "Write was denied.",
+        ]
+    )
+
+    result = agent._process_user_input(
+        "Try writing.",
+        engine,
+        _Manager(),
+        MioConfig.default(),
+        state,
+    )
+
+    assert result.tool_calls == 1
+    assert len(result.tool_events) == 1
+    event = result.tool_events[0]
+    assert event.sequence == 0
+    assert event.tool_name == "write"
+    assert event.allowed is False
+    assert event.outcome == "denied"
+    assert event.effective_timeout_ns == 30_000_000_000
+    assert event.timeout_enforced is True
+    assert event.output_chars > 0
+    assert event.audit_count == 1
+    assert result.tool_telemetry_complete is True
+
+
+def test_file_worker_timeout_includes_spawn_and_confirms_termination(tmp_path):
+    (tmp_path / "value.txt").write_text("value", encoding="utf-8")
+    policy = AgentToolPolicy.read_only(tmp_path)
+
+    result = agent._run_terminable_file_tool(
+        "read",
+        {"path": "value.txt"},
+        policy,
+        timeout_ns=1,
+    )
+
+    assert result.outcome == "timeout"
+    assert result.timed_out is True
+    assert result.duration_ns >= 1
+    assert result.termination_confirmed is True
+    assert result.telemetry_complete is False
+    assert result.events == ()
+
+
+def test_supervised_file_timeout_gets_one_parent_audit_record(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(
+        agent,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+
+    calls = 0
+
+    def supervised_timeout(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return agent._TerminableToolResult(
+            result="(tool timed out)",
+            events=(),
+            outcome="timeout",
+            timed_out=True,
+            duration_ns=30_000_000_010,
+            termination_confirmed=True,
+            telemetry_complete=True,
+        )
+
+    monkeypatch.setattr(agent, "_run_terminable_file_tool", supervised_timeout)
+    clock = iter([100, 700])
+    monkeypatch.setattr(agent.time, "perf_counter_ns", lambda: next(clock))
+    engine = _ScriptedEngine(
+        [
+            _tool_call("read", path="blocked.txt") + _tool_call("read", path="must-not-run.txt"),
+            "Read timed out.",
+        ]
+    )
+
+    result = agent._process_user_input(
+        "Read once.",
+        engine,
+        _Manager(),
+        MioConfig.default(),
+        _state(tmp_path),
+    )
+
+    assert result.tool_calls == 1
+    assert calls == 1
+    assert len(result.tool_events) == 1
+    event = result.tool_events[0]
+    assert event.outcome == "timeout"
+    assert event.allowed is True
+    assert event.duration_ns == 600
+    assert event.effective_timeout_ns == 30_000_000_000
+    assert event.timeout_enforced is True
+    assert event.audit_count == 1
+    assert event.effect_unknown is True
+    assert event.telemetry_complete is False
+    assert result.tool_telemetry_complete is False
+    assert result.terminal_reason == "tool_timeout"
+    assert len(engine.requests) == 1
+
+
+def test_command_timeout_is_terminal_but_telemetry_fields_remain_complete(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(
+        agent,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+    (tmp_path / "value.py").write_text("VALUE = 1\n", encoding="utf-8")
+    invocations = 0
+
+    def timed_validation(argv, *, policy):
+        nonlocal invocations
+        del argv
+        invocations += 1
+        policy.audit(
+            operation="validate",
+            permission=agent.AgentToolPermission.SHELL,
+            target="test:python3 sha256:preflight-error",
+            allowed=True,
+            outcome="error",
+            detail="preflight cleanup error",
+        )
+        policy.audit(
+            operation="validate",
+            permission=agent.AgentToolPermission.SHELL,
+            target="test:python3 sha256:timeout",
+            allowed=True,
+            outcome="timeout",
+            detail="returncode=-15; output_chars=0",
+        )
+        return "(validation timed out)"
+
+    state = _enable_quality_gate(_state(tmp_path))
+    state["tool_registry"] = {
+        "edit": agent.AGENT_TOOLS["edit"],
+        "validate": {
+            "fn": timed_validation,
+            "args": ["argv"],
+            "permission": agent.AgentToolPermission.SHELL,
+        },
+    }
+    engine = _ScriptedEngine(
+        [
+            _tool_call(
+                "edit",
+                path="value.py",
+                old="VALUE = 1",
+                new="VALUE = 2",
+            )
+            + _tool_call("validate", argv='["python3", "-m", "pytest", "-q"]')
+            + _tool_call("validate", argv='["python3", "-m", "pytest", "-q"]'),
+            "Must not be generated.",
+        ]
+    )
+
+    result = agent._process_user_input(
+        "Change value.py and validate it.",
+        engine,
+        _Manager(),
+        MioConfig.default(),
+        state,
+    )
+
+    assert invocations == 1
+    assert len(engine.requests) == 1
+    assert result.tool_calls == 2
+    assert result.terminal_reason == "tool_timeout"
+    event = result.tool_events[1]
+    assert event.outcome == "timeout"
+    assert event.timeout_enforced is False
+    assert event.effect_unknown is False
+    assert event.audit_count == 2
+    assert event.telemetry_complete is True
+    assert result.tool_telemetry_complete is True
+    assert result.quality_gate is not None
+    assert result.quality_gate["decision"] == "incomplete"
+
+
+def test_known_tool_without_audit_is_incomplete_even_without_permission_field(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(
+        agent,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+    state = _state(tmp_path)
+    state["tool_registry"] = {
+        "catalog": {
+            "fn": lambda: "catalog result",
+            "args": [],
+        }
+    }
+    engine = _ScriptedEngine([_tool_call("catalog"), "Catalog inspection completed."])
+
+    result = agent._process_user_input(
+        "Inspect catalog.",
+        engine,
+        _Manager(),
+        MioConfig.default(),
+        state,
+    )
+
+    assert result.tool_calls == 1
+    event = result.tool_events[0]
+    assert event.tool_name == "catalog"
+    assert event.audit_count == 0
+    assert event.telemetry_complete is False
+    assert result.tool_telemetry_complete is False
+
+
+def test_file_trace_duration_uses_full_parent_interval_not_worker_metric(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(
+        agent,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+    worker_audit = agent.AgentAuditEvent(
+        timestamp=1.0,
+        operation="read",
+        permission="read",
+        target="bounded.txt",
+        allowed=True,
+        outcome="ok",
+        detail="output_chars=2",
+    )
+
+    def completed_worker(*_args, **_kwargs):
+        return agent._TerminableToolResult(
+            result="ok",
+            events=(worker_audit,),
+            outcome="ok",
+            timed_out=False,
+            duration_ns=1,
+            termination_confirmed=True,
+            telemetry_complete=True,
+        )
+
+    monkeypatch.setattr(agent, "_run_terminable_file_tool", completed_worker)
+    clock = iter([1_000, 1_900])
+    monkeypatch.setattr(agent.time, "perf_counter_ns", lambda: next(clock))
+    engine = _ScriptedEngine([_tool_call("read", path="bounded.txt"), "Read completed."])
+
+    result = agent._process_user_input(
+        "Read once.",
+        engine,
+        _Manager(),
+        MioConfig.default(),
+        _state(tmp_path),
+    )
+
+    event = result.tool_events[0]
+    assert event.duration_ns == 900
+    assert event.duration_ns != 1
+    assert event.timeout_enforced is True
+    assert event.telemetry_complete is True
+
+
+@pytest.mark.parametrize(
+    ("permissions", "expected_allowed"),
+    [
+        (frozenset({agent.AgentToolPermission.WRITE}), False),
+        (
+            frozenset(
+                {
+                    agent.AgentToolPermission.READ,
+                    agent.AgentToolPermission.WRITE,
+                }
+            ),
+            True,
+        ),
+    ],
+)
+def test_synthetic_edit_timeout_requires_read_and_write_grants(
+    monkeypatch,
+    tmp_path,
+    permissions,
+    expected_allowed,
+):
+    monkeypatch.setattr(
+        agent,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+
+    def supervised_timeout(*_args, **_kwargs):
+        return agent._TerminableToolResult(
+            result="(tool timed out)",
+            events=(),
+            outcome="timeout",
+            timed_out=True,
+            duration_ns=30_000_000_001,
+            termination_confirmed=True,
+            telemetry_complete=False,
+        )
+
+    monkeypatch.setattr(agent, "_run_terminable_file_tool", supervised_timeout)
+    state = _state(tmp_path)
+    state["tool_policy"] = AgentToolPolicy(
+        workspace_roots=(tmp_path,),
+        permissions=permissions,
+    )
+    engine = _ScriptedEngine(
+        [
+            _tool_call("edit", path="value.py", old="one", new="two"),
+            "Must not be generated.",
+        ]
+    )
+
+    result = agent._process_user_input(
+        "Edit once.",
+        engine,
+        _Manager(),
+        MioConfig.default(),
+        state,
+    )
+
+    event = result.tool_events[0]
+    assert event.allowed is expected_allowed
+    assert event.outcome == "timeout"
+    assert event.effect_unknown is True
+    assert event.telemetry_complete is False
+    assert result.terminal_reason == "tool_timeout"
+    assert len(engine.requests) == 1
+
+
+def test_worker_terminate_and_kill_share_one_second_grace(monkeypatch):
+    clock = {"now": 0.0}
+    joins: list[float] = []
+
+    class StubbornProcess:
+        def is_alive(self):
+            return True
+
+        def terminate(self):
+            return None
+
+        def kill(self):
+            return None
+
+        def join(self, timeout):
+            joins.append(timeout)
+            clock["now"] += timeout
+
+    monkeypatch.setattr(agent.time, "monotonic", lambda: clock["now"])
+    process = StubbornProcess()
+
+    assert (
+        agent._terminate_tool_worker(
+            process,
+            deadline_monotonic=1.0,
+        )
+        is False
+    )
+    assert sum(joins) == pytest.approx(1.0)
+    assert clock["now"] == pytest.approx(1.0)
+
+    # A cleanup retry receives the same exhausted deadline, not another grace.
+    agent._terminate_tool_worker(process, deadline_monotonic=1.0)
+    assert clock["now"] == pytest.approx(1.0)
+
+
+def test_file_timeout_cap_uses_remaining_arm_wall_and_blocks_custom_worker(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(
+        agent,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+    clock = {"now": 0.0}
+    monkeypatch.setattr(agent.time, "perf_counter", lambda: clock["now"])
+
+    invoked = False
+
+    def custom_read(path, *, policy):
+        nonlocal invoked
+        del path, policy
+        invoked = True
+        return "must not run"
+
+    state = _state(tmp_path)
+    state["execution_budget"] = agent.AgentExecutionBudget(
+        max_rounds=2,
+        max_wall_seconds=0.25,
+    )
+    state["tool_registry"] = {
+        "read": {
+            "fn": custom_read,
+            "args": ["path"],
+            "permission": agent.AgentToolPermission.READ,
+        }
+    }
+    engine = _ScriptedEngine([_tool_call("read", path="x.py"), "Read completed."])
+
+    result = agent._process_user_input(
+        "Read once.",
+        engine,
+        _Manager(),
+        MioConfig.default(),
+        state,
+    )
+
+    assert result.tool_calls == 1
+    event = result.tool_events[0]
+    assert invoked is False
+    assert event.effective_timeout_ns == 250_000_000
+    assert event.timeout_enforced is False
+    assert event.outcome == "error"
+    assert event.telemetry_complete is False
+    assert result.tool_telemetry_complete is False
+
+
 def test_coding_agent_replays_structured_tool_transcript_and_finishes(
     monkeypatch,
     tmp_path,
@@ -358,6 +1068,7 @@ def test_coding_agent_never_dispatches_memorized_tool_xml_on_final_round(
         [_tool_call("read", path="note.txt") for _ in range(12)],
     )
     state = _state(tmp_path)
+    state["allow_unterminable_custom_file_tools"] = True
 
     agent._process_user_input(
         "Keep reading.",
@@ -389,6 +1100,7 @@ def test_trusted_execution_budget_blocks_before_call_beyond_cap(
     )
     dispatched: list[str] = []
     state = _state(tmp_path)
+    state["allow_unterminable_custom_file_tools"] = True
     state["execution_budget"] = agent.AgentExecutionBudget(
         max_rounds=3,
         max_tool_calls=call_cap,
@@ -474,6 +1186,7 @@ def test_completion_budget_is_cumulative_and_stops_before_later_dispatch(
     )
     dispatched: list[str] = []
     state = _state(tmp_path)
+    state["allow_unterminable_custom_file_tools"] = True
     state["execution_budget"] = agent.AgentExecutionBudget(
         max_rounds=4,
         max_tool_calls=4,
@@ -647,6 +1360,9 @@ def test_wall_deadline_reduces_injected_command_timeout_and_blocks_next_call(
 
     assert observed_timeouts == [0.5]
     assert result.tool_calls == 1
+    assert len(result.tool_events) == 1
+    assert result.tool_events[0].effective_timeout_ns == 500_000_000
+    assert result.tool_events[0].timeout_enforced is False
     assert result.wall_time_s == pytest.approx(0.6)
     assert result.budget_exhaustion == "wall time limit 0.5s reached"
     assert result.terminal_reason == "budget_exhausted"
