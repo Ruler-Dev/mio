@@ -23,6 +23,15 @@ development split. Published source-free results:
 The development result fails the frozen go/no-go gates. No coding-quality or
 speed improvement is supported, and the planned follow-up 27B smoke is stopped.
 
+The next repository-level allocation experiment is separately frozen in
+[`repository-quality-four-arm-preregistration-v2.json`](repository-quality-four-arm-preregistration-v2.json).
+It compares a shared Quality root, an allocation-matched static recovery, and
+an exploratory depth-one public-state router. The smoke and already observed
+development tasks remain calibration-only; this preregistration is not a
+result or a Markov quality claim. Protocol v2 reports raw workspace-evaluator
+correctness separately from trajectory/compliance success, so validation-only
+improvements cannot satisfy its engineering advancement gate.
+
 ## Qwen 3.6 matrix harness
 
 `scripts/bench_qwen36_matrix.py` compares:

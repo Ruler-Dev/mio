@@ -13,6 +13,16 @@ effort feature yet. The profiles below are initial resource envelopes to be
 calibrated, not benchmark results. More permitted work does not imply more
 work on every request, and neither implies monotonically better quality.
 
+A repository-level four-arm engineering pilot is now preregistered in
+[`../../benchmarks/repository-quality-four-arm-preregistration-v2.json`](../../benchmarks/repository-quality-four-arm-preregistration-v2.json)
+and explained in [`../../docs/22-markov-quality-pilot.md`](../../docs/22-markov-quality-pilot.md).
+It explicitly uses a failure-routing exploratory policy because the existing
+HumanEval calibration tables contain no eligible transitions; it does not
+promote the current controller or reopen an observed split as held-out data.
+The fail-closed native smoke executable is
+`python -m experimental.effort.run_repository_quality_pilot`; it publishes
+only a provenance-bound, source-free envelope and exposes no protocol knobs.
+
 ## Verified engineering checkpoint (2026-07-18)
 
 The current evidence is summarized in

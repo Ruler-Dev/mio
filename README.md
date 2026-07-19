@@ -597,6 +597,7 @@ separate HTTP calls, so it is not yet a multi-request service scheduler.
 - [External skills](docs/14-external-skills.md)
 - [MCP](docs/15-mcp.md)
 - [Benchmarks](docs/16-benchmarks.md)
+- [Repository-level Markov quality pilot](docs/22-markov-quality-pilot.md)
 - [Mio Qwen 3.6 research paper](papers/mio-qwen36-research.md)
 
 ## Research status
