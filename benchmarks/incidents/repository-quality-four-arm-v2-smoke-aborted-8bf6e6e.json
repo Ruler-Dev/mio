@@ -1,0 +1,70 @@
+{
+  "schema": "mio.repository-quality-four-arm-incident-record.v1",
+  "status": "post_hoc_incident_record_no_result",
+  "recorded_at_utc": "2026-07-19T14:32:31Z",
+  "attestation": {
+    "native_abort_receipt_available": false,
+    "attempt_started_at_utc": null,
+    "attempt_ended_at_utc": null,
+    "execution_provenance_reconstructed": false,
+    "note": "The v2 runner persisted neither an abort receipt nor launch/end timestamps. None is reconstructed post hoc."
+  },
+  "protocol": {
+    "schema": "mio.repository-quality-four-arm-preregistration.v2",
+    "revision": "mio-repository-quality-four-arm-pilot-v2",
+    "preregistration_sha256": "9192463d8afa08a23296e9079291dd0dfcf52910a21eebf8ad2292ddaec69610",
+    "expected_git_revision": "8bf6e6ec1be7846a0eeebab9fa008013045425ad"
+  },
+  "authorized_configuration": {
+    "split": "smoke",
+    "tier": "small",
+    "authorized_fixture_count": 4,
+    "sampler": "greedy",
+    "drafter_backend": "strict_dflash"
+  },
+  "authorized_models": {
+    "target": {
+      "repository_label": "mlx-community/Qwen3.5-4B-4bit",
+      "content_identity": "local-sha256-v1:7d7ea69d09ada4f1d2f49f6ca651441ac279b95b6d280f259da04fbde504376f"
+    },
+    "drafter": {
+      "repository_label": "z-lab/Qwen3.5-4B-DFlash",
+      "content_identity": "local-sha256-v1:4b60bced36f602da85a6447d3648e7ac37a0c5cce68d505a49664252c0586b98"
+    }
+  },
+  "traceback_observation": {
+    "evidence_basis": "operator-visible traceback, not a native receipt",
+    "exception_type": "RepositoryPilotProtocolError",
+    "exception_message": "round timing source is not exact runtime nanoseconds"
+  },
+  "post_hoc_verification": {
+    "requested_output_path_absent_at_record_time": true,
+    "aggregate_or_partial_result_recovered": false,
+    "note": "The absent output was checked after process exit. Counts and phase transitions not represented in a native receipt are deliberately omitted."
+  },
+  "failure_analysis": {
+    "reason_code": "dflash_raw_phase_telemetry_missing",
+    "phase_inferred_from_traceback": "root_generation_telemetry_validation",
+    "violated_invariant": "AgentRoundTrace.timing_source must equal runtime_raw_ns",
+    "required_timing_source": "runtime_raw_ns",
+    "observed_timing_source": "derived_legacy_us",
+    "missing_runtime_event_fields": [
+      "prefill_ns",
+      "decode_ns",
+      "model_total_ns"
+    ],
+    "hidden_evaluator_constructed": false,
+    "hidden_outcomes_observed": false,
+    "evidence_basis": "traceback plus frozen source control flow, not a native receipt",
+    "observed_runtime_path": "stream_dflash_generate omitted prefill_ns, decode_ns, and model_total_ns; MioEngine therefore labeled the derived elapsed_us/prefill_us conversion as derived_legacy_us",
+    "scientific_impact": "The derived decode interval can include generator suspension and consumer overhead, so it is not interchangeable with the preregistered active model-time endpoint. No endpoint is relaxed and no partial cohort is treated as a result."
+  },
+  "disposition": {
+    "v2_rerun_allowed": false,
+    "partial_generation_reuse_allowed": false,
+    "required_next_step": "Commit a new preregistered revision with raw DFlash active-time telemetry, an expanded source lock, and a native abort-receipt path before another inference attempt.",
+    "quality_claim_allowed": false,
+    "speed_claim_allowed": false,
+    "breakthrough_claim_allowed": false
+  }
+}

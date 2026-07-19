@@ -24,13 +24,20 @@ The development result fails the frozen go/no-go gates. No coding-quality or
 speed improvement is supported, and the planned follow-up 27B smoke is stopped.
 
 The next repository-level allocation experiment is separately frozen in
-[`repository-quality-four-arm-preregistration-v2.json`](repository-quality-four-arm-preregistration-v2.json).
+[`repository-quality-four-arm-preregistration-v3.json`](repository-quality-four-arm-preregistration-v3.json).
 It compares a shared Quality root, an allocation-matched static recovery, and
 an exploratory depth-one public-state router. The smoke and already observed
 development tasks remain calibration-only; this preregistration is not a
-result or a Markov quality claim. Protocol v2 reports raw workspace-evaluator
+result or a Markov quality claim. The protocol reports raw workspace-evaluator
 correctness separately from trajectory/compliance success, so validation-only
 improvements cannot satisfy its engineering advancement gate.
+
+The first v2 smoke attempt aborted before routing, hidden evaluation, or result
+publication because DFlash streaming lacked the preregistered raw phase-time
+provenance. Its [post-hoc incident record](incidents/repository-quality-four-arm-v2-smoke-aborted-8bf6e6e.json)
+is not a result. V3 retains the strict timing check, adds yield-exclusive raw
+DFlash timing and native attempt/abort receipts, and expands the critical
+source manifest.
 
 ## Qwen 3.6 matrix harness
 

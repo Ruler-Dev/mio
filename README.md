@@ -641,6 +641,15 @@ Plain's `8/8`. The negative source-free artifacts are
 [`development`](benchmarks/results/miocodebench-quality-v2-development-278f294.json).
 No follow-up 27B Quality run is authorized by this result.
 
+The subsequent four-arm repository pilot is now frozen as protocol v3. Its
+first v2 smoke stopped safely before hidden evaluation or publication because
+the DFlash stream exposed only legacy-derived phase timing. V3 keeps the strict
+raw-time requirement, measures DFlash only while its generator is active,
+accounts for warm-prefix and final-cache synchronization, expands the bound
+critical-source manifest, and writes create-once attempt/abort provenance.
+There is still no four-arm quality or speed result; see the
+[protocol and incident analysis](docs/22-markov-quality-pilot.md).
+
 Mio has not yet measured general edit correctness, tool-call accuracy,
 Caveman/Ponytail quality, long-context scaling, or multi-user throughput. A
 result will be called a breakthrough only if independent reruns show a Pareto

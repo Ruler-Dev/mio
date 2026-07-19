@@ -464,7 +464,7 @@ def test_execution_budgets_are_exact_frozen_and_stage_owned() -> None:
 def test_runtime_and_scope_constants_align_with_preregistration() -> None:
     repository = Path(__file__).resolve().parents[2]
     preregistration = json.loads(
-        (repository / "benchmarks" / "repository-quality-four-arm-preregistration-v2.json").read_text()
+        (repository / "benchmarks" / "repository-quality-four-arm-preregistration-v3.json").read_text()
     )
 
     assert tuple(preregistration["runtime"]["forbidden_environment_overrides"]) == (FORBIDDEN_ENVIRONMENT_OVERRIDES)
@@ -484,7 +484,7 @@ def test_runtime_and_scope_constants_align_with_preregistration() -> None:
 def test_recovery_prompt_is_byte_identical_to_preregistration() -> None:
     repository = Path(__file__).resolve().parents[2]
     preregistration = json.loads(
-        (repository / "benchmarks" / "repository-quality-four-arm-preregistration-v2.json").read_text()
+        (repository / "benchmarks" / "repository-quality-four-arm-preregistration-v3.json").read_text()
     )
     assert RECOVERY_PROMPT == preregistration["budgets"]["extra_prompt_template"]
     assert RECOVERY_PROMPT.count("{instruction}") == 1
@@ -1013,7 +1013,7 @@ def test_public_state_ignores_text_hashes_and_hidden_fields(tmp_path: Path) -> N
     encoded = public_state_json(public)
     preregistration = json.loads(
         (
-            Path(__file__).resolve().parents[2] / "benchmarks" / "repository-quality-four-arm-preregistration-v2.json"
+            Path(__file__).resolve().parents[2] / "benchmarks" / "repository-quality-four-arm-preregistration-v3.json"
         ).read_text()
     )
     payload = json.loads(encoded)

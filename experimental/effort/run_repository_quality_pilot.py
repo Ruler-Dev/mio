@@ -24,6 +24,7 @@ import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import redirect_stdout
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
@@ -105,28 +106,51 @@ from scripts.run_coding_quality_benchmark import (
 )
 
 
-RESULT_ENVELOPE_SCHEMA = "mio.repository-quality-four-arm-result-envelope.v2"
-PREREGISTRATION_SCHEMA = "mio.repository-quality-four-arm-preregistration.v2"
-PREREGISTRATION_REVISION = "mio-repository-quality-four-arm-pilot-v2"
-PREREGISTRATION_SHA256 = "9192463d8afa08a23296e9079291dd0dfcf52910a21eebf8ad2292ddaec69610"
-PREREGISTRATION_RELATIVE_PATH = "benchmarks/repository-quality-four-arm-preregistration-v2.json"
+RESULT_ENVELOPE_SCHEMA = "mio.repository-quality-four-arm-result-envelope.v3"
+ABORT_ENVELOPE_SCHEMA = "mio.repository-quality-four-arm-abort-envelope.v3"
+ATTEMPT_START_SCHEMA = "mio.repository-quality-four-arm-attempt-start.v3"
+SOURCE_LOCK_SCHEMA = "mio.repository-quality-source-lock.v1"
+PREREGISTRATION_SCHEMA = "mio.repository-quality-four-arm-preregistration.v3"
+PREREGISTRATION_REVISION = "mio-repository-quality-four-arm-pilot-v3"
+PREREGISTRATION_SHA256 = "d3ddbfa29bc99f2b480797fadf6686cbc200f973e6fa6325805855494d600d3d"
+PREREGISTRATION_RELATIVE_PATH = "benchmarks/repository-quality-four-arm-preregistration-v3.json"
+PREDECESSOR_PREREGISTRATION_SCHEMA = "mio.repository-quality-four-arm-preregistration.v2"
+PREDECESSOR_PREREGISTRATION_REVISION = "mio-repository-quality-four-arm-pilot-v2"
+PREDECESSOR_PREREGISTRATION_SHA256 = "9192463d8afa08a23296e9079291dd0dfcf52910a21eebf8ad2292ddaec69610"
+PREDECESSOR_PREREGISTRATION_RELATIVE_PATH = "benchmarks/repository-quality-four-arm-preregistration-v2.json"
+V2_INCIDENT_SCHEMA = "mio.repository-quality-four-arm-incident-record.v1"
+V2_INCIDENT_STATUS = "post_hoc_incident_record_no_result"
+V2_INCIDENT_SHA256 = "4e32325739bbcd35554bb43bc5bdddb205ecbe5453cad8d47cec24b876eac157"
+V2_INCIDENT_RELATIVE_PATH = "benchmarks/incidents/repository-quality-four-arm-v2-smoke-aborted-8bf6e6e.json"
 PILOT_SOURCE_LOCK_FILES = (
     "pyproject.toml",
     "uv.lock",
+    "mio/__init__.py",
     "mio/agent.py",
     "mio/agent_policy.py",
     "mio/coding_quality.py",
     "mio/config.py",
+    "mio/drafter_selection.py",
     "mio/engine.py",
     "mio/model_manager.py",
     "mio/prompt_policy.py",
+    "mio/tool_calls.py",
+    "mio/dflash/__init__.py",
+    "mio/dflash/kernels.py",
+    "mio/dflash/model.py",
+    "mio/dflash/recurrent_rollback_cache.py",
+    "mio/dflash/runtime.py",
+    "mio/dflash/verify_linear.py",
     "scripts/bench_coding_quality.py",
     "scripts/run_coding_quality_benchmark.py",
     "experimental/effort/model_identity.py",
     "experimental/effort/repository_quality_pilot.py",
     "experimental/effort/bench_repository_quality_pilot.py",
     "experimental/effort/run_repository_quality_pilot.py",
+    PREDECESSOR_PREREGISTRATION_RELATIVE_PATH,
+    V2_INCIDENT_RELATIVE_PATH,
     PREREGISTRATION_RELATIVE_PATH,
+    "docs/22-markov-quality-pilot.md",
 )
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -151,6 +175,33 @@ class PilotRunPhase(StrEnum):
     POST_HIDDEN_VERIFIED = "post_hidden_verified"
     COMPLETE = "complete"
     ABORTED = "aborted"
+
+
+class NativeAbortReason(StrEnum):
+    DFLASH_RAW_PHASE_TELEMETRY_MISSING = "dflash_raw_phase_telemetry_missing"
+    MODEL_LOAD_FAILURE = "model_load_failure"
+    PROTOCOL_FAILURE = "protocol_failure"
+    INFRASTRUCTURE_FAILURE = "infrastructure_failure"
+    MANAGER_UNLOAD_FAILURE = "manager_unload_failure"
+
+
+class NativeManagerState(StrEnum):
+    NEVER_LOADED = "never_loaded"
+    LOAD_FAILED = "load_failed"
+    LOADED = "loaded"
+    UNLOADED = "unloaded"
+    UNLOAD_FAILED = "unload_failed"
+
+
+class NativeCleanupState(StrEnum):
+    COMPLETE = "complete"
+    FAILED = "failed"
+
+
+class NativeVerificationState(StrEnum):
+    PASSED = "passed"
+    FAILED = "failed"
+    NOT_ATTEMPTED = "not_attempted"
 
 
 class RetainedStageExecutor(Protocol):
@@ -180,6 +231,64 @@ HiddenEvaluator = Callable[[str, Path], HiddenOutcome]
 HiddenEvaluatorFactory = Callable[[], HiddenEvaluator]
 FrozenInputVerifier = Callable[[], None]
 _NATIVE_PUBLICATION_AUTHORITY = object()
+_NATIVE_ATTEMPT_AUTHORITY = object()
+_NATIVE_ABORT_AUTHORITY = object()
+
+
+def _read_exact_json_seal(
+    path: Path,
+    *,
+    expected_sha256: str,
+    unavailable_message: str,
+) -> dict[str, object]:
+    """Read one regular JSON file only when its complete bytes match a seal."""
+
+    candidate = Path(path).expanduser()
+    try:
+        metadata = candidate.lstat()
+        payload = candidate.read_bytes()
+    except OSError as exc:
+        raise RepositoryPilotProtocolError(unavailable_message) from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise RepositoryPilotProtocolError(f"{unavailable_message}: not a regular file")
+    if hashlib.sha256(payload).hexdigest() != expected_sha256:
+        raise RepositoryPilotProtocolError(f"{unavailable_message}: frozen SHA-256 changed")
+    try:
+        document = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RepositoryPilotProtocolError(f"{unavailable_message}: invalid JSON") from exc
+    if type(document) is not dict:
+        raise RepositoryPilotProtocolError(f"{unavailable_message}: root must be an object")
+    return document
+
+
+def _assert_predecessor_and_incident_seals() -> None:
+    predecessor = _read_exact_json_seal(
+        _REPOSITORY_ROOT / PREDECESSOR_PREREGISTRATION_RELATIVE_PATH,
+        expected_sha256=PREDECESSOR_PREREGISTRATION_SHA256,
+        unavailable_message="pilot predecessor preregistration is unavailable",
+    )
+    if (
+        predecessor.get("schema") != PREDECESSOR_PREREGISTRATION_SCHEMA
+        or predecessor.get("protocol_revision") != PREDECESSOR_PREREGISTRATION_REVISION
+    ):
+        raise RepositoryPilotProtocolError("pilot predecessor preregistration anchors changed")
+
+    incident = _read_exact_json_seal(
+        _REPOSITORY_ROOT / V2_INCIDENT_RELATIVE_PATH,
+        expected_sha256=V2_INCIDENT_SHA256,
+        unavailable_message="pilot v2 incident record is unavailable",
+    )
+    incident_protocol = incident.get("protocol")
+    if (
+        incident.get("schema") != V2_INCIDENT_SCHEMA
+        or incident.get("status") != V2_INCIDENT_STATUS
+        or type(incident_protocol) is not dict
+        or incident_protocol.get("schema") != PREDECESSOR_PREREGISTRATION_SCHEMA
+        or incident_protocol.get("revision") != PREDECESSOR_PREREGISTRATION_REVISION
+        or incident_protocol.get("preregistration_sha256") != PREDECESSOR_PREREGISTRATION_SHA256
+    ):
+        raise RepositoryPilotProtocolError("pilot v2 incident anchors changed")
 
 
 def _assert_preregistration_seal(
@@ -188,31 +297,32 @@ def _assert_preregistration_seal(
     """Verify the exact reviewed preregistration bytes and semantic anchors."""
 
     candidate = Path(path or (_REPOSITORY_ROOT / PREREGISTRATION_RELATIVE_PATH)).expanduser()
-    try:
-        metadata = candidate.lstat()
-        payload = candidate.read_bytes()
-    except OSError as exc:
-        raise RepositoryPilotProtocolError("pilot preregistration is unavailable") from exc
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        raise RepositoryPilotProtocolError("pilot preregistration must be a regular file")
-    observed = hashlib.sha256(payload).hexdigest()
-    if observed != PREREGISTRATION_SHA256:
-        raise RepositoryPilotProtocolError("pilot preregistration bytes do not match the frozen SHA-256")
-    try:
-        document = json.loads(payload)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise RepositoryPilotProtocolError("pilot preregistration is not valid JSON") from exc
-    if type(document) is not dict:
-        raise RepositoryPilotProtocolError("pilot preregistration root must be an object")
+    document = _read_exact_json_seal(
+        candidate,
+        expected_sha256=PREREGISTRATION_SHA256,
+        unavailable_message="pilot preregistration is unavailable",
+    )
     integrity = document.get("protocol_integrity")
-    if type(integrity) is not dict:
+    revision_history = document.get("revision_history")
+    if type(integrity) is not dict or type(revision_history) is not dict:
         raise RepositoryPilotProtocolError("pilot preregistration has no protocol-integrity object")
     if (
         document.get("schema") != PREREGISTRATION_SCHEMA
         or document.get("protocol_revision") != PREREGISTRATION_REVISION
         or integrity.get("result_envelope_schema") != RESULT_ENVELOPE_SCHEMA
+        or integrity.get("abort_envelope_schema") != ABORT_ENVELOPE_SCHEMA
+        or integrity.get("attempt_start_schema") != ATTEMPT_START_SCHEMA
+        or integrity.get("source_lock_schema") != SOURCE_LOCK_SCHEMA
         or tuple(integrity.get("source_lock_must_include", ())) != PILOT_SOURCE_LOCK_FILES
         or integrity.get("quality_profile_sha256") != GATE_PROFILE_SHA256
+        or revision_history.get("predecessor_path") != PREDECESSOR_PREREGISTRATION_RELATIVE_PATH
+        or revision_history.get("predecessor_schema") != PREDECESSOR_PREREGISTRATION_SCHEMA
+        or revision_history.get("predecessor_revision") != PREDECESSOR_PREREGISTRATION_REVISION
+        or revision_history.get("predecessor_sha256") != PREDECESSOR_PREREGISTRATION_SHA256
+        or revision_history.get("post_hoc_incident_record_path") != V2_INCIDENT_RELATIVE_PATH
+        or revision_history.get("post_hoc_incident_record_status") != V2_INCIDENT_STATUS
+        or revision_history.get("post_hoc_incident_record_sha256") != V2_INCIDENT_SHA256
+        or revision_history.get("v2_rerun_forbidden") is not True
     ):
         raise RepositoryPilotProtocolError("pilot preregistration semantic anchors changed")
     expected_models = {
@@ -230,7 +340,8 @@ def _assert_preregistration_seal(
     }
     if document.get("models") != expected_models:
         raise RepositoryPilotProtocolError("pilot preregistration model identities changed")
-    return observed
+    _assert_predecessor_and_incident_seals()
+    return PREREGISTRATION_SHA256
 
 
 @dataclass(frozen=True)
@@ -305,6 +416,228 @@ class _NativeVerificationLedger:
         self.successful_verifications += 1
 
 
+def _provenance_payload(provenance: FrozenPilotProvenance) -> dict[str, object]:
+    """Return the common source-free provenance carried by every native receipt."""
+
+    models = {lock.role: lock for lock in provenance.model_locks}
+    return {
+        "implementation": {
+            "git_revision": provenance.source_lock.git_revision,
+            "source_lock_schema": SOURCE_LOCK_SCHEMA,
+            "source_sha256": provenance.source_lock.source_sha256,
+            "source_file_count": provenance.source_lock.source_file_count,
+        },
+        "protocol": {
+            "preregistration_schema": PREREGISTRATION_SCHEMA,
+            "preregistration_revision": PREREGISTRATION_REVISION,
+            "preregistration_sha256": provenance.preregistration_sha256,
+            "predecessor_preregistration_sha256": PREDECESSOR_PREREGISTRATION_SHA256,
+            "v2_incident_record_sha256": V2_INCIDENT_SHA256,
+            "public_suite_sha256": provenance.suite_sha256,
+            "private_evaluator_bundle_sha256": provenance.private_protocol_sha256,
+            "quality_profile_schema": GATE_PROFILE_SCHEMA,
+            "quality_profile_sha256": GATE_PROFILE_SHA256,
+        },
+        "models": {
+            "target": {
+                "repository_label": models["target"].repository_label,
+                "content_identity": models["target"].content_identity,
+            },
+            "drafter": {
+                "backend": "dflash",
+                "repository_label": models["drafter"].repository_label,
+                "content_identity": models["drafter"].content_identity,
+            },
+        },
+        "software": {
+            "python_version": provenance.runtime_identity.python_version,
+            "packages": dict(provenance.runtime_identity.software_versions),
+        },
+        "hardware": {"label": provenance.runtime_identity.hardware_label},
+        "runtime": {
+            "split": provenance.split,
+            "tier": provenance.tier,
+        },
+    }
+
+
+@dataclass(frozen=True)
+class _NativeAttemptStartReceipt:
+    """Private, source-free authority showing that this v3 attempt was claimed."""
+
+    authority: object
+    provenance: FrozenPilotProvenance
+    started_at_utc: str
+
+    def __post_init__(self) -> None:
+        if self.authority is not _NATIVE_ATTEMPT_AUTHORITY:
+            raise RepositoryPilotProtocolError("native attempt-start authority is invalid")
+        if not isinstance(self.provenance, FrozenPilotProvenance):
+            raise TypeError("native attempt-start requires FrozenPilotProvenance")
+        try:
+            parsed = datetime.fromisoformat(self.started_at_utc.replace("Z", "+00:00"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("native attempt-start timestamp is invalid") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() != UTC.utcoffset(parsed):
+            raise ValueError("native attempt-start timestamp must be UTC")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": ATTEMPT_START_SCHEMA,
+            "status": "started",
+            "started_at_utc": self.started_at_utc,
+            "provenance": _provenance_payload(self.provenance),
+            "hidden_labels_serialized": False,
+        }
+
+    def serialize(self) -> str:
+        self.__post_init__()
+        payload = self.to_dict()
+        _assert_source_free_artifact(payload)
+        return json.dumps(payload, sort_keys=True, indent=2, allow_nan=False) + "\n"
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(self.serialize().encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class _NativeAbortReceipt:
+    authority: object
+    provenance: FrozenPilotProvenance
+    attempt_start: _NativeAttemptStartReceipt
+    failure_boundary: str
+    reason_code: NativeAbortReason
+    failure_message_sha256: str
+    generation_receipt_issued: bool
+    completed_root_generation_count: int
+    completed_unique_extra_generation_count: int
+    hidden_evaluator_constructed: bool
+    hidden_evaluation_started: bool
+    manager_state: NativeManagerState
+    work_root_cleanup: NativeCleanupState
+    post_abort_verification: NativeVerificationState
+    successful_verifications: int
+
+    def __post_init__(self) -> None:
+        if self.authority is not _NATIVE_ABORT_AUTHORITY:
+            raise RepositoryPilotProtocolError("native abort authority is invalid")
+        if self.attempt_start.provenance is not self.provenance:
+            raise RepositoryPilotProtocolError("native abort is bound to another attempt")
+        self.attempt_start.__post_init__()
+        if not _SAFE_TIER.fullmatch(self.failure_boundary):
+            raise ValueError("native abort failure boundary is not a safe label")
+        if not isinstance(self.reason_code, NativeAbortReason):
+            raise TypeError("native abort reason code is not typed")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.failure_message_sha256):
+            raise ValueError("native abort failure-message digest is invalid")
+        for name in (
+            "generation_receipt_issued",
+            "hidden_evaluator_constructed",
+            "hidden_evaluation_started",
+        ):
+            if type(getattr(self, name)) is not bool:
+                raise TypeError(f"native abort {name} must be boolean")
+        for name in (
+            "completed_root_generation_count",
+            "completed_unique_extra_generation_count",
+            "successful_verifications",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"native abort {name} must be a non-negative integer")
+        if not isinstance(self.manager_state, NativeManagerState):
+            raise TypeError("native abort manager state is not typed")
+        if not isinstance(self.work_root_cleanup, NativeCleanupState):
+            raise TypeError("native abort cleanup state is not typed")
+        if not isinstance(self.post_abort_verification, NativeVerificationState):
+            raise TypeError("native abort verification state is not typed")
+        if self.hidden_evaluation_started and not self.hidden_evaluator_constructed:
+            raise ValueError("hidden evaluation cannot start before evaluator construction")
+
+
+@dataclass(frozen=True)
+class RepositoryQualityPilotAbortEnvelope:
+    """Non-result terminal envelope issued only by a claimed native v3 attempt."""
+
+    provenance: FrozenPilotProvenance
+    attempt_start: _NativeAttemptStartReceipt
+    abort_receipt: _NativeAbortReceipt
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.provenance, FrozenPilotProvenance):
+            raise TypeError("abort envelope requires FrozenPilotProvenance")
+        if type(self.attempt_start) is not _NativeAttemptStartReceipt:
+            raise TypeError("abort envelope requires a native attempt-start receipt")
+        if type(self.abort_receipt) is not _NativeAbortReceipt:
+            raise TypeError("abort envelope requires a native abort receipt")
+        self.abort_receipt.__post_init__()
+        if (
+            self.attempt_start.provenance is not self.provenance
+            or self.abort_receipt.provenance is not self.provenance
+            or self.abort_receipt.attempt_start is not self.attempt_start
+        ):
+            raise ValueError("abort envelope receipts are bound to another attempt")
+
+    def to_dict(self) -> dict[str, object]:
+        receipt = self.abort_receipt
+        return {
+            "schema_version": ABORT_ENVELOPE_SCHEMA,
+            "status": "aborted_no_result",
+            "attempt": {
+                "start_schema": ATTEMPT_START_SCHEMA,
+                "start_sha256": self.attempt_start.sha256,
+            },
+            "provenance": _provenance_payload(self.provenance),
+            "abort": {
+                "failure_boundary": receipt.failure_boundary,
+                "reason_code": receipt.reason_code.value,
+                "failure_message_sha256": receipt.failure_message_sha256,
+                "generation_receipt_issued": receipt.generation_receipt_issued,
+                "completed_root_generation_count": receipt.completed_root_generation_count,
+                "completed_unique_extra_generation_count": (receipt.completed_unique_extra_generation_count),
+                "hidden_evaluator_constructed": receipt.hidden_evaluator_constructed,
+                "hidden_evaluation_started": receipt.hidden_evaluation_started,
+                "manager_state": receipt.manager_state.value,
+                "work_root_cleanup": receipt.work_root_cleanup.value,
+                "post_abort_frozen_input_verification": receipt.post_abort_verification.value,
+                "successful_verification_count": receipt.successful_verifications,
+                "aggregate_produced": False,
+            },
+            "publication": {
+                "result_envelope_created": False,
+                "partial_generation_reuse_allowed": False,
+                "quality_claim_allowed": False,
+                "speed_claim_allowed": False,
+                "breakthrough_claim_allowed": False,
+            },
+            "hidden_labels_serialized": False,
+        }
+
+
+def serialize_repository_quality_pilot_abort(
+    envelope: RepositoryQualityPilotAbortEnvelope,
+    *,
+    indent: int | None = 2,
+) -> str:
+    if not isinstance(envelope, RepositoryQualityPilotAbortEnvelope):
+        raise TypeError("only RepositoryQualityPilotAbortEnvelope can be serialized")
+    envelope.__post_init__()
+    payload = envelope.to_dict()
+    _assert_source_free_artifact(payload)
+    return json.dumps(payload, sort_keys=True, indent=indent, allow_nan=False) + "\n"
+
+
+class NativePilotAborted(RepositoryPilotProtocolError):
+    """Raised after a source-free abort envelope has been durably published."""
+
+    def __init__(self, envelope: RepositoryQualityPilotAbortEnvelope) -> None:
+        if not isinstance(envelope, RepositoryQualityPilotAbortEnvelope):
+            raise TypeError("NativePilotAborted requires an abort envelope")
+        self.envelope = envelope
+        super().__init__(f"native pilot aborted: {envelope.abort_receipt.reason_code.value}")
+
+
 @dataclass(frozen=True)
 class PilotExecution:
     """Private completed execution; only ``aggregate`` is publishable."""
@@ -332,6 +665,7 @@ class PilotExecution:
 class _NativePublicationReceipt:
     authority: object
     provenance: FrozenPilotProvenance
+    attempt_start: _NativeAttemptStartReceipt
     execution: PilotExecution
     successful_verifications: int
     manager_unloaded_before_hidden: bool
@@ -339,6 +673,9 @@ class _NativePublicationReceipt:
     def __post_init__(self) -> None:
         if self.authority is not _NATIVE_PUBLICATION_AUTHORITY:
             raise RepositoryPilotProtocolError("native publication authority is invalid")
+        if self.attempt_start.provenance is not self.provenance:
+            raise RepositoryPilotProtocolError("native publication is bound to another attempt")
+        self.attempt_start.__post_init__()
         if self.successful_verifications < 4:
             raise RepositoryPilotProtocolError("native publication verification ledger is incomplete")
         if self.manager_unloaded_before_hidden is not True:
@@ -350,6 +687,7 @@ class RepositoryQualityPilotResultEnvelope:
     """Fixed-schema source-free envelope for a verified native execution."""
 
     provenance: FrozenPilotProvenance
+    attempt_start: _NativeAttemptStartReceipt
     execution: PilotExecution
     publication_receipt: _NativePublicationReceipt
     post_run_verified: bool = True
@@ -359,11 +697,14 @@ class RepositoryQualityPilotResultEnvelope:
             raise TypeError("result envelope requires FrozenPilotProvenance")
         if not isinstance(self.execution, PilotExecution):
             raise TypeError("result envelope requires PilotExecution")
+        if type(self.attempt_start) is not _NativeAttemptStartReceipt:
+            raise TypeError("result envelope requires a native attempt-start receipt")
         if type(self.publication_receipt) is not _NativePublicationReceipt:
             raise TypeError("result envelope requires a native publication receipt")
         self.publication_receipt.__post_init__()
         if (
             self.publication_receipt.provenance is not self.provenance
+            or self.publication_receipt.attempt_start is not self.attempt_start
             or self.publication_receipt.execution is not self.execution
         ):
             raise ValueError("native publication receipt is bound to another execution")
@@ -387,9 +728,14 @@ class RepositoryQualityPilotResultEnvelope:
         receipt = self.execution.generation_receipt
         return {
             "schema_version": RESULT_ENVELOPE_SCHEMA,
+            "attempt": {
+                "start_schema": ATTEMPT_START_SCHEMA,
+                "start_sha256": self.attempt_start.sha256,
+            },
             "implementation": {
                 "git_revision": self.provenance.source_lock.git_revision,
                 "git_clean": True,
+                "source_lock_schema": SOURCE_LOCK_SCHEMA,
                 "source_sha256": self.provenance.source_lock.source_sha256,
                 "source_file_count": self.provenance.source_lock.source_file_count,
                 "post_run_source_stable": True,
@@ -398,6 +744,8 @@ class RepositoryQualityPilotResultEnvelope:
                 "preregistration_schema": PREREGISTRATION_SCHEMA,
                 "preregistration_revision": PREREGISTRATION_REVISION,
                 "preregistration_sha256": self.provenance.preregistration_sha256,
+                "predecessor_preregistration_sha256": PREDECESSOR_PREREGISTRATION_SHA256,
+                "v2_incident_record_sha256": V2_INCIDENT_SHA256,
                 "public_suite_sha256": self.provenance.suite_sha256,
                 "private_evaluator_bundle_sha256": self.provenance.private_protocol_sha256,
                 "quality_profile_schema": GATE_PROFILE_SCHEMA,
@@ -569,6 +917,8 @@ class RepositoryQualityPilotOrchestrator:
         self.verify_frozen_inputs = verify_frozen_inputs
         self.hidden_evaluator_factory = hidden_evaluator_factory
         self.phase = PilotRunPhase.CREATED
+        self.abort_from_phase: PilotRunPhase | None = None
+        self.cleanup_complete = False
 
         self._fixture_ids: tuple[str, ...] = ()
         self._contexts: dict[str, _FixtureContext] = {}
@@ -1049,12 +1399,17 @@ class RepositoryQualityPilotOrchestrator:
             return self._evaluate_and_aggregate()
         except BaseException as exc:
             failure = exc
+            self.abort_from_phase = self.phase
             self.phase = PilotRunPhase.ABORTED
             raise
         finally:
             try:
                 self._cleanup_owned_work_root()
+                self.cleanup_complete = True
             except BaseException:
+                self.cleanup_complete = False
+                if self.abort_from_phase is None:
+                    self.abort_from_phase = self.phase
                 self.phase = PilotRunPhase.ABORTED
                 if failure is None:
                     raise
@@ -1213,6 +1568,130 @@ def _atomic_create_result(path: Path, content: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
+_ATTEMPT_START_FILENAME = "attempt-start.json"
+_ATTEMPT_RESULT_FILENAME = "result.json"
+_ATTEMPT_ABORT_FILENAME = "abort.json"
+
+
+class _NativeAbortSignal(RuntimeError):
+    def __init__(self, reason_code: NativeAbortReason, failure_boundary: str) -> None:
+        self.reason_code = reason_code
+        self.failure_boundary = failure_boundary
+        super().__init__(reason_code.value)
+
+
+@dataclass
+class _RawTimingAttestingExecutor:
+    """Reject non-raw native DFlash telemetry with a typed abort reason."""
+
+    delegate: RetainedStageExecutor
+
+    @staticmethod
+    def _attest(stage: RetainedAgentStage) -> RetainedAgentStage:
+        rounds = getattr(getattr(stage, "result", None), "rounds", None)
+        if type(rounds) is tuple and any(
+            getattr(round_trace, "timing_source", None) != "runtime_raw_ns" for round_trace in rounds
+        ):
+            raise _NativeAbortSignal(
+                NativeAbortReason.DFLASH_RAW_PHASE_TELEMETRY_MISSING,
+                "root_generation_telemetry_validation",
+            )
+        return stage
+
+    def run_direct(self, **kwargs: Any) -> RetainedAgentStage:
+        return self._attest(self.delegate.run_direct(**kwargs))
+
+    def run_recovery(self, **kwargs: Any) -> RetainedAgentStage:
+        return self._attest(self.delegate.run_recovery(**kwargs))
+
+
+def _paths_overlap(left: Path, right: Path) -> bool:
+    try:
+        left.relative_to(right)
+        return True
+    except ValueError:
+        try:
+            right.relative_to(left)
+            return True
+        except ValueError:
+            return False
+
+
+def _claim_native_attempt_root(
+    candidate: Path,
+    *,
+    source_root: Path,
+    model_locks: Sequence[LocalModelLock],
+    work_root: Path,
+) -> Path:
+    """Atomically claim one persistent, empty receipt root for this v3 attempt."""
+
+    resolved = _validate_native_work_location(
+        candidate,
+        source_root=source_root,
+        model_locks=model_locks,
+        label="native attempt root",
+        must_exist=False,
+    )
+    try:
+        parent = resolved.parent.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise RepositoryPilotProtocolError("native attempt-root parent is unavailable") from exc
+    if not parent.is_dir():
+        raise RepositoryPilotProtocolError("native attempt-root parent must be a directory")
+    resolved_work_root = Path(work_root).expanduser().resolve(strict=False)
+    if _paths_overlap(resolved, resolved_work_root):
+        raise RepositoryPilotProtocolError("native attempt root and private work root must be disjoint")
+    try:
+        resolved.mkdir(mode=0o700, parents=False, exist_ok=False)
+    except FileExistsError as exc:
+        raise RepositoryPilotProtocolError("native v3 attempt root is create-once and already exists") from exc
+    except OSError as exc:
+        raise RepositoryPilotProtocolError("native v3 attempt root could not be claimed") from exc
+    metadata = resolved.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise RepositoryPilotProtocolError("native v3 attempt root is not a real directory")
+    return resolved
+
+
+def _issue_native_attempt_start(provenance: FrozenPilotProvenance) -> _NativeAttemptStartReceipt:
+    provenance.verify()
+    return _NativeAttemptStartReceipt(
+        authority=_NATIVE_ATTEMPT_AUTHORITY,
+        provenance=provenance,
+        started_at_utc=datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+    )
+
+
+def _verify_attempt_start_file(root: Path, receipt: _NativeAttemptStartReceipt) -> None:
+    path = root / _ATTEMPT_START_FILENAME
+    try:
+        metadata = path.lstat()
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise RepositoryPilotProtocolError("native attempt-start receipt is unavailable") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise RepositoryPilotProtocolError("native attempt-start receipt is not a regular file")
+    if hashlib.sha256(payload).hexdigest() != receipt.sha256:
+        raise RepositoryPilotProtocolError("native attempt-start receipt changed after creation")
+
+
+def _native_abort_reason(
+    failure: BaseException,
+    *,
+    failure_boundary: str,
+) -> NativeAbortReason:
+    if isinstance(failure, _NativeAbortSignal):
+        return failure.reason_code
+    if failure_boundary == "model_load":
+        return NativeAbortReason.MODEL_LOAD_FAILURE
+    if failure_boundary == "manager_unload":
+        return NativeAbortReason.MANAGER_UNLOAD_FAILURE
+    if isinstance(failure, RepositoryPilotProtocolError):
+        return NativeAbortReason.PROTOCOL_FAILURE
+    return NativeAbortReason.INFRASTRUCTURE_FAILURE
+
+
 def run_native_repository_quality_pilot(
     *,
     split: str,
@@ -1221,13 +1700,14 @@ def run_native_repository_quality_pilot(
     target_path: Path,
     draft_path: Path,
     work_root: Path,
+    attempt_root: Path,
     output: Path | None = None,
 ) -> RepositoryQualityPilotResultEnvelope:
     """Run the authorized native smoke cohort with non-injectable provenance."""
 
     if split != "smoke":
         raise RepositoryPilotProtocolError(
-            "native pilot v2 authorizes smoke only; all requires a later integrity-authorized wrapper"
+            "native pilot v3 authorizes smoke only; all requires a later integrity-authorized wrapper"
         )
     cases = select_cases(split)
     provenance = _capture_native_provenance(
@@ -1242,25 +1722,64 @@ def run_native_repository_quality_pilot(
         source_root=provenance.source_lock.repo_root,
         model_locks=provenance.model_locks,
     )
-    _validate_native_work_location(
+    validated_work_root = _validate_native_work_location(
         work_root,
         source_root=provenance.source_lock.repo_root,
         model_locks=provenance.model_locks,
         label="pilot work root",
         must_exist=False,
     )
+    attempt_start = _issue_native_attempt_start(provenance)
+    claimed_attempt_root = _claim_native_attempt_root(
+        attempt_root,
+        source_root=provenance.source_lock.repo_root,
+        model_locks=provenance.model_locks,
+        work_root=validated_work_root,
+    )
 
     manager: Any | None = None
-    manager_unloaded = False
+    manager_state = NativeManagerState.NEVER_LOADED
+    unload_attempted = False
     verification_ledger = _NativeVerificationLedger(provenance)
+    hidden_evaluator_constructed = False
+    hidden_evaluation_started = False
+    orchestrator: RepositoryQualityPilotOrchestrator | None = None
+    execution: PilotExecution | None = None
+    result_envelope: RepositoryQualityPilotResultEnvelope | None = None
+    failure: BaseException | None = None
+    failure_boundary = "attempt_start_publication"
+    attempt_start_published = False
 
     def unload_manager() -> None:
-        nonlocal manager_unloaded
-        if manager is not None and not manager_unloaded:
+        nonlocal manager_state, unload_attempted
+        if manager is None or manager_state is NativeManagerState.UNLOADED or unload_attempted:
+            return
+        unload_attempted = True
+        try:
             manager.unload_all()
-            manager_unloaded = True
+        except BaseException:
+            manager_state = NativeManagerState.UNLOAD_FAILED
+            raise
+        manager_state = NativeManagerState.UNLOADED
 
     try:
+        try:
+            _atomic_create_result(
+                claimed_attempt_root / _ATTEMPT_START_FILENAME,
+                attempt_start.serialize(),
+            )
+        except BaseException:
+            # os.link() may have installed the create-once receipt even when a
+            # later temporary-file unlink or directory fsync fails. Treat that
+            # exact, verifiable path as a consumed attempt and terminalize it
+            # with an abort instead of stranding a start-only directory.
+            _verify_attempt_start_file(claimed_attempt_root, attempt_start)
+            attempt_start_published = True
+            raise
+        _verify_attempt_start_file(claimed_attempt_root, attempt_start)
+        attempt_start_published = True
+
+        failure_boundary = "model_load"
         with redirect_stdout(sys.stderr):
             native_executor, manager = _load_native_executor(
                 tier=tier,
@@ -1268,20 +1787,28 @@ def run_native_repository_quality_pilot(
                 target_path=provenance.model_locks[0].resolved_path,
                 draft_path=provenance.model_locks[1].resolved_path,
             )
-        executor = RetainedNativeAgentExecutor(
-            config=native_executor.config,
-            manager=native_executor.manager,
-            engine=native_executor.engine,
-            tier=native_executor.tier,
+        manager_state = NativeManagerState.LOADED
+        failure_boundary = "native_executor_construction"
+        executor = _RawTimingAttestingExecutor(
+            RetainedNativeAgentExecutor(
+                config=native_executor.config,
+                manager=native_executor.manager,
+                engine=native_executor.engine,
+                tier=native_executor.tier,
+            )
         )
 
         def hidden_evaluator_factory() -> HiddenEvaluator:
+            nonlocal hidden_evaluator_constructed
             # Model memory and mutable runtime state are gone before the private
             # evaluator object or callback can be constructed.
             unload_manager()
             corpus_evaluator = CorpusHiddenEvaluator(cases)
+            hidden_evaluator_constructed = True
 
             def evaluate(fixture_id: str, root: Path) -> HiddenOutcome:
+                nonlocal hidden_evaluation_started
+                hidden_evaluation_started = True
                 evaluation = corpus_evaluator(
                     EvaluationRequest(
                         fixture_id=fixture_id,
@@ -1299,37 +1826,139 @@ def run_native_repository_quality_pilot(
 
             return evaluate
 
+        orchestrator = RepositoryQualityPilotOrchestrator(
+            cases=cases,
+            protocol=PilotProtocol(
+                suite_sha256=provenance.suite_sha256,
+                seed=FROZEN_SEED,
+            ),
+            executor=executor,
+            work_root=validated_work_root,
+            verify_frozen_inputs=verification_ledger.verify,
+            hidden_evaluator_factory=hidden_evaluator_factory,
+        )
+        failure_boundary = "cohort_execution"
         with redirect_stdout(sys.stderr):
-            execution = execute_repository_quality_pilot(
-                cases=cases,
-                protocol=PilotProtocol(
-                    suite_sha256=provenance.suite_sha256,
-                    seed=FROZEN_SEED,
-                ),
-                executor=executor,
-                work_root=work_root,
-                verify_frozen_inputs=verification_ledger.verify,
-                hidden_evaluator_factory=hidden_evaluator_factory,
-            )
+            execution = orchestrator.run()
         # The core verifies after hidden evaluation and before aggregation.
         # Reverify once more after aggregation so the published envelope covers
         # the complete execution interval.
+        failure_boundary = "post_run_verification"
         verification_ledger.verify()
-        publication_receipt = _NativePublicationReceipt(
-            authority=_NATIVE_PUBLICATION_AUTHORITY,
-            provenance=provenance,
-            execution=execution,
-            successful_verifications=verification_ledger.successful_verifications,
-            manager_unloaded_before_hidden=manager_unloaded,
-        )
-        return RepositoryQualityPilotResultEnvelope(
-            provenance=provenance,
-            execution=execution,
-            publication_receipt=publication_receipt,
-            post_run_verified=True,
-        )
+    except BaseException as exc:
+        failure = exc
+        if isinstance(exc, _NativeAbortSignal):
+            failure_boundary = exc.failure_boundary
+        elif manager_state is NativeManagerState.UNLOAD_FAILED:
+            failure_boundary = "manager_unload"
+        elif orchestrator is not None and orchestrator.abort_from_phase is not None:
+            failure_boundary = orchestrator.abort_from_phase.value
     finally:
-        unload_manager()
+        try:
+            unload_manager()
+        except BaseException as exc:
+            if failure is None:
+                failure = exc
+                failure_boundary = "manager_unload"
+
+    if failure is not None and not attempt_start_published:
+        # No verifiable start receipt means no scientific attempt exists and
+        # therefore no receipt-bound abort can be authored. Reclaim the empty
+        # directory when possible, while preserving any unexpected evidence.
+        try:
+            claimed_attempt_root.rmdir()
+        except OSError:
+            pass
+        raise RepositoryPilotProtocolError(
+            "native attempt-start publication failed before a verifiable receipt"
+        ) from failure
+
+    if failure is None:
+        try:
+            failure_boundary = "result_terminalization"
+            if execution is None:  # pragma: no cover - defensive state-machine guard
+                raise RepositoryPilotProtocolError("native pilot ended without execution or failure")
+            publication_receipt = _NativePublicationReceipt(
+                authority=_NATIVE_PUBLICATION_AUTHORITY,
+                provenance=provenance,
+                attempt_start=attempt_start,
+                execution=execution,
+                successful_verifications=verification_ledger.successful_verifications,
+                manager_unloaded_before_hidden=manager_state is NativeManagerState.UNLOADED,
+            )
+            result_envelope = RepositoryQualityPilotResultEnvelope(
+                provenance=provenance,
+                attempt_start=attempt_start,
+                execution=execution,
+                publication_receipt=publication_receipt,
+                post_run_verified=True,
+            )
+            serialized_result = serialize_repository_quality_pilot_result(result_envelope)
+            _verify_attempt_start_file(claimed_attempt_root, attempt_start)
+            _atomic_create_result(
+                claimed_attempt_root / _ATTEMPT_RESULT_FILENAME,
+                serialized_result,
+            )
+        except BaseException as exc:
+            failure = exc
+
+    if failure is not None:
+        # A create-once terminal path wins even if the final directory fsync
+        # raised after linking it. Never publish contradictory result+abort
+        # siblings for one attempt.
+        result_path = claimed_attempt_root / _ATTEMPT_RESULT_FILENAME
+        if result_path.exists() or result_path.is_symlink():
+            raise RepositoryPilotProtocolError(
+                "native result terminalization failed after the result path became occupied"
+            ) from None
+        post_abort_verification = NativeVerificationState.NOT_ATTEMPTED
+        try:
+            verification_ledger.verify()
+        except BaseException:
+            post_abort_verification = NativeVerificationState.FAILED
+        else:
+            post_abort_verification = NativeVerificationState.PASSED
+
+        cleanup_state = NativeCleanupState.COMPLETE
+        if orchestrator is not None and not orchestrator.cleanup_complete:
+            cleanup_state = NativeCleanupState.FAILED
+        roots_completed = 0 if orchestrator is None else len(orchestrator._completed_roots)
+        extras_completed = 0 if orchestrator is None else len(orchestrator._completed_extras)
+        generation_receipt_issued = bool(orchestrator is not None and orchestrator._generation_receipt is not None)
+        if manager is None and manager_state is NativeManagerState.NEVER_LOADED and failure_boundary == "model_load":
+            manager_state = NativeManagerState.LOAD_FAILED
+        abort_receipt = _NativeAbortReceipt(
+            authority=_NATIVE_ABORT_AUTHORITY,
+            provenance=provenance,
+            attempt_start=attempt_start,
+            failure_boundary=failure_boundary,
+            reason_code=_native_abort_reason(failure, failure_boundary=failure_boundary),
+            failure_message_sha256=hashlib.sha256(str(failure).encode("utf-8")).hexdigest(),
+            generation_receipt_issued=generation_receipt_issued,
+            completed_root_generation_count=roots_completed,
+            completed_unique_extra_generation_count=extras_completed,
+            hidden_evaluator_constructed=hidden_evaluator_constructed,
+            hidden_evaluation_started=hidden_evaluation_started,
+            manager_state=manager_state,
+            work_root_cleanup=cleanup_state,
+            post_abort_verification=post_abort_verification,
+            successful_verifications=verification_ledger.successful_verifications,
+        )
+        abort_envelope = RepositoryQualityPilotAbortEnvelope(
+            provenance=provenance,
+            attempt_start=attempt_start,
+            abort_receipt=abort_receipt,
+        )
+        _verify_attempt_start_file(claimed_attempt_root, attempt_start)
+        _atomic_create_result(
+            claimed_attempt_root / _ATTEMPT_ABORT_FILENAME,
+            serialize_repository_quality_pilot_abort(abort_envelope),
+        )
+        raise NativePilotAborted(abort_envelope) from None
+
+    if result_envelope is None:  # pragma: no cover - defensive state-machine guard
+        raise RepositoryPilotProtocolError("native pilot produced no terminal result envelope")
+    return result_envelope
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -1338,7 +1967,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--split",
         choices=("smoke",),
         default="smoke",
-        help="v2 authorizes only the four-task harness-validation smoke cohort",
+        help="v3 authorizes only the four-task harness-validation smoke cohort",
     )
     parser.add_argument("--tier", default="small")
     parser.add_argument("--config", type=Path, default=None)
@@ -1359,6 +1988,12 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=None,
         help="optional parent for an automatically removed private run directory",
+    )
+    parser.add_argument(
+        "--attempt-root",
+        type=Path,
+        required=True,
+        help="new persistent directory for create-once start and terminal receipts",
     )
     parser.add_argument("--output", type=Path, default=None)
     return parser.parse_args(argv)
@@ -1407,6 +2042,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             target_path=args.target_path,
             draft_path=args.draft_path,
             work_root=Path(private_parent) / "run",
+            attempt_root=args.attempt_root,
             output=args.output,
         )
     serialized = serialize_repository_quality_pilot_result(envelope)
@@ -1428,12 +2064,15 @@ __all__ = (
     "FrozenPilotProvenance",
     "PilotExecution",
     "PilotRunPhase",
+    "NativePilotAborted",
+    "RepositoryQualityPilotAbortEnvelope",
     "RepositoryQualityPilotResultEnvelope",
     "RepositoryQualityPilotOrchestrator",
     "bind_records_from_hidden_batch",
     "execute_repository_quality_pilot",
     "main",
     "run_native_repository_quality_pilot",
+    "serialize_repository_quality_pilot_abort",
     "serialize_repository_quality_pilot_result",
 )
 

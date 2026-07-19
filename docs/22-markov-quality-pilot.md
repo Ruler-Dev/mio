@@ -1,8 +1,11 @@
 # Repository-level Markov quality pilot
 
-> Status: preregistered exploratory protocol; no result yet. The machine-readable
-> source of truth is
-> [`benchmarks/repository-quality-four-arm-preregistration-v2.json`](../benchmarks/repository-quality-four-arm-preregistration-v2.json).
+> Status: v3 preregistered exploratory protocol; no result yet. The
+> machine-readable source of truth is
+> [`benchmarks/repository-quality-four-arm-preregistration-v3.json`](../benchmarks/repository-quality-four-arm-preregistration-v3.json).
+> V2 is immutable and its failed first smoke is documented separately as a
+> [post-hoc incident record](../benchmarks/incidents/repository-quality-four-arm-v2-smoke-aborted-8bf6e6e.json),
+> not as a benchmark result.
 
 ## Why this experiment is necessary
 
@@ -108,6 +111,21 @@ last-prompt and pending-prefill state, and resets the DSpark prefix cache when
 present. Direct roots receive fresh conversations; a recovery deep-copies the
 Quality conversation but receives the same cold engine reset.
 
+V2 stopped fail-closed during root generation because the normal DFlash stream
+did not export raw nanosecond phase timings. The engine correctly labeled its
+microsecond conversion `derived_legacy_us`, which the protocol rejected:
+stream elapsed time can include generator suspension and downstream consumer
+work. V3 does not relax that check. DFlash now accumulates disjoint intervals
+between explicit active-runtime probes: timing stops before each event
+dictionary is built and restarts only after the generator itself resumes.
+Event construction, telemetry serialization, and consumer suspension are not
+charged to decode. Warm-prefix draft-context synchronization is charged to
+prefill; token materialization and final-state cache synchronization complete
+before decode timing closes. `elapsed_us` is the separate runtime-phase wall
+interval from immediately before prefill through final-state synchronization;
+it excludes earlier prompt/cache setup and never substitutes for
+`model_total_ns`.
+
 An agent receives exactly one active task workspace and the fixed local tool
 surface. Network and MCP access are disabled for this benchmark. Hidden and
 public evaluator programs, task/arm schedules, peer workspaces, archived roots,
@@ -128,7 +146,7 @@ documented, committed protocol revision.
 
 ## Native executable and publication boundary
 
-The v2 smoke runner is the only path authorized to publish this experiment's
+The v3 smoke runner is the only path authorized to publish this experiment's
 result envelope:
 
 ```bash
@@ -137,24 +155,61 @@ uv run --locked python -m experimental.effort.run_repository_quality_pilot \
   --tier small \
   --target-path <exact-Qwen3.5-4B-4bit-directory> \
   --draft-path <exact-Qwen3.5-4B-DFlash-directory> \
+  --attempt-root <new-persistent-create-once-directory> \
   --output <path-outside-the-repository-and-model-directories>
 ```
 
 It accepts no effort, router, seed, prompt, budget, sampler, or hidden-evaluator
 override. Before model loading it requires a clean committed tree and verifies
-the exact source list, v2 preregistration SHA-256, corpus/private-evaluator and
+the expanded critical-source manifest, v3 and predecessor preregistration
+SHA-256 values, the v2 incident digest, corpus/private-evaluator and
 Quality-profile seals, local model fingerprints, Python/package versions, and
 hardware identity. The private work and output locations must be disjoint from
 source and model roots. Result publication is create-once and refuses to
 overwrite an existing artifact. The model manager is unloaded before the hidden
 evaluator is constructed. Verification runs again after generation and before
 publication. A bare core aggregate produced with an injected test executor is
-not a publishable v2 result; only the native, receipt-bound, source-free
+not a publishable v3 result; only the native, receipt-bound, source-free
 envelope is.
+
+After provenance and destination checks—but before model loading—the runner
+atomically creates `attempt-start.json` under the new attempt root. A terminal
+attempt then creates exactly one sibling: `result.json` on success or
+`abort.json` on failure. Both bind the start-receipt SHA. The abort envelope
+contains only typed phase/state fields, content-free progress counts, and an
+exception-message digest; it excludes paths, prompts, fixture identifiers,
+candidate bytes, tracebacks, and hidden outcomes. Failure before provenance or
+destination acceptance does not claim a scientific attempt. The one-attempt
+authorization remains a procedural research rule because an operator could
+delete external receipt storage; an abort nevertheless consumes v3 and any
+later attempt requires a committed v4.
 
 This protocol revision authorizes only `smoke`. An `all` run needs a later
 wrapper that consumes a valid smoke integrity artifact without consulting its
 quality, route, rescue, regression, or cost outcomes.
+
+## V3 release attestation
+
+The final pre-attempt release candidate was checked on 2026-07-19 with the
+locked environment and no model inference:
+
+```text
+PYTHONPATH=. uv run --locked pytest -q
+1596 passed, 2 skipped, 1 pre-existing Starlette/httpx deprecation warning
+
+uv run --locked ruff check <five changed Python files>
+All checks passed
+
+uv run --locked ruff format --check <five changed Python files>
+5 files already formatted
+```
+
+The active preregistration SHA-256 is
+`d3ddbfa29bc99f2b480797fadf6686cbc200f973e6fa6325805855494d600d3d`;
+the v2 predecessor and post-hoc incident seals are verified by the runner.
+This attestation records a procedural release gate, not a quality, speed, or
+breakthrough result. The native attempt-start receipt will bind the eventual
+clean Git revision and complete 28-file critical-source digest independently.
 
 ## Allocation-matched static control
 
@@ -213,7 +268,7 @@ selection was sealed before the first callback, evaluation was single-use, and
 the number of unique `(fixture, terminal bytes)` pairs equals the callback
 count; these integrity fields are not hard-coded report claims.
 
-Protocol v2 reports the raw `workspace_evaluator_passed` bit separately from
+The protocol reports the raw `workspace_evaluator_passed` bit separately from
 the composite success endpoint. This distinction is mandatory: an identical
 terminal artifact can become a valid completed trajectory after fresh trusted
 validation, but its code bytes did not thereby become more correct. Every

@@ -164,6 +164,222 @@ def test_stream_baseline_raw_model_timing_excludes_generator_suspension(monkeypa
     assert summary["elapsed_us"] == 10.0
 
 
+def _mock_minimal_dflash_runtime(monkeypatch, runtime):
+    monkeypatch.setattr(runtime, "make_target_cache", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        runtime,
+        "chunked_dflash_prefill",
+        lambda *_args, **_kwargs: (
+            mx.zeros((1, 1, 3)),
+            mx.zeros((1, 1, 1)),
+        ),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "greedy_tokens_with_mask",
+        lambda *_args, **_kwargs: mx.array([1], dtype=mx.uint32),
+    )
+    monkeypatch.setattr(runtime, "_snapshot_target_cache_exact", lambda _cache: [])
+    monkeypatch.setattr(runtime, "_arm_target_rollback_with_prefix", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        runtime,
+        "_verify_target_block",
+        lambda **_kwargs: (mx.zeros((1, 1, 3)), {}),
+    )
+    monkeypatch.setattr(runtime, "_match_acceptance_length", lambda *_args: mx.array(0))
+    monkeypatch.setattr(runtime, "_commit_prefix_length", lambda *_args: (1, True))
+    monkeypatch.setattr(runtime, "_exact_commit_oracle_enabled", lambda: False)
+    monkeypatch.setattr(runtime, "_restore_target_cache_after_acceptance", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        runtime,
+        "extract_context_feature_from_dict",
+        lambda *_args, **_kwargs: mx.zeros((1, 1, 1)),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_next_pending_draft_context",
+        lambda _draft_model, *, previous, **_kwargs: previous,
+    )
+    monkeypatch.setattr(runtime, "_advance_draft_context_cache", lambda *_args, **_kwargs: True)
+    return SimpleNamespace(
+        layers=[],
+        target_layer_ids=[],
+        block_size=1,
+        mask_token_id=2,
+        args=SimpleNamespace(sliding_window=1),
+    )
+
+
+def test_stream_dflash_raw_model_timing_excludes_generator_suspension(monkeypatch):
+    from mio.dflash import runtime
+
+    draft_model = _mock_minimal_dflash_runtime(monkeypatch, runtime)
+    finalizer_calls = 0
+
+    def finalize_cache(*_args, **_kwargs):
+        nonlocal finalizer_calls
+        finalizer_calls += 1
+        runtime.time.perf_counter_ns()
+        return True
+
+    monkeypatch.setattr(runtime, "_advance_draft_context_cache", finalize_cache)
+    # The two large jumps happen while the generator is suspended at its
+    # prefill and token yields. They belong to elapsed wall time, not active
+    # model/runtime time. The final two active timestamps cover final-state
+    # cache synchronization before timing closes.
+    clock = iter(
+        [
+            0,
+            10,
+            30,
+            31,
+            40,
+            1_000,
+            1_010,
+            1_030,
+            1_040,
+            1_050,
+            1_060,
+            1_070,
+            1_100,
+            10_000,
+            10_020,
+            10_040,
+            10_050,
+        ]
+    )
+    monkeypatch.setattr(runtime.time, "perf_counter_ns", lambda: next(clock))
+
+    events = list(
+        runtime.stream_dflash_generate(
+            target_model=object(),
+            tokenizer=object(),
+            draft_model=draft_model,
+            prompt="",
+            prompt_tokens_override=[2],
+            max_new_tokens=1,
+        )
+    )
+
+    prefill, token, summary = events
+    assert prefill["prefill_ns"] == 20
+    assert prefill["decode_ns"] == 9
+    assert token["decode_ns"] == 109
+    assert summary["decode_ns"] == 149
+    assert summary["model_total_ns"] == 169
+    assert summary["model_total_ns"] == summary["prefill_ns"] + summary["decode_ns"]
+    assert summary["model_total_ns"] <= summary["elapsed_us"] * 1_000
+    assert summary["elapsed_us"] == 10.05
+    assert finalizer_calls == 1
+    assert summary["logical_prompt_tokens"] == 1
+    assert summary["physical_prefill_tokens"] == 1
+    assert summary["physical_decode_tokens"] == 1
+
+
+def test_dflash_prefill_only_exposes_raw_model_timing(monkeypatch):
+    from mio.dflash import runtime
+
+    draft_model = _mock_minimal_dflash_runtime(monkeypatch, runtime)
+    clock = iter([0, 10, 30, 31, 40, 50])
+    monkeypatch.setattr(runtime.time, "perf_counter_ns", lambda: next(clock))
+
+    result = runtime.generate_dflash_once(
+        target_model=object(),
+        tokenizer=object(),
+        draft_model=draft_model,
+        prompt="",
+        prompt_tokens_override=[2],
+        max_new_tokens=0,
+        prefill_only=True,
+    )
+
+    assert result["prefill_ns"] == 20
+    assert result["decode_ns"] == 9
+    assert result["model_total_ns"] == 29
+    assert result["logical_prompt_tokens"] == 1
+    assert result["physical_prefill_tokens"] == 1
+    assert result["physical_decode_tokens"] == 0
+
+
+def test_dflash_one_shot_timing_closes_after_final_state_sync(monkeypatch):
+    from mio.dflash import runtime
+
+    draft_model = _mock_minimal_dflash_runtime(monkeypatch, runtime)
+    clock_value = 0
+    finalizer_calls = 0
+
+    def clock():
+        nonlocal clock_value
+        clock_value += 10
+        return clock_value
+
+    def finalize_cache(*_args, **_kwargs):
+        nonlocal clock_value, finalizer_calls
+        finalizer_calls += 1
+        clock_value += 1_000
+        return True
+
+    monkeypatch.setattr(runtime.time, "perf_counter_ns", clock)
+    monkeypatch.setattr(runtime, "_advance_draft_context_cache", finalize_cache)
+    result = runtime.generate_dflash_once(
+        target_model=object(),
+        tokenizer=object(),
+        draft_model=draft_model,
+        prompt="",
+        prompt_tokens_override=[2],
+        max_new_tokens=1,
+        return_final_state=True,
+    )
+
+    assert finalizer_calls == 1
+    assert "final_state" in result
+    assert result["decode_ns"] >= 1_000
+    assert result["model_total_ns"] == result["prefill_ns"] + result["decode_ns"]
+    assert result["model_total_ns"] <= result["elapsed_us"] * 1_000
+
+
+def test_stream_dflash_warm_context_sync_is_prefill_time(monkeypatch):
+    from mio.dflash import runtime
+
+    draft_model = _mock_minimal_dflash_runtime(monkeypatch, runtime)
+    original_eval = runtime.mx.eval
+    eval_calls = 0
+    clock = iter([0, 10, 30, 50, 51, 55, 60, 1_000, 1_020, 1_030])
+    monkeypatch.setattr(runtime.time, "perf_counter_ns", lambda: next(clock))
+
+    def timed_eval(*arrays):
+        nonlocal eval_calls
+        eval_calls += 1
+        runtime.time.perf_counter_ns()
+        return original_eval(*arrays)
+
+    monkeypatch.setattr(runtime.mx, "eval", timed_eval)
+    events = list(
+        runtime.stream_dflash_generate(
+            target_model=object(),
+            tokenizer=object(),
+            draft_model=draft_model,
+            prompt="",
+            prompt_tokens_override=[2, 2],
+            max_new_tokens=0,
+            warm_state={
+                "target_cache": [],
+                "draft_cache": [],
+                "draft_context": mx.zeros((1, 1, 1)),
+                "offset": 1,
+            },
+        )
+    )
+
+    prefill, summary = events
+    assert prefill["prefill_ns"] == 40
+    assert prefill["decode_ns"] == 9
+    assert prefill["physical_prefill_tokens"] == 1
+    assert summary["model_total_ns"] == 69
+    assert summary["model_total_ns"] <= summary["elapsed_us"] * 1_000
+    assert eval_calls == 2
+
+
 def _compatible_configs() -> tuple[dict, dict]:
     target = {
         "text_config": {

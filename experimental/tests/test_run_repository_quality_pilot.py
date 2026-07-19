@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import platform
@@ -605,12 +606,21 @@ def test_batch_identity_cannot_be_replaced_even_with_identical_values(tmp_path: 
         )
 
 
-def test_preregistration_v2_exact_bytes_and_source_scope_are_sealed(tmp_path: Path) -> None:
+def test_preregistration_v3_exact_bytes_and_source_scope_are_sealed(tmp_path: Path) -> None:
     assert pilot_runner._assert_preregistration_seal() == pilot_runner.PREREGISTRATION_SHA256
     document = json.loads(
         (pilot_runner._REPOSITORY_ROOT / pilot_runner.PREREGISTRATION_RELATIVE_PATH).read_text(encoding="utf-8")
     )
-    assert tuple(document["protocol_integrity"]["source_lock_must_include"]) == pilot_runner.PILOT_SOURCE_LOCK_FILES
+    integrity = document["protocol_integrity"]
+    revision = document["revision_history"]
+    assert tuple(integrity["source_lock_must_include"]) == pilot_runner.PILOT_SOURCE_LOCK_FILES
+    assert integrity["result_envelope_schema"] == pilot_runner.RESULT_ENVELOPE_SCHEMA
+    assert integrity["abort_envelope_schema"] == pilot_runner.ABORT_ENVELOPE_SCHEMA
+    assert integrity["attempt_start_schema"] == pilot_runner.ATTEMPT_START_SCHEMA
+    assert integrity["source_lock_schema"] == pilot_runner.SOURCE_LOCK_SCHEMA
+    assert revision["predecessor_sha256"] == pilot_runner.PREDECESSOR_PREREGISTRATION_SHA256
+    assert revision["post_hoc_incident_record_sha256"] == pilot_runner.V2_INCIDENT_SHA256
+    pilot_runner._assert_predecessor_and_incident_seals()
 
     tampered = tmp_path / "tampered-preregistration.json"
     source = (pilot_runner._REPOSITORY_ROOT / pilot_runner.PREREGISTRATION_RELATIVE_PATH).read_bytes()
@@ -629,18 +639,23 @@ class _FakeNativeManager:
         self.events.append("manager_unloaded")
 
 
-def test_native_wrapper_attests_unloads_before_hidden_and_emits_source_free_envelope(
+def _install_fake_native_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
+    *,
+    retained_executor: object | None = None,
+) -> SimpleNamespace:
+    """Install a source-free native harness without loading an MLX model."""
+
     target = tmp_path / "target-model"
     draft = tmp_path / "draft-model"
     target.mkdir()
     draft.mkdir()
     events: list[str] = []
+    load_calls: list[dict[str, object]] = []
     verification_counts = {"source": 0, "models": 0, "runtime": 0}
     manager = _FakeNativeManager(events)
-    fake_executor = _FakeRetainedExecutor()
+    executor = retained_executor or _FakeRetainedExecutor()
     source_lock = CleanSourceLock(
         repo_root=pilot_runner._REPOSITORY_ROOT,
         git_revision="a" * 40,
@@ -667,7 +682,7 @@ def test_native_wrapper_attests_unloads_before_hidden_and_emits_source_free_enve
         hardware_label="darwin-arm64-fake-10cpu-1b",
     )
 
-    def capture_source(repo_root: Path, *, source_files: tuple[str, ...]):
+    def capture_source(repo_root: Path, *, source_files: tuple[str, ...]) -> CleanSourceLock:
         assert repo_root == pilot_runner._REPOSITORY_ROOT
         assert source_files == pilot_runner.PILOT_SOURCE_LOCK_FILES
         events.append("source_captured")
@@ -682,11 +697,11 @@ def test_native_wrapper_attests_unloads_before_hidden_and_emits_source_free_enve
         assert source_files == pilot_runner.PILOT_SOURCE_LOCK_FILES
         verification_counts["source"] += 1
 
-    def verify_models(observed) -> None:
+    def verify_models(observed: object) -> None:
         assert observed is model_locks
         verification_counts["models"] += 1
 
-    def verify_runtime_identity(observed) -> None:
+    def verify_runtime_identity(observed: object) -> None:
         assert observed is runtime
         verification_counts["runtime"] += 1
 
@@ -697,64 +712,83 @@ def test_native_wrapper_attests_unloads_before_hidden_and_emits_source_free_enve
         tier="small",
     )
 
-    def load_native(**_kwargs):
+    def load_native(**kwargs: object):
+        load_calls.append(dict(kwargs))
         events.append("model_loaded")
         return native_shell, manager
 
     class FakeCorpusHiddenEvaluator:
-        def __init__(self, _cases) -> None:
+        def __init__(self, _cases: object) -> None:
             assert manager.unload_count == 1
             events.append("hidden_wrapper_created")
 
-        def __call__(self, request) -> HiddenEvaluation:
+        def __call__(self, request: object) -> HiddenEvaluation:
             assert manager.unload_count == 1
-            repaired = "# repaired by fake executor" in _editable_module(request.workspace).read_text(encoding="utf-8")
+            workspace = getattr(request, "workspace")
+            repaired = "# repaired by fake executor" in _editable_module(workspace).read_text(encoding="utf-8")
             return HiddenEvaluation(passed=repaired, regression_free=True)
 
     monkeypatch.setattr(pilot_runner, "_assert_frozen_environment", lambda: None)
     monkeypatch.setattr(pilot_runner, "_assert_gate_profile_seal", lambda: None)
-    monkeypatch.setattr(pilot_runner, "capture_clean_source_lock", capture_source)
-    monkeypatch.setattr(pilot_runner, "collect_runtime_identity", lambda: runtime)
     monkeypatch.setattr(
         pilot_runner,
-        "bind_frozen_local_models",
-        lambda _target, _draft: model_locks,
+        "_assert_preregistration_seal",
+        lambda _path=None: pilot_runner.PREREGISTRATION_SHA256,
     )
+    monkeypatch.setattr(pilot_runner, "capture_clean_source_lock", capture_source)
+    monkeypatch.setattr(pilot_runner, "collect_runtime_identity", lambda: runtime)
+    monkeypatch.setattr(pilot_runner, "bind_frozen_local_models", lambda _target, _draft: model_locks)
     monkeypatch.setattr(pilot_runner, "verify_clean_source_lock", verify_source)
     monkeypatch.setattr(pilot_runner, "verify_frozen_local_models", verify_models)
     monkeypatch.setattr(pilot_runner, "verify_runtime_identity", verify_runtime_identity)
     monkeypatch.setattr(pilot_runner, "_load_native_executor", load_native)
-    monkeypatch.setattr(
-        pilot_runner,
-        "RetainedNativeAgentExecutor",
-        lambda **_kwargs: fake_executor,
-    )
-    monkeypatch.setattr(
-        pilot_runner,
-        "CorpusHiddenEvaluator",
-        FakeCorpusHiddenEvaluator,
+    monkeypatch.setattr(pilot_runner, "RetainedNativeAgentExecutor", lambda **_kwargs: executor)
+    monkeypatch.setattr(pilot_runner, "CorpusHiddenEvaluator", FakeCorpusHiddenEvaluator)
+    return SimpleNamespace(
+        target=target,
+        draft=draft,
+        events=events,
+        load_calls=load_calls,
+        verification_counts=verification_counts,
+        manager=manager,
+        executor=executor,
+        source_lock=source_lock,
+        model_locks=model_locks,
+        runtime=runtime,
     )
 
+
+def test_native_wrapper_attests_unloads_before_hidden_and_emits_source_free_envelope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _install_fake_native_runtime(tmp_path, monkeypatch)
     work_root = tmp_path / "native-private-run"
+    attempt_root = tmp_path / "native-attempt"
     envelope = pilot_runner.run_native_repository_quality_pilot(
         split="smoke",
         tier="small",
         config_path=None,
-        target_path=target,
-        draft_path=draft,
+        target_path=harness.target,
+        draft_path=harness.draft,
         work_root=work_root,
+        attempt_root=attempt_root,
     )
 
-    assert manager.unload_count == 1
-    assert events.index("manager_unloaded") < events.index("hidden_wrapper_created")
+    assert harness.manager.unload_count == 1
+    assert harness.events.index("manager_unloaded") < harness.events.index("hidden_wrapper_created")
     assert envelope.publication_receipt.successful_verifications == 4
     assert envelope.publication_receipt.manager_unloaded_before_hidden is True
-    assert verification_counts == {"source": 5, "models": 5, "runtime": 5}
+    assert harness.verification_counts == {"source": 7, "models": 7, "runtime": 7}
     assert not work_root.exists()
+    start_bytes = (attempt_root / pilot_runner._ATTEMPT_START_FILENAME).read_bytes()
+    result_bytes = (attempt_root / pilot_runner._ATTEMPT_RESULT_FILENAME).read_bytes()
+    assert not (attempt_root / pilot_runner._ATTEMPT_ABORT_FILENAME).exists()
 
     serialized = pilot_runner.serialize_repository_quality_pilot_result(envelope)
     payload = json.loads(serialized)
     assert payload["schema_version"] == pilot_runner.RESULT_ENVELOPE_SCHEMA
+    assert payload["attempt"]["start_sha256"] == hashlib.sha256(start_bytes).hexdigest()
     assert payload["protocol"]["preregistration_sha256"] == pilot_runner.PREREGISTRATION_SHA256
     assert payload["protocol"]["private_evaluator_bundle_sha256"]
     assert payload["implementation"]["source_file_count"] == len(pilot_runner.PILOT_SOURCE_LOCK_FILES)
@@ -763,12 +797,14 @@ def test_native_wrapper_attests_unloads_before_hidden_and_emits_source_free_enve
     assert payload["hidden_labels_serialized"] is False
     assert str(tmp_path) not in serialized
     assert '"fixture_id"' not in serialized
-    assert verification_counts == {"source": 6, "models": 6, "runtime": 6}
+    assert result_bytes.decode("utf-8") == serialized
+    assert harness.verification_counts == {"source": 8, "models": 8, "runtime": 8}
 
     copied_execution = replace(envelope.execution)
     with pytest.raises(ValueError, match="another execution"):
         pilot_runner.RepositoryQualityPilotResultEnvelope(
             provenance=envelope.provenance,
+            attempt_start=envelope.attempt_start,
             execution=copied_execution,
             publication_receipt=envelope.publication_receipt,
             post_run_verified=True,
@@ -776,10 +812,223 @@ def test_native_wrapper_attests_unloads_before_hidden_and_emits_source_free_enve
     with pytest.raises(TypeError, match="native publication receipt"):
         pilot_runner.RepositoryQualityPilotResultEnvelope(
             provenance=envelope.provenance,
+            attempt_start=envelope.attempt_start,
             execution=envelope.execution,
             publication_receipt=object(),  # type: ignore[arg-type]
             post_run_verified=True,
         )
+
+
+class _DerivedTimingExecutor(_FakeRetainedExecutor):
+    def run_direct(self, **kwargs: object) -> RetainedAgentStage:
+        stage = super().run_direct(**kwargs)  # type: ignore[arg-type]
+        derived_round = replace(stage.result.rounds[0], timing_source="derived_legacy_us")
+        return replace(stage, result=replace(stage.result, rounds=(derived_round,)))
+
+
+class _LeakyFailureExecutor(_FakeRetainedExecutor):
+    def __init__(self, secret: str) -> None:
+        super().__init__()
+        self.secret = secret
+
+    def run_direct(self, **_kwargs: object) -> RetainedAgentStage:
+        raise RuntimeError(self.secret)
+
+
+def _run_fake_native(harness: SimpleNamespace, *, work_root: Path, attempt_root: Path):
+    return pilot_runner.run_native_repository_quality_pilot(
+        split="smoke",
+        tier="small",
+        config_path=None,
+        target_path=harness.target,
+        draft_path=harness.draft,
+        work_root=work_root,
+        attempt_root=attempt_root,
+    )
+
+
+def test_derived_legacy_telemetry_emits_abort_no_result_and_cleans_up(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _install_fake_native_runtime(
+        tmp_path,
+        monkeypatch,
+        retained_executor=_DerivedTimingExecutor(),
+    )
+    work_root = tmp_path / "private-run"
+    attempt_root = tmp_path / "attempt"
+
+    with pytest.raises(pilot_runner.NativePilotAborted) as raised:
+        _run_fake_native(harness, work_root=work_root, attempt_root=attempt_root)
+
+    assert str(raised.value) == "native pilot aborted: dflash_raw_phase_telemetry_missing"
+    start_bytes = (attempt_root / pilot_runner._ATTEMPT_START_FILENAME).read_bytes()
+    abort_text = (attempt_root / pilot_runner._ATTEMPT_ABORT_FILENAME).read_text(encoding="utf-8")
+    payload = json.loads(abort_text)
+    assert not (attempt_root / pilot_runner._ATTEMPT_RESULT_FILENAME).exists()
+    assert payload["schema_version"] == pilot_runner.ABORT_ENVELOPE_SCHEMA
+    assert payload["status"] == "aborted_no_result"
+    assert payload["attempt"]["start_sha256"] == hashlib.sha256(start_bytes).hexdigest()
+    assert payload["abort"]["failure_boundary"] == "root_generation_telemetry_validation"
+    assert payload["abort"]["reason_code"] == "dflash_raw_phase_telemetry_missing"
+    assert payload["abort"]["generation_receipt_issued"] is False
+    assert payload["abort"]["completed_root_generation_count"] == 0
+    assert payload["abort"]["completed_unique_extra_generation_count"] == 0
+    assert payload["abort"]["hidden_evaluator_constructed"] is False
+    assert payload["abort"]["hidden_evaluation_started"] is False
+    assert payload["abort"]["manager_state"] == "unloaded"
+    assert payload["abort"]["work_root_cleanup"] == "complete"
+    assert payload["abort"]["post_abort_frozen_input_verification"] == "passed"
+    assert payload["abort"]["aggregate_produced"] is False
+    assert payload["publication"] == {
+        "breakthrough_claim_allowed": False,
+        "partial_generation_reuse_allowed": False,
+        "quality_claim_allowed": False,
+        "result_envelope_created": False,
+        "speed_claim_allowed": False,
+    }
+    assert payload["hidden_labels_serialized"] is False
+    assert not work_root.exists()
+    assert harness.manager.unload_count == 1
+
+
+def test_pre_attempt_integrity_failure_creates_no_start_and_loads_no_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _install_fake_native_runtime(tmp_path, monkeypatch)
+    attempt_root = tmp_path / "attempt"
+
+    def fail_source_verification(*_args: object, **_kwargs: object) -> None:
+        raise RepositoryPilotProtocolError("pre-attempt source drift")
+
+    monkeypatch.setattr(pilot_runner, "verify_clean_source_lock", fail_source_verification)
+    with pytest.raises(RepositoryPilotProtocolError, match="pre-attempt source drift"):
+        _run_fake_native(
+            harness,
+            work_root=tmp_path / "private-run",
+            attempt_root=attempt_root,
+        )
+
+    assert not attempt_root.exists()
+    assert harness.load_calls == []
+    assert harness.manager.unload_count == 0
+
+
+def test_abort_serialization_digests_exception_without_path_or_prompt_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret_prompt = f"PROMPT_SECRET::{tmp_path / 'private' / 'candidate.py'}"
+    harness = _install_fake_native_runtime(
+        tmp_path,
+        monkeypatch,
+        retained_executor=_LeakyFailureExecutor(secret_prompt),
+    )
+    attempt_root = tmp_path / "attempt"
+
+    with pytest.raises(pilot_runner.NativePilotAborted) as raised:
+        _run_fake_native(
+            harness,
+            work_root=tmp_path / "private-run",
+            attempt_root=attempt_root,
+        )
+
+    serialized = (attempt_root / pilot_runner._ATTEMPT_ABORT_FILENAME).read_text(encoding="utf-8")
+    payload = json.loads(serialized)
+    assert secret_prompt not in serialized
+    assert str(tmp_path) not in serialized
+    assert secret_prompt not in str(raised.value)
+    assert payload["abort"]["failure_message_sha256"] == hashlib.sha256(secret_prompt.encode("utf-8")).hexdigest()
+    assert payload["abort"]["reason_code"] == "infrastructure_failure"
+
+
+def test_success_terminalization_failure_emits_abort_instead_of_stranding_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _install_fake_native_runtime(tmp_path, monkeypatch)
+    attempt_root = tmp_path / "attempt"
+
+    def fail_result_serialization(_envelope: object, *, indent: int | None = 2) -> str:
+        del indent
+        raise RuntimeError(f"terminal-secret::{tmp_path}")
+
+    monkeypatch.setattr(
+        pilot_runner,
+        "serialize_repository_quality_pilot_result",
+        fail_result_serialization,
+    )
+    with pytest.raises(pilot_runner.NativePilotAborted):
+        _run_fake_native(
+            harness,
+            work_root=tmp_path / "private-run",
+            attempt_root=attempt_root,
+        )
+
+    assert (attempt_root / pilot_runner._ATTEMPT_START_FILENAME).is_file()
+    assert (attempt_root / pilot_runner._ATTEMPT_ABORT_FILENAME).is_file()
+    assert not (attempt_root / pilot_runner._ATTEMPT_RESULT_FILENAME).exists()
+    serialized = (attempt_root / pilot_runner._ATTEMPT_ABORT_FILENAME).read_text(encoding="utf-8")
+    payload = json.loads(serialized)
+    assert str(tmp_path) not in serialized
+    assert payload["abort"]["failure_boundary"] == "result_terminalization"
+    assert payload["abort"]["reason_code"] == "infrastructure_failure"
+    assert payload["abort"]["manager_state"] == "unloaded"
+    assert payload["abort"]["work_root_cleanup"] == "complete"
+
+
+def test_start_publication_failure_after_link_emits_abort_before_model_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _install_fake_native_runtime(tmp_path, monkeypatch)
+    attempt_root = tmp_path / "attempt"
+    atomic_create = pilot_runner._atomic_create_result
+
+    def fail_after_start_link(path: Path, content: str) -> None:
+        atomic_create(path, content)
+        if path.name == pilot_runner._ATTEMPT_START_FILENAME:
+            raise OSError("simulated post-link directory-fsync failure")
+
+    monkeypatch.setattr(pilot_runner, "_atomic_create_result", fail_after_start_link)
+    with pytest.raises(pilot_runner.NativePilotAborted):
+        _run_fake_native(
+            harness,
+            work_root=tmp_path / "private-run",
+            attempt_root=attempt_root,
+        )
+
+    start_bytes = (attempt_root / pilot_runner._ATTEMPT_START_FILENAME).read_bytes()
+    abort_text = (attempt_root / pilot_runner._ATTEMPT_ABORT_FILENAME).read_text(encoding="utf-8")
+    payload = json.loads(abort_text)
+    assert not (attempt_root / pilot_runner._ATTEMPT_RESULT_FILENAME).exists()
+    assert payload["attempt"]["start_sha256"] == hashlib.sha256(start_bytes).hexdigest()
+    assert payload["abort"]["failure_boundary"] == "attempt_start_publication"
+    assert payload["abort"]["reason_code"] == "infrastructure_failure"
+    assert payload["abort"]["manager_state"] == "never_loaded"
+    assert payload["abort"]["hidden_evaluator_constructed"] is False
+    assert payload["abort"]["hidden_evaluation_started"] is False
+    assert harness.load_calls == []
+    assert harness.manager.unload_count == 0
+
+
+def test_second_use_of_same_attempt_root_fails_before_model_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _install_fake_native_runtime(tmp_path, monkeypatch)
+    attempt_root = tmp_path / "attempt"
+    work_root = tmp_path / "private-run"
+    _run_fake_native(harness, work_root=work_root, attempt_root=attempt_root)
+    original_files = {path.name: path.read_bytes() for path in attempt_root.iterdir()}
+
+    with pytest.raises(RepositoryPilotProtocolError, match="create-once"):
+        _run_fake_native(harness, work_root=work_root, attempt_root=attempt_root)
+
+    assert len(harness.load_calls) == 1
+    assert {path.name: path.read_bytes() for path in attempt_root.iterdir()} == original_files
 
 
 def test_native_work_locations_fail_fast_on_source_or_model_overlap(tmp_path: Path) -> None:
@@ -879,9 +1128,12 @@ def test_native_cli_exposes_no_quality_or_protocol_knobs() -> None:
             "/tmp/target",
             "--draft-path",
             "/tmp/draft",
+            "--attempt-root",
+            "/tmp/attempt",
         ]
     )
     assert args.split == "smoke"
+    assert args.attempt_root == Path("/tmp/attempt")
 
     with pytest.raises(SystemExit):
         pilot_runner._parse_args(
@@ -890,6 +1142,8 @@ def test_native_cli_exposes_no_quality_or_protocol_knobs() -> None:
                 "/tmp/target",
                 "--draft-path",
                 "/tmp/draft",
+                "--attempt-root",
+                "/tmp/attempt",
                 "--effort",
                 "high",
             ]
@@ -903,5 +1157,7 @@ def test_native_cli_exposes_no_quality_or_protocol_knobs() -> None:
                 "/tmp/target",
                 "--draft-path",
                 "/tmp/draft",
+                "--attempt-root",
+                "/tmp/attempt",
             ]
         )

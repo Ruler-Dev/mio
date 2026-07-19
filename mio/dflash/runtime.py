@@ -2155,11 +2155,6 @@ def generate_dflash_once(
         cache=target_cache,
         only_last_logit=True,
     )
-    prefill_ns = time.perf_counter_ns() - prefill_start_ns
-
-    suppress_token_mask = build_suppress_token_mask(int(prefill_logits.shape[-1]), suppress_token_ids)
-    # prefill_logits shape is (B, 1, V) when only_last_logit=True.
-    staged_first = greedy_tokens_with_mask(prefill_logits[:, -1, :], suppress_token_mask).reshape(-1)
     # Prefill-only snapshots may carry projected draft context while their
     # draft KV cache is still empty. Preserve compatibility with old snapshots
     # that stored raw concatenated target features.
@@ -2173,13 +2168,27 @@ def generate_dflash_once(
         if cached_context is not None and int(cached_context.shape[1]) > 0:
             draft_context = mx.concatenate([cached_context, draft_context], axis=1)
             mx.eval(draft_context)
+    prefill_ns = time.perf_counter_ns() - prefill_start_ns
+    decode_start_ns = time.perf_counter_ns()
+
+    suppress_token_mask = build_suppress_token_mask(int(prefill_logits.shape[-1]), suppress_token_ids)
+    # prefill_logits shape is (B, 1, V) when only_last_logit=True.
+    staged_first = greedy_tokens_with_mask(prefill_logits[:, -1, :], suppress_token_mask).reshape(-1)
+    mx.eval(staged_first)
 
     # Prefill-only shortcut: used by PrefixCache to warm caches for a specific prefix.
     if prefill_only:
+        decode_ns = time.perf_counter_ns() - decode_start_ns
         elapsed_us = (time.perf_counter_ns() - start_ns) / 1_000.0
         result = {
             "elapsed_us": elapsed_us,
+            "prefill_ns": prefill_ns,
+            "decode_ns": decode_ns,
+            "model_total_ns": prefill_ns + decode_ns,
             "prompt_token_count": prompt_len,
+            "logical_prompt_tokens": prompt_len,
+            "physical_prefill_tokens": prompt_len - warm_offset,
+            "physical_decode_tokens": 0,
             "generated_token_ids": [],
             "generation_tokens": 0,
             "accepted_from_draft": 0,
@@ -2386,13 +2395,29 @@ def generate_dflash_once(
 
         staged_first = next_token
 
-    elapsed_us = (time.perf_counter_ns() - start_ns) / 1_000.0
     generated_token_ids = generated_token_buffer[:generated_token_count].tolist() if generated_token_count > 0 else []
+    final_state = None
+    if return_final_state:
+        final_state = {
+            "target_cache": target_cache,
+            "draft_cache": draft_cache,
+            "offset": start,
+        }
+        if not _advance_draft_context_cache(draft_model, draft_context, draft_cache):
+            final_state["draft_context"] = draft_context
+    decode_ns = time.perf_counter_ns() - decode_start_ns
+    elapsed_us = (time.perf_counter_ns() - start_ns) / 1_000.0
     first_20 = acceptance_history[:20]
     last_20 = acceptance_history[-20:]
     result = {
         "elapsed_us": elapsed_us,
+        "prefill_ns": prefill_ns,
+        "decode_ns": decode_ns,
+        "model_total_ns": prefill_ns + decode_ns,
         "prompt_token_count": prompt_len,
+        "logical_prompt_tokens": prompt_len,
+        "physical_prefill_tokens": prompt_len - warm_offset,
+        "physical_decode_tokens": len(generated_token_ids),
         "generated_token_ids": generated_token_ids,
         "generation_tokens": len(generated_token_ids),
         "accepted_from_draft": accepted_from_draft,
@@ -2421,14 +2446,7 @@ def generate_dflash_once(
         "peak_memory_gb": float(mx.get_peak_memory()) / 1e9 if hasattr(mx, "get_peak_memory") else None,
         "warm_offset": warm_offset,
     }
-    if return_final_state:
-        final_state = {
-            "target_cache": target_cache,
-            "draft_cache": draft_cache,
-            "offset": start,
-        }
-        if not _advance_draft_context_cache(draft_model, draft_context, draft_cache):
-            final_state["draft_context"] = draft_context
+    if final_state is not None:
         result["final_state"] = final_state
     return result
 
@@ -2532,7 +2550,19 @@ def stream_dflash_generate(
         cache=target_cache,
         only_last_logit=True,
     )
+    if warm_state is not None:
+        cached_context = warm_state.get("draft_context")
+        if cached_context is None and warm_state.get("target_hidden") is not None:
+            cached_context = _project_draft_context(
+                draft_model,
+                warm_state["target_hidden"],
+            )
+        if cached_context is not None and int(cached_context.shape[1]) > 0:
+            draft_context = mx.concatenate([cached_context, draft_context], axis=1)
+            mx.eval(draft_context)
     prefill_ns = time.perf_counter_ns() - prefill_start_ns
+    decode_ns = 0
+    active_decode_start_ns = time.perf_counter_ns()
 
     vocab_dim = int(prefill_logits.shape[-1])
     # Build both masks upfront. "relaxed" mask drops `relax_suppress_token_ids`
@@ -2546,23 +2576,22 @@ def stream_dflash_generate(
         relaxed_mask = initial_mask
     suppress_token_mask = initial_mask
     staged_first = greedy_tokens_with_mask(prefill_logits[:, -1, :], suppress_token_mask).reshape(-1)
-    if warm_state is not None:
-        cached_context = warm_state.get("draft_context")
-        if cached_context is None and warm_state.get("target_hidden") is not None:
-            cached_context = _project_draft_context(
-                draft_model,
-                warm_state["target_hidden"],
-            )
-        if cached_context is not None and int(cached_context.shape[1]) > 0:
-            draft_context = mx.concatenate([cached_context, draft_context], axis=1)
-            mx.eval(draft_context)
+    mx.eval(staged_first)
 
+    decode_ns += time.perf_counter_ns() - active_decode_start_ns
     yield {
         "event": "prefill",
         "prefill_us": prefill_ns / 1_000.0,
+        "prefill_ns": prefill_ns,
+        "decode_ns": decode_ns,
+        "model_total_ns": prefill_ns + decode_ns,
         "prompt_token_count": prompt_len,
+        "logical_prompt_tokens": prompt_len,
+        "physical_prefill_tokens": prompt_len - warm_offset,
+        "physical_decode_tokens": 0,
         "warm_offset": warm_offset,
     }
+    active_decode_start_ns = time.perf_counter_ns()
 
     effective_block_tokens = max(1, min(int(block_tokens or 1), int(draft_model.block_size)))
     block_token_buffer = mx.full((effective_block_tokens,), draft_model.mask_token_id, dtype=mx.uint32)
@@ -2723,13 +2752,22 @@ def stream_dflash_generate(
             if len(generated_token_ids) >= max_new_tokens:
                 break
             generated_token_ids.append(token_id)
+            decode_ns += time.perf_counter_ns() - active_decode_start_ns
             yield {
                 "event": "token",
                 "token_id": token_id,
                 "generated_tokens": len(generated_token_ids),
+                "physical_decode_tokens": len(generated_token_ids),
+                "prefill_ns": prefill_ns,
+                "decode_ns": decode_ns,
+                "model_total_ns": prefill_ns + decode_ns,
+                "logical_prompt_tokens": prompt_len,
+                "physical_prefill_tokens": prompt_len - warm_offset,
+                "warm_offset": warm_offset,
                 "acceptance_ratio": (accepted_from_draft / len(generated_token_ids) if generated_token_ids else 0.0),
                 "cycles_completed": cycles_completed,
             }
+            active_decode_start_ns = time.perf_counter_ns()
 
         # Swap to the relaxed suppress mask once we've generated enough tokens.
         # Also promote the relaxed token ids back to stop tokens so natural
@@ -2752,7 +2790,6 @@ def stream_dflash_generate(
 
         staged_first = next_token
 
-    elapsed_us = (time.perf_counter_ns() - start_ns) / 1_000.0
     final_state = {
         "target_cache": target_cache,
         "draft_cache": draft_cache,
@@ -2760,10 +2797,18 @@ def stream_dflash_generate(
     }
     if not _advance_draft_context_cache(draft_model, draft_context, draft_cache):
         final_state["draft_context"] = draft_context
+    decode_ns += time.perf_counter_ns() - active_decode_start_ns
+    elapsed_us = (time.perf_counter_ns() - start_ns) / 1_000.0
     yield {
         "event": "summary",
         "elapsed_us": elapsed_us,
+        "prefill_ns": prefill_ns,
+        "decode_ns": decode_ns,
+        "model_total_ns": prefill_ns + decode_ns,
         "prompt_token_count": prompt_len,
+        "logical_prompt_tokens": prompt_len,
+        "physical_prefill_tokens": prompt_len - warm_offset,
+        "physical_decode_tokens": len(generated_token_ids),
         "generated_token_ids": generated_token_ids,
         "generation_tokens": len(generated_token_ids),
         "accepted_from_draft": accepted_from_draft,
