@@ -24,7 +24,7 @@ The development result fails the frozen go/no-go gates. No coding-quality or
 speed improvement is supported, and the planned follow-up 27B smoke is stopped.
 
 The next repository-level allocation experiment is separately frozen in
-[`repository-quality-four-arm-preregistration-v3.json`](repository-quality-four-arm-preregistration-v3.json).
+[`repository-quality-four-arm-preregistration-v4.json`](repository-quality-four-arm-preregistration-v4.json).
 It compares a shared Quality root, an allocation-matched static recovery, and
 an exploratory depth-one public-state router. The smoke and already observed
 development tasks remain calibration-only; this preregistration is not a
@@ -35,9 +35,23 @@ improvements cannot satisfy its engineering advancement gate.
 The first v2 smoke attempt aborted before routing, hidden evaluation, or result
 publication because DFlash streaming lacked the preregistered raw phase-time
 provenance. Its [post-hoc incident record](incidents/repository-quality-four-arm-v2-smoke-aborted-8bf6e6e.json)
-is not a result. V3 retains the strict timing check, adds yield-exclusive raw
-DFlash timing and native attempt/abort receipts, and expands the critical
-source manifest.
+is not a result. V3 retained that check, added yield-exclusive raw DFlash
+timing, and completed eight direct roots before aborting at the sealed
+allocation boundary: terminal agent bookkeeping had crossed a wall budget
+without recording exhaustion. The exact v3
+[start](incidents/repository-quality-four-arm-v3-smoke-attempt-start-16213e2.json),
+[abort](incidents/repository-quality-four-arm-v3-smoke-abort-16213e2.json), and
+[incident](incidents/repository-quality-four-arm-v3-smoke-incident-16213e2.json)
+artifacts contain no hidden outcome or aggregate. V4 freezes a same-sample
+terminal wall-time/exhaustion fix without increasing budgets or weakening the
+validator; it is still a preregistration, not a result.
+
+The terminal-accounting change touches the transitive HumanEval verifier
+source bundle, so its parity certificate was regenerated rather than silently
+reused. The clean source-bound
+[`164/164` certificate](results/humaneval-verifier-parity-ca3cbcb.json) has
+SHA-256 `43c36131409f8edb132ab2fada88d17bcf9e203c3d6dfacadca1d70f0e8e4c6b`;
+it certifies verifier parity only, not model accuracy or adaptive-policy gain.
 
 ## Qwen 3.6 matrix harness
 

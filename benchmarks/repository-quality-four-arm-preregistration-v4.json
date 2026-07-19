@@ -1,0 +1,565 @@
+{
+  "schema": "mio.repository-quality-four-arm-preregistration.v4",
+  "status": "preregistered_exploratory_no_results",
+  "preregistered_at_utc": "2026-07-19T15:36:18Z",
+  "protocol_revision": "mio-repository-quality-four-arm-pilot-v4",
+  "documentation": "docs/22-markov-quality-pilot.md",
+  "claim_boundary": {
+    "status": "exploratory_no_claim",
+    "coding_quality_claim_allowed": false,
+    "speed_claim_allowed": false,
+    "breakthrough_claim_allowed": false,
+    "reason": "V4 repairs terminal wall-budget accounting only. Smoke and all previously observed development tasks remain calibration-only; no untouched repository-level heldout split exists for this intervention."
+  },
+  "protocol_integrity": {
+    "corpus_implementation": "scripts/run_coding_quality_benchmark.py",
+    "four_arm_orchestrator": "experimental/effort/run_repository_quality_pilot.py",
+    "result_envelope_schema": "mio.repository-quality-four-arm-result-envelope.v4",
+    "preregistration_content_sha256_bound_by_runner_and_result": true,
+    "attempt_start_schema": "mio.repository-quality-four-arm-attempt-start.v4",
+    "public_fixture_suite_sha256": {
+      "smoke": "d0fef6c7ccfcccbf6dcbc70f973d931f5dba023f45f4335482d72f626c824afc",
+      "development": "3b9cd3611486e5b3d20a5786249fdc9446af3aecf3a648d507f46a5f5c3208e5",
+      "all": "32f4a59ab1831b5130fccbcdc3a9affcfe5e03204f7de0423aec106d4251857c"
+    },
+    "host_private_evaluator_bundle_sha256": {
+      "smoke": "d5a65bdea7edd992976aee5f1a39794b21dc94072cf73a45f9f2f359ac8c6140",
+      "development": "7580199fc4535a79d44e9cfda6a51b01cc38db5295ebfc6a0fdb55c64168edef",
+      "all": "dc12b7f06312e4128d3276504099ed4b98aa1a5e87fce8e240490f392c53f0e4"
+    },
+    "host_private_evaluator_bundle_semantics": "The existing sealed_protocol_sha256 verifier binds the public fixture bytes, hidden and public oracle programs, editable scope, evaluator implementation and timeout. Its legacy schedule and analysis fields are integrity-only here; this preregistration exclusively controls the four-arm schedule and analysis.",
+    "quality_profile_sha256": "aa5b24c3d98e5f7d294d4329e76a3259c9d6134b4addd9d2ac6b326a9c8a5585",
+    "source_lock_must_include": [
+      "pyproject.toml",
+      "uv.lock",
+      "mio/__init__.py",
+      "mio/agent.py",
+      "mio/agent_policy.py",
+      "mio/coding_quality.py",
+      "mio/config.py",
+      "mio/drafter_selection.py",
+      "mio/engine.py",
+      "mio/model_manager.py",
+      "mio/prompt_policy.py",
+      "mio/tool_calls.py",
+      "mio/dflash/__init__.py",
+      "mio/dflash/kernels.py",
+      "mio/dflash/model.py",
+      "mio/dflash/recurrent_rollback_cache.py",
+      "mio/dflash/runtime.py",
+      "mio/dflash/verify_linear.py",
+      "scripts/bench_coding_quality.py",
+      "scripts/run_coding_quality_benchmark.py",
+      "experimental/effort/model_identity.py",
+      "experimental/effort/repository_quality_pilot.py",
+      "experimental/effort/bench_repository_quality_pilot.py",
+      "experimental/effort/run_repository_quality_pilot.py",
+      "benchmarks/repository-quality-four-arm-preregistration-v2.json",
+      "benchmarks/incidents/repository-quality-four-arm-v2-smoke-aborted-8bf6e6e.json",
+      "benchmarks/repository-quality-four-arm-preregistration-v3.json",
+      "docs/22-markov-quality-pilot.md",
+      "benchmarks/incidents/repository-quality-four-arm-v3-smoke-attempt-start-16213e2.json",
+      "benchmarks/incidents/repository-quality-four-arm-v3-smoke-abort-16213e2.json",
+      "benchmarks/incidents/repository-quality-four-arm-v3-smoke-incident-16213e2.json",
+      "benchmarks/repository-quality-four-arm-preregistration-v4.json",
+      "tests/test_agent_loop.py",
+      "experimental/tests/test_bench_repository_quality_pilot.py"
+    ],
+    "clean_committed_source_and_all_seals_verified_before_and_after": true,
+    "abort_envelope_schema": "mio.repository-quality-four-arm-abort-envelope.v4",
+    "predecessor_preregistration_sha256_bound_by_runner_and_envelopes": true,
+    "source_lock_schema": "mio.repository-quality-source-lock.v1",
+    "source_lock_sha256_algorithm": "Sort relative POSIX names lexicographically; for each regular non-symlink file hash uint64_be(name_utf8_length) || name_utf8 || uint64_be(content_byte_length) || content_bytes with SHA-256. Reject absolute or parent-traversing names and files whose device, inode, size, or mtime_ns changes while read.",
+    "source_lock_scope": "Frozen critical implementation and regression-test manifest for the authorized native DFlash four-arm path; external packages, hardware, environment overrides, evaluator/profile suites, and model snapshots are bound by separate frozen identity checks.",
+    "v3_attempt_start_sha256_bound_by_runner_and_envelopes": true,
+    "v3_abort_sha256_bound_by_runner_and_envelopes": true,
+    "v3_incident_record_sha256_bound_by_runner_and_envelopes": true
+  },
+  "hypotheses": {
+    "quality_vs_plain": "The deterministic Quality root may change terminal hidden-task success relative to Plain.",
+    "static_vs_quality": "A bounded public-evidence recovery can rescue some Quality roots, but may also regress them.",
+    "markov_vs_quality": "Routing the same recovery from a sealed public state may improve correct tasks per unit cost.",
+    "markov_vs_static": "State-dependent allocation may match or exceed an allocation-matched static control while consuming the same number and maximum budget of extra turns."
+  },
+  "logical_arms": [
+    {
+      "id": "plain",
+      "root": "gate_off_medium",
+      "extra": "none"
+    },
+    {
+      "id": "quality",
+      "root": "gate_on_medium",
+      "extra": "none"
+    },
+    {
+      "id": "quality_static_extra",
+      "root": "shared_gate_on_medium",
+      "extra": "high_recovery_on_k_seeded_static_tasks"
+    },
+    {
+      "id": "markov_quality",
+      "root": "shared_gate_on_medium",
+      "extra": "high_recovery_on_k_public_state_routes"
+    }
+  ],
+  "shared_root_contract": {
+    "quality_root_generated_once_per_task": true,
+    "quality_root_bytes_reused_by": [
+      "quality",
+      "quality_static_extra",
+      "markov_quality"
+    ],
+    "independent_regeneration_for_logical_arms_forbidden": true,
+    "plain_quality_root_order": "Sort tasks by SHA256(root_order_domain || seed_ascii || NUL || fixture_id_utf8), then use Plain/Quality for even indices and Quality/Plain for odd indices.",
+    "cold_engine_state_before_each_physical_generation": true
+  },
+  "determinism": {
+    "seed": 20260719,
+    "seed_encoding": "base-10 ASCII with no sign, padding, or newline",
+    "fixture_id_encoding": "UTF-8",
+    "separator": "single NUL byte",
+    "root_order_domain": "mio.repository-quality.root-order.v1 followed by NUL",
+    "static_order_domain": "mio.repository-quality.static-order.v1 followed by NUL",
+    "extra_order_domain": "mio.repository-quality.extra-order.v1 followed by NUL",
+    "digest_order": "ascending raw 32-byte SHA-256 digest, then fixture_id Unicode code-point order as an impossible-collision deterministic tie break",
+    "schedule_serialized_before_generation": true
+  },
+  "public_state": {
+    "states": [
+      "root_incomplete",
+      "scope_invalid",
+      "public_fail",
+      "public_unknown"
+    ],
+    "public_unknown_semantics": "No trusted visible failure was observed: a trusted check either passed or was not run. Semantic correctness remains unknown.",
+    "allowed_features": [
+      "quality_decision",
+      "quality_phase",
+      "terminal_reason",
+      "budget_exhaustion_present",
+      "deadline_violation_present",
+      "initial_snapshot_complete",
+      "current_snapshot_complete",
+      "net_content_change_present",
+      "mutation_epoch",
+      "trusted_test_or_build_attempt_count",
+      "trusted_test_count",
+      "trusted_build_count",
+      "trusted_static_count",
+      "trusted_diff_count",
+      "tool_telemetry_complete",
+      "visible_test_pass",
+      "scope_valid",
+      "round_count",
+      "tool_call_count",
+      "output_token_count",
+      "model_seconds",
+      "wall_seconds"
+    ],
+    "feature_domains": {
+      "quality_decision": "one of pass, incomplete, not_applicable; a routed Quality root or child must report pass to avoid root_incomplete",
+      "terminal_reason": "exact string; only model_final is complete",
+      "visible_test_pass": "three-valued true, false, or null",
+      "all_present_flags": "strict JSON booleans; absent, malformed, or contradictory telemetry aborts the cohort rather than being imputed"
+    },
+    "visible_test_aggregation": "Use trusted validate-tool TEST or BUILD evidence bound to the terminal current revision and mutation epoch. false means at least one such attempt was denied, errored, timed out, or returned a non-ok outcome; true means at least one attempt exists and every such attempt is allowed and ok; null means no such attempt exists. Ordinary shell output is not evidence.",
+    "scope_valid_semantics": "A host-only public contract bound to fixture_id, the sealed pristine public manifest, editable_names, and the exact terminal tree digest must pass. The terminal regular-file/directory name set and modes must equal the pristine manifest; every non-editable file must retain exact bytes; at least one editable file must have different bytes; additions, deletions, renames, symlinks, special files, hard links, aliases, or a stale/wrong-fixture verdict are invalid. The hidden evaluator is not consulted.",
+    "classifier_scope": "Applied only to the shared Quality root and its recovery child; Plain is never routed or child-ranked.",
+    "classifier_precedence": [
+      "root_incomplete if either snapshot is incomplete, tool telemetry is incomplete, a budget or deadline violation is present, quality_decision is not pass, or terminal_reason is not model_final",
+      "scope_invalid if the preceding rule is false and scope_valid is false",
+      "public_fail if the preceding rules are false and visible_test_pass is false",
+      "public_unknown otherwise, including visible_test_pass true or null; unknown means hidden semantic correctness is not observed"
+    ],
+    "forbidden_features": [
+      "hidden_pass",
+      "hidden_regression",
+      "hidden_test_output",
+      "peer_arm_hidden_result",
+      "artifact_hash_as_predictive_feature",
+      "request_hash_as_predictive_feature"
+    ]
+  },
+  "exploratory_router_v0": {
+    "mode": "failure_routing_memoryless_depth_1",
+    "calibrated_controller_claim": false,
+    "route_only_when_snapshot_and_telemetry_complete": true,
+    "hard_debt": "public_state in {root_incomplete, scope_invalid, public_fail}",
+    "coverage_debt": "mutation_epoch >= 2 and trusted_static_count == 0 and trusted_diff_count == 0",
+    "action": "one_high_recovery_turn",
+    "accept_without_recovery": "public_unknown and no coverage_debt",
+    "empty_or_incompatible_calibration_table_policy": "calibrated mode refuses to start"
+  },
+  "static_allocation": {
+    "k_definition": "number_of_markov_routes_after_all_roots_are_sealed",
+    "count_must_equal_markov": true,
+    "selection": "Select the first K tasks in determinism.digest_order using SHA256(static_order_domain || seed_ascii || NUL || fixture_id_utf8).",
+    "hidden_or_public_state_used_for_static_selection": false,
+    "k_zero_or_k_all_tasks": "publish_nonpromotable_feasibility_result",
+    "extra_schedule": "Deduplicate overlapping Markov/Static task allocations, then order unique physical extras by SHA256(extra_order_domain || seed_ascii || NUL || fixture_id_utf8); an overlap is generated once and reused exactly."
+  },
+  "budgets": {
+    "direct_per_turn": {
+      "max_rounds": 12,
+      "max_tool_calls": 32,
+      "max_output_tokens": 2048,
+      "max_wall_seconds": 120,
+      "max_context_tokens": 8192,
+      "effort": "medium"
+    },
+    "extra_per_turn": {
+      "max_rounds": 4,
+      "max_tool_calls": 8,
+      "max_output_tokens": 384,
+      "max_wall_seconds": 20,
+      "max_context_tokens": 8192,
+      "effort": "high"
+    },
+    "extra_prompt_revision": "mio.repository-quality.recovery-prompt.v1",
+    "extra_prompt_template": "Perform one bounded review and repair pass over the current attempted implementation. Inspect the existing changes and visible tests for edge cases, API-contract errors, and regressions. Make only justified corrections. Use the trusted validate tool; do not make cosmetic edits merely to satisfy the gate. The original task remains: {instruction}",
+    "static_and_markov_prompt_tool_budget_identity_required": true,
+    "actual_costs_reported_without_normalization": true
+  },
+  "cost_endpoint_definition": {
+    "output_tokens": "For one physical candidate, sum completion_tokens over its exact typed AgentRoundTrace sequence.",
+    "model_seconds": "For one physical candidate, sum AgentRoundTrace.model_total_ns over rounds and divide by 1000000000 exactly. model_total_ns is required to equal prefill_ns plus decode_ns. AgentRoundTrace.total_time_s is validation-only and is not the model-cost endpoint.",
+    "wall_seconds": "Use the exact finite nonnegative AgentTurnResult.wall_time_s for the physical candidate; it includes the complete agent turn rather than only raw model phases.",
+    "logical_arm_cost": "Sum the shared root cost plus every child allocated to that logical arm, even when selection falls back to the root. Physical deduplicated cost is reported separately."
+  },
+  "branch_contract": {
+    "root_archived_before_extra": true,
+    "extra_workspace_is_verified_clone_of_root": true,
+    "root_workspace_immutable_after_archive": true,
+    "conversation_history_continued": true,
+    "quality_gate_initial_snapshot": "pristine_task_workspace",
+    "quality_gate_current_snapshot": "cloned_quality_root",
+    "validation_evidence_inherited": false,
+    "net_change_contract_required": true,
+    "symlink_or_scope_escape": "fail_closed",
+    "logical_selection_vs_physical_reuse": "A child is a logical candidate even when its terminal bytes equal the root. Strict public-score improvement determines logical selection. Byte equality only deduplicates physical workspace evaluation; it never forces root selection or copies trajectory validity between arms."
+  },
+  "agent_and_tool_isolation": {
+    "agent_visible_roots": "exactly one active task workspace; framework and interpreter dependencies may be read-only but contain no fixture schedule, oracle, peer workspace, archive, or result",
+    "agent_tools_plain": [
+      "bash",
+      "read",
+      "write",
+      "edit"
+    ],
+    "agent_tools_quality": [
+      "validate",
+      "bash",
+      "read",
+      "write",
+      "edit"
+    ],
+    "network_enabled": false,
+    "mcp_tools_exposed": false,
+    "shell_policy": "sandboxed direct local execution constrained to the active workspace; process and filesystem escape fail closed",
+    "host_only_unreachable_material": [
+      "public and hidden evaluator programs",
+      "hidden tests and labels",
+      "fixture and arm schedules",
+      "peer-arm workspaces and telemetry",
+      "archived roots",
+      "previous or current hidden results"
+    ],
+    "archive_and_peer_roots_outside_active_policy": true,
+    "symlinks_special_files_and_aliases_rejected_before_and_after_each_stage": true,
+    "tool_or_policy_boundary_failure": "abort_complete_cohort"
+  },
+  "runtime": {
+    "sampler": {
+      "temperature": 0,
+      "top_p": 1,
+      "top_k": 0,
+      "greedy": true,
+      "sampler_seed": null,
+      "sampler_seed_semantics": "No RNG seed is applied because the frozen sampler is greedy; 20260719 is used only for schedules, static allocation, and bootstrap indices."
+    },
+    "engine": {
+      "context_window": 8192,
+      "tq_bits": 16,
+      "pq_bits": 16,
+      "bmp_paths": 1,
+      "ddtree_budget": 0,
+      "drafter_backend": "dflash",
+      "drafter_strict": true,
+      "draft_fallback_model": null,
+      "dspark_prefix_cache": false,
+      "dflash_quantize_draft": false,
+      "dflash_verify_len_override": false,
+      "dflash_max_context": 131072,
+      "dflash_draft_sink": 64,
+      "dflash_draft_window": 1024,
+      "dflash_exact_commit_oracle": false,
+      "dflash_exact_components": "gdn,attention,mlp,head",
+      "dflash_qmv_vectors": "auto",
+      "dflash_qmv_staging": false,
+      "prefill_chunk": 2048
+    },
+    "forbidden_environment_overrides": [
+      "DDTREE_EXACT_COMMIT",
+      "DFLASH_DRAFT_SINK",
+      "DFLASH_DRAFT_WINDOW",
+      "DFLASH_MAX_CTX",
+      "DFLASH_QUANTIZE_DRAFT",
+      "DFLASH_VERIFY_LEN",
+      "MIO_DDTREE_BUDGET",
+      "MIO_DEBUG_LOG",
+      "MIO_DEBUG_LOG_PATH",
+      "MIO_DFLASH_EXACT_COMMIT_ORACLE",
+      "MIO_DFLASH_EXACT_COMPONENTS",
+      "MIO_DFLASH_QMV_STAGING",
+      "MIO_DFLASH_QMV_VECTORS",
+      "MIO_PREFILL_CHUNK"
+    ],
+    "cold_reset_before_every_physical_generation": [
+      "invoke engine._prefix_cache_invalidate when callable",
+      "set engine._last_prompt_tokens to an empty list when present",
+      "set engine._pending_assistant_prefill to an empty string when present",
+      "reset engine._dspark_runtime._prefix_cache through its executor when both are present"
+    ],
+    "direct_conversation_state": "fresh empty state for each Plain and shared Quality root",
+    "extra_conversation_state": "deep-copy and continue the shared Quality history on the verified clone after the same cold engine reset",
+    "software_versions": {
+      "dflash-mlx": "0.1.8",
+      "huggingface-hub": "1.24.0",
+      "mlx": "0.32.0",
+      "mlx-audio": "0.4.4",
+      "mlx-dspark": "0.5.0",
+      "mlx-lm": "0.31.3",
+      "mlx-vlm": "0.6.5",
+      "transformers": "5.14.1"
+    }
+  },
+  "attempt_and_failure_policy": {
+    "physical_generation_attempts": 1,
+    "hidden_evaluator_attempts_per_unique_workspace": 1,
+    "model_budget_or_deadline_terminal": "record as an observed inadmissible trajectory with no retry; a recovery child falls back to its root",
+    "visible_or_hidden_assertion_failure_or_evaluator_timeout": "record as the task verdict with no retry",
+    "infrastructure_failure": "An exception, process crash, engine-reset failure, malformed telemetry, snapshot failure, archive mutation, evaluator exception, or source/model/protocol drift aborts the entire cohort. No aggregate or promotion decision is produced.",
+    "partial_hidden_results": "remain host-private diagnostics and are never supplied to generation, routing, selection, or a replacement run",
+    "rerun_after_aborted_cohort": "forbidden under this revision; document the failure and commit a new protocol revision before another attempt",
+    "native_abort_envelope": "After frozen provenance and destinations are accepted and a verifiable attempt-start exists, a native failure emits one create-once, source-free v4 abort envelope with phase, content-free progress counts, failure-message digest, provenance, and verification ledger. It contains no fixture IDs, prompts, candidate bytes, hidden labels, or evaluator output.",
+    "abort_before_provenance_or_destination_acceptance": "No scientific attempt has started and no native abort envelope is guaranteed. If create-once start publication reports failure after installing exact receipt bytes, the runner verifies the receipt and emits a bound abort before model loading.",
+    "v4_smoke_attempt_limit": "One procedural attempt. A failed attempt consumes v4 and requires a documented committed v5."
+  },
+  "selection": {
+    "sealed_before_hidden_evaluation": true,
+    "child_selected_only_on_strict_public_improvement": true,
+    "state_rank": {
+      "scope_invalid": 0,
+      "root_incomplete": 1,
+      "public_fail": 2,
+      "public_unknown": 3
+    },
+    "score_tuple": [
+      "state_rank",
+      "quality_decision_is_pass",
+      "terminal_reason_is_model_final",
+      "trusted_test_or_build_present",
+      "trusted_static_or_diff_present"
+    ],
+    "score_comparison": "lexicographic integer comparison, larger is better",
+    "child_admissibility_requires": [
+      "no_budget_or_deadline_violation",
+      "tool_telemetry_complete",
+      "initial_and_current_snapshots_complete",
+      "scope_valid"
+    ],
+    "cost_latency_tokens_or_hidden_outcomes_in_score": false,
+    "ties": "retain_root",
+    "child_failure_or_budget_violation": "retain_root",
+    "hidden_result_used": false,
+    "identical_terminal_artifact": "Retain the independently sealed logical root/child choice and per-arm trajectory metadata; deduplicate only exact workspace storage and the workspace-determined hidden evaluator verdict."
+  },
+  "phase_order": [
+    "verify_clean_source_model_runtime_and_protocol",
+    "reserve_new_result_and_abort_destinations",
+    "generate_all_plain_and_shared_quality_roots",
+    "seal_public_states_and_compute_markov_routes_k",
+    "select_k_static_tasks_from_seeded_hash_only",
+    "generate_all_unique_extra_branches",
+    "seal_all_logical_terminal_selections",
+    "reverify_source_model_runtime_and_protocol",
+    "evaluate_each_unique_task_and_terminal_artifact_once",
+    "aggregate_source_free_result_once"
+  ],
+  "hidden_evaluation": {
+    "unit": "fixture_id_and_exact_terminal_workspace_content",
+    "all_generation_and_selection_precede_first_hidden_call": true,
+    "workspace_evaluator_verdict": "The host evaluator returns evaluator_passed and regression_free from the exact fixture and workspace bytes. Only these workspace-determined fields are reused for an identical (fixture_id, terminal workspace content) pair.",
+    "workspace_evaluator_endpoint": "Report evaluator_passed independently from trajectory validity. This is the byte-level workspace-correctness endpoint; unlike composite hidden_task_success it cannot improve for an identical terminal artifact merely because validation or completion telemetry improved.",
+    "trajectory_validity": "Computed separately for each logical arm: both snapshots and tool telemetry are complete, scope is valid, no budget/deadline violation occurred, terminal_reason is model_final, and a Quality-derived selected terminal has quality_decision pass. Plain has no Quality-decision requirement.",
+    "hidden_task_success": "workspace_evaluator.evaluator_passed AND logical_arm.trajectory_validity",
+    "reuse_exact_workspace_evaluator_verdict_across_arms": true,
+    "trajectory_validity_reused_across_independent_arms": false,
+    "typed_barrier_receipt_required_for_aggregate": "A typed generation receipt must first attest exactly 2N completed roots, every scheduled unique extra, and the frozen schedule/allocation order. The evaluation receipt must then attest all 4N logical terminals registered, immutable selection sealed before the first hidden call, single-use evaluation, and exact equality between unique (fixture, terminal bytes) count and hidden callback count. A caller-supplied boolean is insufficient.",
+    "hidden_feedback_to_generation_or_selection": false,
+    "serialized_cache_keys": false
+  },
+  "models": {
+    "target": {
+      "repository_label": "mlx-community/Qwen3.5-4B-4bit",
+      "content_identity": "local-sha256-v1:7d7ea69d09ada4f1d2f49f6ca651441ac279b95b6d280f259da04fbde504376f"
+    },
+    "drafter": {
+      "repository_label": "z-lab/Qwen3.5-4B-DFlash",
+      "content_identity": "local-sha256-v1:4b60bced36f602da85a6447d3648e7ac37a0c5cce68d505a49664252c0586b98",
+      "backend": "dflash"
+    },
+    "same_exact_stack_for_every_physical_generation": true,
+    "identity_verified_before_and_after": true
+  },
+  "corpus": {
+    "name": "MioCodeBench-v1",
+    "smoke_count": 4,
+    "development_count": 8,
+    "all_count": 12,
+    "status": "both_splits_exploratory_for_this_new_intervention",
+    "development_is_new_holdout": false,
+    "new_untouched_repository_tasks_required_for_any_quality_claim": true,
+    "cohort_execution_rule": "Each invocation is exactly one complete sealed smoke, development, or all cohort. All roots, routes, extras, and logical selections in that cohort precede its first hidden call.",
+    "initial_authorized_cohort": "smoke, as harness validation only",
+    "smoke_continuation_rule": "A later all-cohort exploratory run may proceed only when smoke has zero source/model/protocol/isolation/snapshot/telemetry/infrastructure violations; hidden success, rescue, regression, cost, and route outcomes cannot influence that decision.",
+    "promotion_analysis_population": "one separately generated all cohort containing all 12 tasks in a single barrier; it is not formed by pooling standalone smoke and development runs",
+    "standalone_smoke_or_development_promotion_eligible": false,
+    "prior_or_standalone_generations_reused_in_all_cohort": false
+  },
+  "contrasts": [
+    "quality_minus_plain",
+    "static_minus_quality",
+    "markov_minus_quality",
+    "markov_minus_static"
+  ],
+  "reported_metrics": [
+    "hidden_task_success",
+    "workspace_evaluator_passed",
+    "workspace_evaluator_paired_rescues_regressions_and_ties",
+    "workspace_evaluator_gain_and_paired_bootstrap_lcb",
+    "trajectory_only_vs_workspace_evaluator_rescue_counts",
+    "changed_vs_same_terminal_rescue_counts",
+    "regression_free",
+    "paired_rescues_regressions_and_ties",
+    "terminal_completion",
+    "route_count",
+    "extra_selection_count",
+    "fallback_to_root_count",
+    "logical_output_tokens",
+    "logical_model_seconds",
+    "logical_wall_seconds",
+    "physical_generation_count",
+    "physical_output_tokens",
+    "physical_model_seconds",
+    "physical_wall_seconds",
+    "unique_terminal_artifact_count",
+    "hidden_evaluation_count",
+    "budget_and_deadline_violations"
+  ],
+  "terminal_completion_semantics": "Per-arm trajectory_validity before applying the workspace evaluator verdict; this includes snapshots, telemetry, scope, budgets/deadlines, model_final, and the Quality pass requirement for Quality-derived arms.",
+  "advance_to_larger_calibration_gates": {
+    "scope": "exploratory engineering promotion to a newly authored untouched calibration cohort, never a coding-quality or speed claim",
+    "analysis_population": "exactly one complete single-barrier all cohort of N=12; standalone or pooled runs are ineligible",
+    "independent_resampling_unit": "fixture task",
+    "analysis_row_order": "fixture_id ascending by Unicode code-point order before assigning bootstrap indices 0 through N-1",
+    "primary_contrast": "markov_quality minus quality using composite hidden_task_success",
+    "workspace_correctness_co_primary": "markov_quality minus quality using raw workspace evaluator_passed; both the composite and raw lower-bound gates must pass for engineering advancement",
+    "quality_gain_point": "mean over all N paired task indicators: hidden_task_success(markov_quality) - hidden_task_success(quality)",
+    "rescue_probability_point": "Among Markov-routed tasks whose Quality composite hidden_task_success is false, the fraction whose Markov composite hidden_task_success is true. The denominator is exactly that routed-and-Quality-failed set.",
+    "minimum_independent_markov_routes": 8,
+    "maximum_independent_markov_routes": "N - 1",
+    "minimum_rescue_probability_denominator": 1,
+    "quality_gain_lcb_minimum": 0.01,
+    "workspace_evaluator_gain_point": "mean over all N paired task indicators: evaluator_passed(markov_quality) - evaluator_passed(quality), independent of trajectory validity",
+    "workspace_evaluator_gain_lcb_minimum": 0.01,
+    "rescue_probability_lcb_minimum": 0.1,
+    "quality_to_markov_regressions": 0,
+    "quality_to_markov_regression_definition": "count over all N tasks where Quality composite hidden_task_success is true and Markov composite hidden_task_success is false",
+    "markov_pass_at_least_quality": true,
+    "markov_pass_at_least_static": true,
+    "workspace_evaluator_quality_to_markov_regressions": 0,
+    "workspace_evaluator_markov_pass_at_least_quality": true,
+    "workspace_evaluator_markov_pass_at_least_static": true,
+    "rescue_mechanism_breakdown": "For every routed composite rescue, report whether evaluator_passed itself changed from false to true or only trajectory validity changed, and whether the selected Markov terminal artifact differs from the Quality root. Only aggregate counts are serialized.",
+    "pass_count_semantics": "Composite pass-count gates use hidden_task_success. Separately named workspace-evaluator pass-count gates use the reusable evaluator_passed bit; neither endpoint substitutes for the other.",
+    "logical_cost_definition": "For each arm, sum its shared root cost plus its allocated child cost whether the child is selected or falls back. Overlap is charged to each logical arm for comparison even when generated physically once. Physical deduplicated cost is reported separately.",
+    "cost_ratio_statistics": "Point ratios of total logical Markov cost divided by total logical Quality cost over all N tasks; these thresholds are not confidence bounds. A zero, missing, non-finite, or invalid denominator fails promotion.",
+    "markov_over_quality_wall_point_ratio_maximum": 1.25,
+    "markov_over_quality_model_seconds_point_ratio_maximum": 1.25,
+    "markov_over_quality_output_tokens_point_ratio_maximum": 1.1,
+    "budget_deadline_snapshot_or_telemetry_violations": 0,
+    "static_extra_count_must_equal_markov": true,
+    "bootstrap_samples": 10000,
+    "confidence_level": 0.95,
+    "confidence_sidedness": "one-sided lower bound",
+    "bootstrap_index_generator": "For bootstrap sample b in [0,9999] and draw j in [0,N-1], compute SHA256(domain || seed_ascii || NUL || uint64be(b) || uint64be(j)), interpret all 32 digest bytes as one unsigned big-endian integer, and take modulo N. The same sampled task indices are used for every arm and metric.",
+    "bootstrap_domain": "mio.repository-quality.bootstrap.v1 followed by NUL",
+    "bootstrap_seed": 20260719,
+    "lower_bound_order_statistic": "Sort 10000 bootstrap point estimates ascending and use zero-based index ceil((1 - 0.95) * 10000) - 1 = 499; the reported conservative LCB is min(observed_point, that element).",
+    "zero_rescue_denominator_in_bootstrap_sample": "assign rescue probability 0.0 for that sample",
+    "missing_or_invalid_data": "No imputation or row deletion. A structurally missing or malformed task, arm, terminal selection, cost, verdict, snapshot, or telemetry field is an infrastructure failure and aborts the cohort without an aggregate. A complete typed trajectory that validly records a budget, deadline, snapshot, or telemetry violation remains an observed inadmissible trajectory and makes promotion false.",
+    "gate_combination": "all listed eligibility, quality, regression, allocation, cost, and integrity conditions must be true"
+  },
+  "amendment_policy": "Any change to task bytes, public or hidden evaluator, state features, route rule, static allocation, prompt, budget, selection, model, runtime, schedule, analysis, or serialization requires a new committed protocol revision before inference.",
+  "revision_history": {
+    "predecessor_path": "benchmarks/repository-quality-four-arm-preregistration-v3.json",
+    "predecessor_schema": "mio.repository-quality-four-arm-preregistration.v3",
+    "predecessor_revision": "mio-repository-quality-four-arm-pilot-v3",
+    "predecessor_sha256": "d3ddbfa29bc99f2b480797fadf6686cbc200f973e6fa6325805855494d600d3d",
+    "v3_attempt_disposition": "native_abort_no_result",
+    "v3_attempt_start_path": "benchmarks/incidents/repository-quality-four-arm-v3-smoke-attempt-start-16213e2.json",
+    "v3_attempt_start_sha256": "daae7a1e1c895fa8fa328b5d8a8794a5d211cb26bb429d7c74ff27acc8706c1f",
+    "v3_abort_path": "benchmarks/incidents/repository-quality-four-arm-v3-smoke-abort-16213e2.json",
+    "v3_abort_sha256": "c0e18e1878fb5956003115f4658d1c2d06cf1a8d36c52d4becf091a3a099764a",
+    "v3_incident_record_path": "benchmarks/incidents/repository-quality-four-arm-v3-smoke-incident-16213e2.json",
+    "v3_incident_record_status": "native_abort_no_result",
+    "v3_incident_record_sha256": "c3b9f098258916f324452f5611ede11a021974af66b50173c47102c589a4e09a",
+    "v3_rerun_forbidden": true,
+    "v4_scope": "Standalone full protocol. V4 adds exact post-loop wall-budget attestation, binds the native v3 receipts and incident, expands critical-source coverage, changes result/start/abort identities, and authorizes one procedural smoke attempt; every other scientific clause is semantically identical to v3."
+  },
+  "measurement_revision": {
+    "reason": "V3 established exact raw DFlash model-phase timing, then its only smoke attempt aborted before hidden evaluation because terminal AgentTurnResult wall time crossed a frozen budget without an exhaustion attestation. V4 keeps every raw DFlash endpoint unchanged and repairs only terminal wall-budget accounting.",
+    "accepted_timing_source": "runtime_raw_ns",
+    "rejected_timing_sources": [
+      "derived_legacy_us",
+      "derived_batch_stats",
+      "unavailable"
+    ],
+    "clock": "time.perf_counter_ns",
+    "prefill_ns": "One integer interval beginning immediately before chunked_dflash_prefill and ending after any warm-prefix draft-context reconstruction and its MLX synchronization. Suppression-mask construction and first-token staging begin only after this boundary.",
+    "decode_ns_streaming": "Sum disjoint integer intervals between explicit active-runtime timing probes, beginning immediately after the prefill interval. Stop at a probe immediately before each prefill or token event dictionary is constructed and restart only after consumer resumption. Include DFlash staging, draft, verify, rollback or rebuild, commit, generated-token materialization, final-state draft-cache synchronization, and Python control between probes. Exclude event-dictionary construction, telemetry serialization, generator suspension, consumer detokenization, rendering, tool execution, and scheduling delay.",
+    "decode_ns_one_shot": "One continuous integer interval beginning immediately after prefill and ending only after generated-token materialization and requested final-state draft-cache synchronization; a prefill-only call ends after its post-prefill staging completes.",
+    "model_total_ns": "Exact integer prefill_ns plus decode_ns. Substitution from elapsed_us is forbidden.",
+    "elapsed_us": "Separate runtime-phase wall interval beginning immediately before prefill and ending after final-state synchronization but before final event/result serialization. In streaming mode it may include consumer suspension. It excludes prompt preparation and cache construction before start_ns and remains validation-only, never the model_seconds endpoint.",
+    "event_requirements": "Every native DFlash prefill, token, and summary event carries prefill_ns, cumulative decode_ns, model_total_ns, logical_prompt_tokens, physical_prefill_tokens, physical_decode_tokens, and warm_offset.",
+    "deadline_semantics": "A censored turn uses the latest fully yielded raw triplet. Zero generated tokens remain valid when post-prefill staging contributes positive decode_ns.",
+    "warm_prefix_semantics": "physical_prefill_tokens equals logical_prompt_tokens minus warm_offset; raw prefill time measures only the executed suffix.",
+    "adapter_policy": "Keep the v3 fail-closed runtime_raw_ns check unchanged. Never relabel or accept converted microsecond timing.",
+    "required_regressions": [
+      "A deterministic DFlash stream test proves simulated suspension time appears in elapsed_us but not model_total_ns.",
+      "DFlash prefill-only output exposes the raw triplet and exact token accounting.",
+      "Existing engine deadline tests continue proving censored raw timing is content-free and exact.",
+      "A terminal Quality refresh crossing max_wall_seconds produces wall exhaustion from the same final monotonic sample and converts only model_final to budget_exhausted.",
+      "Strict public extraction still rejects a wall time at or above the budget without exhaustion.",
+      "Strict public extraction accepts an attested wall time at or above the budget as root_incomplete rather than aborting the cohort."
+    ],
+    "terminal_wall_budget_accounting": {
+      "clock": "time.perf_counter",
+      "sample": "Capture one turn_finished value after terminal Quality refresh, snapshot/report, state persistence, and tool-telemetry reconciliation, immediately before typed AgentTurnResult construction. Derive wall_time_s and late wall exhaustion from this same sample.",
+      "late_crossing_rule": "If max_wall_seconds is set, turn_finished is at or beyond the wall deadline, and no earlier budget_exhaustion exists, set the exact wall-limit exhaustion string. Do not execute another model round or tool call.",
+      "terminal_reason_precedence": "Change only model_final to budget_exhausted. Preserve the more specific quality_incomplete, tool_timeout, budget_exhausted, and budget_finalization terminal reasons.",
+      "assistant_history_semantics": "Late wall accounting changes only typed terminal_reason and budget_exhaustion fields; assistant_text and persisted conversation history remain byte-identical to the already completed turn.",
+      "selection_semantics": "An attested late wall crossing is a complete typed but inadmissible trajectory: public state is root_incomplete and a recovery falls back to its root. It is not malformed telemetry and does not abort the cohort.",
+      "validator_policy": "Keep the strict contradiction check: wall_time_s at or above max_wall_seconds with no budget_exhaustion remains a protocol failure."
+    }
+  },
+  "release_gate": {
+    "full_test_suite_pass_required_before_commit_and_attempt": true,
+    "attestation": "Procedural release evidence recorded in Git and documentation; it is not asserted as a runtime-generated receipt.",
+    "attempt_limit_enforcement": "Procedural. A native create-once abort envelope records failures after provenance capture, but cannot prevent an operator from deleting external files or choosing another output path.",
+    "all_cohort_authorized": false,
+    "v4_smoke_attempt_authorized": 1
+  }
+}

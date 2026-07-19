@@ -14,7 +14,7 @@ calibrated, not benchmark results. More permitted work does not imply more
 work on every request, and neither implies monotonically better quality.
 
 A repository-level four-arm engineering pilot is now preregistered in
-[`../../benchmarks/repository-quality-four-arm-preregistration-v3.json`](../../benchmarks/repository-quality-four-arm-preregistration-v3.json)
+[`../../benchmarks/repository-quality-four-arm-preregistration-v4.json`](../../benchmarks/repository-quality-four-arm-preregistration-v4.json)
 and explained in [`../../docs/22-markov-quality-pilot.md`](../../docs/22-markov-quality-pilot.md).
 It explicitly uses a failure-routing exploratory policy because the existing
 HumanEval calibration tables contain no eligible transitions; it does not
@@ -23,8 +23,12 @@ The fail-closed native smoke executable is
 `python -m experimental.effort.run_repository_quality_pilot`; it publishes
 only a provenance-bound, source-free envelope and exposes no protocol knobs.
 The v2 smoke emitted no result after correctly rejecting legacy-derived
-DFlash timing; v3 adds raw active-phase timing and native attempt/abort
-provenance without weakening that boundary.
+DFlash timing. V3 added raw active-phase timing and native receipts, then its
+only smoke aborted before hidden evaluation because terminal wall time could
+exceed a budget without an exhaustion attestation. V4 binds those receipts and
+repairs that accounting with one final same-sample wall probe. It does not
+increase either budget, relax the strict validator, or support a quality/speed
+claim.
 
 ## Verified engineering checkpoint (2026-07-18)
 

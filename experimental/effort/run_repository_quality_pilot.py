@@ -106,22 +106,31 @@ from scripts.run_coding_quality_benchmark import (
 )
 
 
-RESULT_ENVELOPE_SCHEMA = "mio.repository-quality-four-arm-result-envelope.v3"
-ABORT_ENVELOPE_SCHEMA = "mio.repository-quality-four-arm-abort-envelope.v3"
-ATTEMPT_START_SCHEMA = "mio.repository-quality-four-arm-attempt-start.v3"
+RESULT_ENVELOPE_SCHEMA = "mio.repository-quality-four-arm-result-envelope.v4"
+ABORT_ENVELOPE_SCHEMA = "mio.repository-quality-four-arm-abort-envelope.v4"
+ATTEMPT_START_SCHEMA = "mio.repository-quality-four-arm-attempt-start.v4"
 SOURCE_LOCK_SCHEMA = "mio.repository-quality-source-lock.v1"
-PREREGISTRATION_SCHEMA = "mio.repository-quality-four-arm-preregistration.v3"
-PREREGISTRATION_REVISION = "mio-repository-quality-four-arm-pilot-v3"
-PREREGISTRATION_SHA256 = "d3ddbfa29bc99f2b480797fadf6686cbc200f973e6fa6325805855494d600d3d"
-PREREGISTRATION_RELATIVE_PATH = "benchmarks/repository-quality-four-arm-preregistration-v3.json"
-PREDECESSOR_PREREGISTRATION_SCHEMA = "mio.repository-quality-four-arm-preregistration.v2"
-PREDECESSOR_PREREGISTRATION_REVISION = "mio-repository-quality-four-arm-pilot-v2"
-PREDECESSOR_PREREGISTRATION_SHA256 = "9192463d8afa08a23296e9079291dd0dfcf52910a21eebf8ad2292ddaec69610"
-PREDECESSOR_PREREGISTRATION_RELATIVE_PATH = "benchmarks/repository-quality-four-arm-preregistration-v2.json"
-V2_INCIDENT_SCHEMA = "mio.repository-quality-four-arm-incident-record.v1"
-V2_INCIDENT_STATUS = "post_hoc_incident_record_no_result"
-V2_INCIDENT_SHA256 = "4e32325739bbcd35554bb43bc5bdddb205ecbe5453cad8d47cec24b876eac157"
-V2_INCIDENT_RELATIVE_PATH = "benchmarks/incidents/repository-quality-four-arm-v2-smoke-aborted-8bf6e6e.json"
+PREREGISTRATION_SCHEMA = "mio.repository-quality-four-arm-preregistration.v4"
+PREREGISTRATION_REVISION = "mio-repository-quality-four-arm-pilot-v4"
+PREREGISTRATION_SHA256 = "ae49deb27e1929c76b032a65ee1515e3a0ac270d78cdb49fa791aa6d9ca93381"
+PREREGISTRATION_RELATIVE_PATH = "benchmarks/repository-quality-four-arm-preregistration-v4.json"
+PREDECESSOR_PREREGISTRATION_SCHEMA = "mio.repository-quality-four-arm-preregistration.v3"
+PREDECESSOR_PREREGISTRATION_REVISION = "mio-repository-quality-four-arm-pilot-v3"
+PREDECESSOR_PREREGISTRATION_SHA256 = "d3ddbfa29bc99f2b480797fadf6686cbc200f973e6fa6325805855494d600d3d"
+PREDECESSOR_PREREGISTRATION_RELATIVE_PATH = "benchmarks/repository-quality-four-arm-preregistration-v3.json"
+PREDECESSOR_GIT_REVISION = "16213e264d38993f8e5b074588d424a199269dbe"
+PREDECESSOR_ATTEMPT_START_SCHEMA = "mio.repository-quality-four-arm-attempt-start.v3"
+PREDECESSOR_ATTEMPT_START_SHA256 = "daae7a1e1c895fa8fa328b5d8a8794a5d211cb26bb429d7c74ff27acc8706c1f"
+PREDECESSOR_ATTEMPT_START_RELATIVE_PATH = (
+    "benchmarks/incidents/repository-quality-four-arm-v3-smoke-attempt-start-16213e2.json"
+)
+PREDECESSOR_ABORT_SCHEMA = "mio.repository-quality-four-arm-abort-envelope.v3"
+PREDECESSOR_ABORT_SHA256 = "c0e18e1878fb5956003115f4658d1c2d06cf1a8d36c52d4becf091a3a099764a"
+PREDECESSOR_ABORT_RELATIVE_PATH = "benchmarks/incidents/repository-quality-four-arm-v3-smoke-abort-16213e2.json"
+PREDECESSOR_INCIDENT_SCHEMA = "mio.repository-quality-four-arm-incident-record.v2"
+PREDECESSOR_INCIDENT_STATUS = "native_abort_no_result"
+PREDECESSOR_INCIDENT_SHA256 = "c3b9f098258916f324452f5611ede11a021974af66b50173c47102c589a4e09a"
+PREDECESSOR_INCIDENT_RELATIVE_PATH = "benchmarks/incidents/repository-quality-four-arm-v3-smoke-incident-16213e2.json"
 PILOT_SOURCE_LOCK_FILES = (
     "pyproject.toml",
     "uv.lock",
@@ -147,10 +156,16 @@ PILOT_SOURCE_LOCK_FILES = (
     "experimental/effort/repository_quality_pilot.py",
     "experimental/effort/bench_repository_quality_pilot.py",
     "experimental/effort/run_repository_quality_pilot.py",
+    "benchmarks/repository-quality-four-arm-preregistration-v2.json",
+    "benchmarks/incidents/repository-quality-four-arm-v2-smoke-aborted-8bf6e6e.json",
     PREDECESSOR_PREREGISTRATION_RELATIVE_PATH,
-    V2_INCIDENT_RELATIVE_PATH,
-    PREREGISTRATION_RELATIVE_PATH,
     "docs/22-markov-quality-pilot.md",
+    PREDECESSOR_ATTEMPT_START_RELATIVE_PATH,
+    PREDECESSOR_ABORT_RELATIVE_PATH,
+    PREDECESSOR_INCIDENT_RELATIVE_PATH,
+    PREREGISTRATION_RELATIVE_PATH,
+    "tests/test_agent_loop.py",
+    "experimental/tests/test_bench_repository_quality_pilot.py",
 )
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -274,21 +289,85 @@ def _assert_predecessor_and_incident_seals() -> None:
     ):
         raise RepositoryPilotProtocolError("pilot predecessor preregistration anchors changed")
 
+    attempt_start = _read_exact_json_seal(
+        _REPOSITORY_ROOT / PREDECESSOR_ATTEMPT_START_RELATIVE_PATH,
+        expected_sha256=PREDECESSOR_ATTEMPT_START_SHA256,
+        unavailable_message="pilot v3 attempt-start receipt is unavailable",
+    )
+    start_provenance = attempt_start.get("provenance")
+    start_protocol = start_provenance.get("protocol") if type(start_provenance) is dict else None
+    start_implementation = start_provenance.get("implementation") if type(start_provenance) is dict else None
+    if (
+        attempt_start.get("schema_version") != PREDECESSOR_ATTEMPT_START_SCHEMA
+        or attempt_start.get("status") != "started"
+        or attempt_start.get("hidden_labels_serialized") is not False
+        or type(start_protocol) is not dict
+        or start_protocol.get("preregistration_schema") != PREDECESSOR_PREREGISTRATION_SCHEMA
+        or start_protocol.get("preregistration_revision") != PREDECESSOR_PREREGISTRATION_REVISION
+        or start_protocol.get("preregistration_sha256") != PREDECESSOR_PREREGISTRATION_SHA256
+        or type(start_implementation) is not dict
+        or start_implementation.get("git_revision") != PREDECESSOR_GIT_REVISION
+    ):
+        raise RepositoryPilotProtocolError("pilot v3 attempt-start anchors changed")
+
+    abort = _read_exact_json_seal(
+        _REPOSITORY_ROOT / PREDECESSOR_ABORT_RELATIVE_PATH,
+        expected_sha256=PREDECESSOR_ABORT_SHA256,
+        unavailable_message="pilot v3 abort receipt is unavailable",
+    )
+    abort_attempt = abort.get("attempt")
+    abort_observation = abort.get("abort")
+    if (
+        abort.get("schema_version") != PREDECESSOR_ABORT_SCHEMA
+        or abort.get("status") != "aborted_no_result"
+        or abort.get("hidden_labels_serialized") is not False
+        or abort.get("provenance") != start_provenance
+        or type(abort_attempt) is not dict
+        or abort_attempt.get("start_schema") != PREDECESSOR_ATTEMPT_START_SCHEMA
+        or abort_attempt.get("start_sha256") != PREDECESSOR_ATTEMPT_START_SHA256
+        or type(abort_observation) is not dict
+        or abort_observation.get("reason_code") != "protocol_failure"
+        or abort_observation.get("failure_boundary") != "allocation_sealed"
+        or abort_observation.get("hidden_evaluator_constructed") is not False
+        or abort_observation.get("hidden_evaluation_started") is not False
+        or abort_observation.get("aggregate_produced") is not False
+    ):
+        raise RepositoryPilotProtocolError("pilot v3 abort anchors changed")
+
     incident = _read_exact_json_seal(
-        _REPOSITORY_ROOT / V2_INCIDENT_RELATIVE_PATH,
-        expected_sha256=V2_INCIDENT_SHA256,
-        unavailable_message="pilot v2 incident record is unavailable",
+        _REPOSITORY_ROOT / PREDECESSOR_INCIDENT_RELATIVE_PATH,
+        expected_sha256=PREDECESSOR_INCIDENT_SHA256,
+        unavailable_message="pilot v3 incident record is unavailable",
     )
     incident_protocol = incident.get("protocol")
+    incident_receipts = incident.get("native_receipts")
+    incident_execution = incident.get("observed_execution")
+    incident_start = incident_receipts.get("attempt_start") if type(incident_receipts) is dict else None
+    incident_abort = incident_receipts.get("abort") if type(incident_receipts) is dict else None
     if (
-        incident.get("schema") != V2_INCIDENT_SCHEMA
-        or incident.get("status") != V2_INCIDENT_STATUS
+        incident.get("schema") != PREDECESSOR_INCIDENT_SCHEMA
+        or incident.get("status") != PREDECESSOR_INCIDENT_STATUS
         or type(incident_protocol) is not dict
         or incident_protocol.get("schema") != PREDECESSOR_PREREGISTRATION_SCHEMA
         or incident_protocol.get("revision") != PREDECESSOR_PREREGISTRATION_REVISION
         or incident_protocol.get("preregistration_sha256") != PREDECESSOR_PREREGISTRATION_SHA256
+        or incident_protocol.get("git_revision") != PREDECESSOR_GIT_REVISION
+        or incident_protocol.get("v3_rerun_allowed") is not False
+        or type(incident_receipts) is not dict
+        or incident_receipts.get("attempt_binding_verified") is not True
+        or type(incident_start) is not dict
+        or incident_start.get("sha256") != PREDECESSOR_ATTEMPT_START_SHA256
+        or type(incident_abort) is not dict
+        or incident_abort.get("sha256") != PREDECESSOR_ABORT_SHA256
+        or type(incident_execution) is not dict
+        or incident_execution.get("failure_boundary") != "allocation_sealed"
+        or incident_execution.get("completed_root_generation_count") != 8
+        or incident_execution.get("completed_unique_extra_generation_count") != 0
+        or incident_execution.get("hidden_evaluator_constructed") is not False
+        or incident_execution.get("hidden_evaluation_started") is not False
+        or incident_execution.get("aggregate_produced") is not False
     ):
-        raise RepositoryPilotProtocolError("pilot v2 incident anchors changed")
+        raise RepositoryPilotProtocolError("pilot v3 incident anchors changed")
 
 
 def _assert_preregistration_seal(
@@ -304,7 +383,17 @@ def _assert_preregistration_seal(
     )
     integrity = document.get("protocol_integrity")
     revision_history = document.get("revision_history")
-    if type(integrity) is not dict or type(revision_history) is not dict:
+    release_gate = document.get("release_gate")
+    measurement_revision = document.get("measurement_revision")
+    wall_accounting = (
+        measurement_revision.get("terminal_wall_budget_accounting") if type(measurement_revision) is dict else None
+    )
+    if (
+        type(integrity) is not dict
+        or type(revision_history) is not dict
+        or type(release_gate) is not dict
+        or type(wall_accounting) is not dict
+    ):
         raise RepositoryPilotProtocolError("pilot preregistration has no protocol-integrity object")
     if (
         document.get("schema") != PREREGISTRATION_SCHEMA
@@ -319,10 +408,23 @@ def _assert_preregistration_seal(
         or revision_history.get("predecessor_schema") != PREDECESSOR_PREREGISTRATION_SCHEMA
         or revision_history.get("predecessor_revision") != PREDECESSOR_PREREGISTRATION_REVISION
         or revision_history.get("predecessor_sha256") != PREDECESSOR_PREREGISTRATION_SHA256
-        or revision_history.get("post_hoc_incident_record_path") != V2_INCIDENT_RELATIVE_PATH
-        or revision_history.get("post_hoc_incident_record_status") != V2_INCIDENT_STATUS
-        or revision_history.get("post_hoc_incident_record_sha256") != V2_INCIDENT_SHA256
-        or revision_history.get("v2_rerun_forbidden") is not True
+        or revision_history.get("v3_attempt_disposition") != PREDECESSOR_INCIDENT_STATUS
+        or revision_history.get("v3_attempt_start_path") != PREDECESSOR_ATTEMPT_START_RELATIVE_PATH
+        or revision_history.get("v3_attempt_start_sha256") != PREDECESSOR_ATTEMPT_START_SHA256
+        or revision_history.get("v3_abort_path") != PREDECESSOR_ABORT_RELATIVE_PATH
+        or revision_history.get("v3_abort_sha256") != PREDECESSOR_ABORT_SHA256
+        or revision_history.get("v3_incident_record_path") != PREDECESSOR_INCIDENT_RELATIVE_PATH
+        or revision_history.get("v3_incident_record_status") != PREDECESSOR_INCIDENT_STATUS
+        or revision_history.get("v3_incident_record_sha256") != PREDECESSOR_INCIDENT_SHA256
+        or revision_history.get("v3_rerun_forbidden") is not True
+        or integrity.get("v3_attempt_start_sha256_bound_by_runner_and_envelopes") is not True
+        or integrity.get("v3_abort_sha256_bound_by_runner_and_envelopes") is not True
+        or integrity.get("v3_incident_record_sha256_bound_by_runner_and_envelopes") is not True
+        or release_gate.get("v4_smoke_attempt_authorized") != 1
+        or release_gate.get("all_cohort_authorized") is not False
+        or wall_accounting.get("clock") != "time.perf_counter"
+        or not str(wall_accounting.get("late_crossing_rule", "")).startswith("If max_wall_seconds is set")
+        or not str(wall_accounting.get("terminal_reason_precedence", "")).startswith("Change only model_final")
     ):
         raise RepositoryPilotProtocolError("pilot preregistration semantic anchors changed")
     expected_models = {
@@ -432,7 +534,9 @@ def _provenance_payload(provenance: FrozenPilotProvenance) -> dict[str, object]:
             "preregistration_revision": PREREGISTRATION_REVISION,
             "preregistration_sha256": provenance.preregistration_sha256,
             "predecessor_preregistration_sha256": PREDECESSOR_PREREGISTRATION_SHA256,
-            "v2_incident_record_sha256": V2_INCIDENT_SHA256,
+            "predecessor_attempt_start_sha256": PREDECESSOR_ATTEMPT_START_SHA256,
+            "predecessor_abort_sha256": PREDECESSOR_ABORT_SHA256,
+            "predecessor_incident_record_sha256": PREDECESSOR_INCIDENT_SHA256,
             "public_suite_sha256": provenance.suite_sha256,
             "private_evaluator_bundle_sha256": provenance.private_protocol_sha256,
             "quality_profile_schema": GATE_PROFILE_SCHEMA,
@@ -463,7 +567,7 @@ def _provenance_payload(provenance: FrozenPilotProvenance) -> dict[str, object]:
 
 @dataclass(frozen=True)
 class _NativeAttemptStartReceipt:
-    """Private, source-free authority showing that this v3 attempt was claimed."""
+    """Private, source-free authority showing that this v4 attempt was claimed."""
 
     authority: object
     provenance: FrozenPilotProvenance
@@ -558,7 +662,7 @@ class _NativeAbortReceipt:
 
 @dataclass(frozen=True)
 class RepositoryQualityPilotAbortEnvelope:
-    """Non-result terminal envelope issued only by a claimed native v3 attempt."""
+    """Non-result terminal envelope issued only by a claimed native v4 attempt."""
 
     provenance: FrozenPilotProvenance
     attempt_start: _NativeAttemptStartReceipt
@@ -745,7 +849,9 @@ class RepositoryQualityPilotResultEnvelope:
                 "preregistration_revision": PREREGISTRATION_REVISION,
                 "preregistration_sha256": self.provenance.preregistration_sha256,
                 "predecessor_preregistration_sha256": PREDECESSOR_PREREGISTRATION_SHA256,
-                "v2_incident_record_sha256": V2_INCIDENT_SHA256,
+                "predecessor_attempt_start_sha256": PREDECESSOR_ATTEMPT_START_SHA256,
+                "predecessor_abort_sha256": PREDECESSOR_ABORT_SHA256,
+                "predecessor_incident_record_sha256": PREDECESSOR_INCIDENT_SHA256,
                 "public_suite_sha256": self.provenance.suite_sha256,
                 "private_evaluator_bundle_sha256": self.provenance.private_protocol_sha256,
                 "quality_profile_schema": GATE_PROFILE_SCHEMA,
@@ -1624,7 +1730,7 @@ def _claim_native_attempt_root(
     model_locks: Sequence[LocalModelLock],
     work_root: Path,
 ) -> Path:
-    """Atomically claim one persistent, empty receipt root for this v3 attempt."""
+    """Atomically claim one persistent, empty receipt root for this v4 attempt."""
 
     resolved = _validate_native_work_location(
         candidate,
@@ -1645,12 +1751,12 @@ def _claim_native_attempt_root(
     try:
         resolved.mkdir(mode=0o700, parents=False, exist_ok=False)
     except FileExistsError as exc:
-        raise RepositoryPilotProtocolError("native v3 attempt root is create-once and already exists") from exc
+        raise RepositoryPilotProtocolError("native v4 attempt root is create-once and already exists") from exc
     except OSError as exc:
-        raise RepositoryPilotProtocolError("native v3 attempt root could not be claimed") from exc
+        raise RepositoryPilotProtocolError("native v4 attempt root could not be claimed") from exc
     metadata = resolved.lstat()
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-        raise RepositoryPilotProtocolError("native v3 attempt root is not a real directory")
+        raise RepositoryPilotProtocolError("native v4 attempt root is not a real directory")
     return resolved
 
 
@@ -1707,7 +1813,7 @@ def run_native_repository_quality_pilot(
 
     if split != "smoke":
         raise RepositoryPilotProtocolError(
-            "native pilot v3 authorizes smoke only; all requires a later integrity-authorized wrapper"
+            "native pilot v4 authorizes smoke only; all requires a later integrity-authorized wrapper"
         )
     cases = select_cases(split)
     provenance = _capture_native_provenance(
@@ -1967,7 +2073,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--split",
         choices=("smoke",),
         default="smoke",
-        help="v3 authorizes only the four-task harness-validation smoke cohort",
+        help="v4 authorizes only the four-task harness-validation smoke cohort",
     )
     parser.add_argument("--tier", default="small")
     parser.add_argument("--config", type=Path, default=None)

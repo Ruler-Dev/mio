@@ -208,6 +208,24 @@ class AgentTurnResult:
     tool_telemetry_complete: bool = True
 
 
+def _attest_terminal_wall_budget(
+    *,
+    turn_finished: float,
+    wall_deadline: float | None,
+    max_wall_seconds: float | None,
+    budget_exhaustion: str | None,
+    terminal_reason: str,
+) -> tuple[str | None, str]:
+    """Bind a late terminal deadline crossing without erasing stronger status."""
+
+    if wall_deadline is None or turn_finished < wall_deadline or budget_exhaustion is not None:
+        return budget_exhaustion, terminal_reason
+    if max_wall_seconds is None:  # pragma: no cover - internal deadline invariant
+        raise RuntimeError("wall deadline exists without a wall-time budget")
+    exhaustion = f"wall time limit {max_wall_seconds:g}s reached"
+    return exhaustion, "budget_exhausted" if terminal_reason == "model_final" else terminal_reason
+
+
 def _trace_nonnegative_int(metrics: object, name: str, default: int = 0) -> int:
     value = getattr(metrics, name, default)
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -2522,27 +2540,17 @@ def _process_user_input(
             # the model-round, call-count, or result-size budget.
             generation_tools = None
         elif last_model_round:
-            generation_messages = list(current_messages) + [
-                {"role": "user", "content": _LAST_MODEL_ROUND}
-            ]
+            generation_messages = list(current_messages) + [{"role": "user", "content": _LAST_MODEL_ROUND}]
             if quality_gate is not None and not quality_gate.decision().satisfied:
                 generation_tools = _quality_recovery_tool_specs(
                     tool_specs,
                     phase=quality_gate.decision().phase,
                 )
                 restricted_quality_tool_names = frozenset(
-                    name
-                    for spec in generation_tools
-                    if (name := _tool_schema_name(spec)) is not None
+                    name for spec in generation_tools if (name := _tool_schema_name(spec)) is not None
                 )
-        elif (
-            remaining_model_rounds == 2
-            and quality_gate is not None
-            and not quality_gate.decision().satisfied
-        ):
-            generation_messages = list(current_messages) + [
-                {"role": "user", "content": _QUALITY_CLOSURE}
-            ]
+        elif remaining_model_rounds == 2 and quality_gate is not None and not quality_gate.decision().satisfied:
+            generation_messages = list(current_messages) + [{"role": "user", "content": _QUALITY_CLOSURE}]
 
         configured_output_tokens = getattr(
             getattr(engine, "tier_config", None),
@@ -2719,9 +2727,7 @@ def _process_user_input(
                         "is certified."
                     )
                     console.print(quality_notice, style="yellow")
-                    terminal_assistant_text = "\n\n".join(
-                        text for text in (visible_text, quality_notice) if text
-                    )
+                    terminal_assistant_text = "\n\n".join(text for text in (visible_text, quality_notice) if text)
                     terminal_reason = "quality_incomplete"
                     break
                 quality_signature = quality_gate.feedback_signature()
@@ -2778,8 +2784,7 @@ def _process_user_input(
         for tc, name, args in invocations:
             registered_spec = tool_registry.get(name)
             restricted_tool_call = bool(
-                restricted_quality_tool_names is not None
-                and name not in restricted_quality_tool_names
+                restricted_quality_tool_names is not None and name not in restricted_quality_tool_names
             )
             spec = None if restricted_tool_call else registered_spec
             audit_start = len(audit_events)
@@ -3069,9 +3074,7 @@ def _process_user_input(
                 "budget. No later model synthesis was available; inspect the tool evidence "
                 "and coding-quality status above."
             )
-            terminal_assistant_text = "\n\n".join(
-                text for text in (visible_text, terminal_notice) if text
-            )
+            terminal_assistant_text = "\n\n".join(text for text in (visible_text, terminal_notice) if text)
             break
 
     if quality_gate is not None:
@@ -3120,6 +3123,20 @@ def _process_user_input(
     ):
         tool_telemetry_complete = False
 
+    turn_finished = time.perf_counter()
+    wall_time_s = turn_finished - turn_started
+    # A terminal quality refresh, snapshot, or report can cross the wall
+    # deadline after the final model/tool decision. Preserve that completed
+    # work, but attest the overrun instead of returning an impossible
+    # model_final-with-over-budget record to strict benchmark consumers.
+    budget_exhaustion, terminal_reason = _attest_terminal_wall_budget(
+        turn_finished=turn_finished,
+        wall_deadline=wall_deadline,
+        max_wall_seconds=execution_budget.max_wall_seconds,
+        budget_exhaustion=budget_exhaustion,
+        terminal_reason=terminal_reason,
+    )
+
     return AgentTurnResult(
         assistant_text=terminal_assistant_text or "(tool-only turn)",
         terminal_reason=terminal_reason,
@@ -3127,7 +3144,7 @@ def _process_user_input(
         tool_events=tuple(tool_event_traces),
         tool_calls=tool_calls_used,
         tool_result_chars=tool_result_chars,
-        wall_time_s=time.perf_counter() - turn_started,
+        wall_time_s=wall_time_s,
         quality_gate=quality_report,
         completion_tokens=completion_tokens_used,
         budget_exhaustion=budget_exhaustion,

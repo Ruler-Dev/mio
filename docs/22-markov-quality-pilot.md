@@ -1,11 +1,13 @@
 # Repository-level Markov quality pilot
 
-> Status: v3 preregistered exploratory protocol; no result yet. The
+> Status: v4 preregistered exploratory protocol; no result yet. The
 > machine-readable source of truth is
-> [`benchmarks/repository-quality-four-arm-preregistration-v3.json`](../benchmarks/repository-quality-four-arm-preregistration-v3.json).
-> V2 is immutable and its failed first smoke is documented separately as a
-> [post-hoc incident record](../benchmarks/incidents/repository-quality-four-arm-v2-smoke-aborted-8bf6e6e.json),
-> not as a benchmark result.
+> [`benchmarks/repository-quality-four-arm-preregistration-v4.json`](../benchmarks/repository-quality-four-arm-preregistration-v4.json).
+> V2 and v3 are immutable failed attempts, not benchmark results. V2 has a
+> [post-hoc incident record](../benchmarks/incidents/repository-quality-four-arm-v2-smoke-aborted-8bf6e6e.json).
+> V3 has the exact native [start receipt](../benchmarks/incidents/repository-quality-four-arm-v3-smoke-attempt-start-16213e2.json),
+> [abort receipt](../benchmarks/incidents/repository-quality-four-arm-v3-smoke-abort-16213e2.json),
+> and [incident analysis](../benchmarks/incidents/repository-quality-four-arm-v3-smoke-incident-16213e2.json).
 
 ## Why this experiment is necessary
 
@@ -115,7 +117,7 @@ V2 stopped fail-closed during root generation because the normal DFlash stream
 did not export raw nanosecond phase timings. The engine correctly labeled its
 microsecond conversion `derived_legacy_us`, which the protocol rejected:
 stream elapsed time can include generator suspension and downstream consumer
-work. V3 does not relax that check. DFlash now accumulates disjoint intervals
+work. V3 and v4 do not relax that check. DFlash now accumulates disjoint intervals
 between explicit active-runtime probes: timing stops before each event
 dictionary is built and restarts only after the generator itself resumes.
 Event construction, telemetry serialization, and consumer suspension are not
@@ -125,6 +127,28 @@ before decode timing closes. `elapsed_us` is the separate runtime-phase wall
 interval from immediately before prefill through final-state synchronization;
 it excludes earlier prompt/cache setup and never substitutes for
 `model_total_ns`.
+
+The only v3 smoke completed and bound all eight direct roots, then aborted
+fail-closed in phase `allocation_sealed` before a generation receipt, hidden
+evaluator, hidden outcome, or aggregate existed. Its native abort reports zero
+completed extras; that does not assert whether an in-flight first extra had
+begun. The source-free exception digest matches the committed static invariant
+`observed wall time exceeds the budget without exhaustion`. The strict
+validator was correct: `AgentTurnResult.wall_time_s` included terminal Quality
+refresh/report/bookkeeping, but that post-loop path could cross the deadline
+without recording exhaustion.
+
+V4 changes only that accounting. After terminal Quality refresh, state
+persistence, and telemetry reconciliation, the agent takes one final
+`time.perf_counter` sample. The same sample defines `wall_time_s` and any newly
+crossed wall-limit exhaustion. Only `model_final` becomes `budget_exhausted`;
+`quality_incomplete`, `tool_timeout`, and existing budget terminal reasons keep
+precedence. Assistant text and persisted history are unchanged. The resulting
+trajectory is typed but `root_incomplete`, so a recovery falls back to its root
+instead of malformed telemetry aborting the cohort. Budgets remain exactly 120
+seconds for direct turns and 20 seconds for recovery; no grace was added and
+the strict validator remains fail-closed while now using the same inclusive
+at-or-beyond boundary as the runtime.
 
 An agent receives exactly one active task workspace and the fixed local tool
 surface. Network and MCP access are disabled for this benchmark. Hidden and
@@ -146,7 +170,7 @@ documented, committed protocol revision.
 
 ## Native executable and publication boundary
 
-The v3 smoke runner is the only path authorized to publish this experiment's
+The v4 smoke runner is the only path authorized to publish this experiment's
 result envelope:
 
 ```bash
@@ -161,15 +185,16 @@ uv run --locked python -m experimental.effort.run_repository_quality_pilot \
 
 It accepts no effort, router, seed, prompt, budget, sampler, or hidden-evaluator
 override. Before model loading it requires a clean committed tree and verifies
-the expanded critical-source manifest, v3 and predecessor preregistration
-SHA-256 values, the v2 incident digest, corpus/private-evaluator and
+the expanded critical-source manifest, v4 and predecessor preregistration
+SHA-256 values, both v3 native receipt digests, the v3 incident digest,
+corpus/private-evaluator and
 Quality-profile seals, local model fingerprints, Python/package versions, and
 hardware identity. The private work and output locations must be disjoint from
 source and model roots. Result publication is create-once and refuses to
 overwrite an existing artifact. The model manager is unloaded before the hidden
 evaluator is constructed. Verification runs again after generation and before
 publication. A bare core aggregate produced with an injected test executor is
-not a publishable v3 result; only the native, receipt-bound, source-free
+not a publishable v4 result; only the native, receipt-bound, source-free
 envelope is.
 
 After provenance and destination checks—but before model loading—the runner
@@ -179,16 +204,18 @@ attempt then creates exactly one sibling: `result.json` on success or
 contains only typed phase/state fields, content-free progress counts, and an
 exception-message digest; it excludes paths, prompts, fixture identifiers,
 candidate bytes, tracebacks, and hidden outcomes. Failure before provenance or
-destination acceptance does not claim a scientific attempt. The one-attempt
+destination acceptance does not claim a scientific attempt. If start
+publication reports a failure after installing the exact bytes, the runner
+verifies them and terminalizes with a bound abort before model loading. The one-attempt
 authorization remains a procedural research rule because an operator could
-delete external receipt storage; an abort nevertheless consumes v3 and any
-later attempt requires a committed v4.
+delete external receipt storage; an abort nevertheless consumes v4 and any
+later attempt requires a committed v5.
 
 This protocol revision authorizes only `smoke`. An `all` run needs a later
 wrapper that consumes a valid smoke integrity artifact without consulting its
 quality, route, rescue, regression, or cost outcomes.
 
-## V3 release attestation
+## V3 release and disposition
 
 The final pre-attempt release candidate was checked on 2026-07-19 with the
 locked environment and no model inference:
@@ -204,12 +231,46 @@ uv run --locked ruff format --check <five changed Python files>
 5 files already formatted
 ```
 
-The active preregistration SHA-256 is
+The historical v3 preregistration SHA-256 is
 `d3ddbfa29bc99f2b480797fadf6686cbc200f973e6fa6325805855494d600d3d`;
 the v2 predecessor and post-hoc incident seals are verified by the runner.
 This attestation records a procedural release gate, not a quality, speed, or
-breakthrough result. The native attempt-start receipt will bind the eventual
-clean Git revision and complete 28-file critical-source digest independently.
+breakthrough result. The native v3 start bound Git revision
+`16213e264d38993f8e5b074588d424a199269dbe` and the complete 28-file
+critical-source digest. Its abort receipt is bound to that start by SHA-256.
+V3 produced no hidden evaluation and no aggregate, so its completed roots and
+any unbound in-flight extra cannot be reused regardless of individual validity.
+
+## V4 release attestation
+
+V4 is frozen under preregistration SHA-256
+`ae49deb27e1929c76b032a65ee1515e3a0ac270d78cdb49fa791aa6d9ca93381`.
+The final pre-attempt candidate was checked on 2026-07-19 without model
+inference:
+
+```text
+PYTHONPATH=. uv run --locked pytest -q
+1609 passed, 2 skipped, 1 pre-existing Starlette/httpx deprecation warning
+
+uv run --locked ruff check <seven changed Python files>
+All checks passed
+
+uv run --locked ruff format --check <seven changed Python files>
+7 files already formatted
+```
+
+Because `mio/agent.py` belongs to the transitive HumanEval verifier source
+bundle, the old certificate correctly failed closed after the accounting
+change. The public parity harness was rerun from clean, stable Git revision
+`ca3cbcb2d3693f4e451d42e6d634e1952fcb1d7d`: all `164/164` canonical
+solutions passed. The new source-free
+[certificate](../benchmarks/results/humaneval-verifier-parity-ca3cbcb.json)
+has SHA-256
+`43c36131409f8edb132ab2fada88d17bcf9e203c3d6dfacadca1d70f0e8e4c6b`.
+JSON parsing, source-free/privacy scans, exact v3 receipt bindings, the 34-file
+manifest, and `git diff --check` also pass. These are integrity attestations,
+not quality, speed, or breakthrough results. The v4 native start will
+independently bind the eventual clean Git revision and complete source digest.
 
 ## Allocation-matched static control
 

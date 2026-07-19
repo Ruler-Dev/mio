@@ -1336,8 +1336,8 @@ def _validate_result_telemetry(
         raise RepositoryPilotProtocolError("model_final contradicts a budget exhaustion")
     if terminal_reason in {"budget_exhausted", "budget_finalization"} and not budget_exhausted:
         raise RepositoryPilotProtocolError("budget terminal has no exhaustion evidence")
-    if budget.max_wall_seconds is not None and wall_seconds > budget.max_wall_seconds and not budget_exhausted:
-        raise RepositoryPilotProtocolError("observed wall time exceeds the budget without exhaustion")
+    if budget.max_wall_seconds is not None and wall_seconds >= budget.max_wall_seconds and not budget_exhausted:
+        raise RepositoryPilotProtocolError("observed wall time reaches or exceeds the budget without exhaustion")
     telemetry_complete = _strict_bool(
         _required_attr(result, "tool_telemetry_complete", "agent result"),
         "tool telemetry complete",

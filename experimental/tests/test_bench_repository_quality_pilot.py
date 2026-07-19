@@ -464,7 +464,7 @@ def test_execution_budgets_are_exact_frozen_and_stage_owned() -> None:
 def test_runtime_and_scope_constants_align_with_preregistration() -> None:
     repository = Path(__file__).resolve().parents[2]
     preregistration = json.loads(
-        (repository / "benchmarks" / "repository-quality-four-arm-preregistration-v3.json").read_text()
+        (repository / "benchmarks" / "repository-quality-four-arm-preregistration-v4.json").read_text()
     )
 
     assert tuple(preregistration["runtime"]["forbidden_environment_overrides"]) == (FORBIDDEN_ENVIRONMENT_OVERRIDES)
@@ -484,7 +484,7 @@ def test_runtime_and_scope_constants_align_with_preregistration() -> None:
 def test_recovery_prompt_is_byte_identical_to_preregistration() -> None:
     repository = Path(__file__).resolve().parents[2]
     preregistration = json.loads(
-        (repository / "benchmarks" / "repository-quality-four-arm-preregistration-v3.json").read_text()
+        (repository / "benchmarks" / "repository-quality-four-arm-preregistration-v4.json").read_text()
     )
     assert RECOVERY_PROMPT == preregistration["budgets"]["extra_prompt_template"]
     assert RECOVERY_PROMPT.count("{instruction}") == 1
@@ -1013,7 +1013,7 @@ def test_public_state_ignores_text_hashes_and_hidden_fields(tmp_path: Path) -> N
     encoded = public_state_json(public)
     preregistration = json.loads(
         (
-            Path(__file__).resolve().parents[2] / "benchmarks" / "repository-quality-four-arm-preregistration-v3.json"
+            Path(__file__).resolve().parents[2] / "benchmarks" / "repository-quality-four-arm-preregistration-v4.json"
         ).read_text()
     )
     payload = json.loads(encoded)
@@ -1406,6 +1406,54 @@ def test_public_extraction_rejects_malformed_or_contradictory_telemetry(
             scope_contract=contract,
             scope_verdict=verdict,
         )
+
+
+@pytest.mark.parametrize("wall_time_s", (120.0, 120.25))
+def test_public_extraction_rejects_unattested_wall_budget_overrun(
+    tmp_path: Path,
+    wall_time_s: float,
+) -> None:
+    stage, contract, verdict = _quality_stage(tmp_path)
+    result = stage.result
+    assert isinstance(result, AgentTurnResult)
+    stage.result = replace(result, wall_time_s=wall_time_s)
+
+    with pytest.raises(
+        RepositoryPilotProtocolError,
+        match="wall time reaches or exceeds the budget without exhaustion",
+    ):
+        extract_public_repository_state(
+            stage,
+            scope_contract=contract,
+            scope_verdict=verdict,
+        )
+
+
+@pytest.mark.parametrize("wall_time_s", (120.0, 120.25))
+def test_public_extraction_accepts_attested_wall_overrun_as_incomplete(
+    tmp_path: Path,
+    wall_time_s: float,
+) -> None:
+    stage, contract, verdict = _quality_stage(tmp_path)
+    result = stage.result
+    assert isinstance(result, AgentTurnResult)
+    stage.result = replace(
+        result,
+        wall_time_s=wall_time_s,
+        budget_exhaustion="wall time limit 120s reached",
+        terminal_reason="budget_exhausted",
+    )
+
+    public = extract_public_repository_state(
+        stage,
+        scope_contract=contract,
+        scope_verdict=verdict,
+    )
+
+    assert public.wall_seconds == pytest.approx(wall_time_s)
+    assert public.budget_exhausted is True
+    assert public.terminal_reason == "budget_exhausted"
+    assert public.state_label == "root_incomplete"
 
 
 def test_public_selector_requires_strict_admissible_recovery() -> None:

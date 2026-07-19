@@ -104,22 +104,12 @@ OFFICIAL_FULL_MANIFEST_SHA256 = "8a99055becc53543c0553b340b5dc1c3a964f37e4b7c2f8
 OFFICIAL_CALIBRATION_MANIFEST_SHA256 = "a3e588c4f625d4a7f911ce108eca03d886cd5cafd86f9452ae2f13ba8243fefb"
 OFFICIAL_HELDOUT_MANIFEST_SHA256 = "cfbcdb420dd9d269b184dbb8f2c97d9c0994270c6828757fc0d30270e8b2c3ef"
 VERIFIER_PARITY_CERTIFICATE_SCHEMA = "mio.humaneval-verifier-parity.v3"
-VERIFIER_PARITY_CERTIFICATE_RELATIVE_PATH = (
-    "benchmarks/results/humaneval-verifier-parity-c7a35cb.json"
-)
-VERIFIER_PARITY_CERTIFICATE_PATH = (
-    Path(__file__).resolve().parents[2] / VERIFIER_PARITY_CERTIFICATE_RELATIVE_PATH
-)
-VERIFIER_PARITY_CERTIFICATE_SHA256 = (
-    "b5c237219fdf0de24b115f1e324f49bc6b66c6c0ca69edff3155df8ac029ed65"
-)
+VERIFIER_PARITY_CERTIFICATE_RELATIVE_PATH = "benchmarks/results/humaneval-verifier-parity-ca3cbcb.json"
+VERIFIER_PARITY_CERTIFICATE_PATH = Path(__file__).resolve().parents[2] / VERIFIER_PARITY_CERTIFICATE_RELATIVE_PATH
+VERIFIER_PARITY_CERTIFICATE_SHA256 = "43c36131409f8edb132ab2fada88d17bcf9e203c3d6dfacadca1d70f0e8e4c6b"
 VERIFIER_PARITY_TIMEOUT_SECONDS = 10.0
-VERIFIER_PARITY_CORPUS_MANIFEST_SHA256 = (
-    "8a99055becc53543c0553b340b5dc1c3a964f37e4b7c2f8d581dca73de92d79d"
-)
-VERIFIER_PARITY_REFERENCE_MANIFEST_SHA256 = (
-    "f88802dcce08968c3e76fa214334b9f08b8226144dd5dc50b5dbc4b321234664"
-)
+VERIFIER_PARITY_CORPUS_MANIFEST_SHA256 = "8a99055becc53543c0553b340b5dc1c3a964f37e4b7c2f8d581dca73de92d79d"
+VERIFIER_PARITY_REFERENCE_MANIFEST_SHA256 = "f88802dcce08968c3e76fa214334b9f08b8226144dd5dc50b5dbc4b321234664"
 VERIFIER_PARITY_SOURCE_PATHS = frozenset(
     {
         "experimental/effort/humaneval.py",
@@ -205,11 +195,7 @@ def _file_sha256(path: Path) -> str:
 
 
 def _is_sha256(value: Any) -> bool:
-    return (
-        isinstance(value, str)
-        and len(value) == 64
-        and all(character in "0123456789abcdef" for character in value)
-    )
+    return isinstance(value, str) and len(value) == 64 and all(character in "0123456789abcdef" for character in value)
 
 
 def _read_regular_file_bounded(path: Path, *, max_bytes: int) -> bytes:
@@ -293,13 +279,11 @@ def verifier_parity_certificate_identity(
         or not isinstance(manifest, Mapping)
         or manifest.get("tasks") != EXPECTED_HUMANEVAL_TASKS
         or manifest.get("task_ids") != expected_task_ids
-        or manifest.get("manifest_sha256")
-        != VERIFIER_PARITY_CORPUS_MANIFEST_SHA256
+        or manifest.get("manifest_sha256") != VERIFIER_PARITY_CORPUS_MANIFEST_SHA256
         or not isinstance(reference_manifest, Mapping)
         or reference_manifest.get("tasks") != EXPECTED_HUMANEVAL_TASKS
         or reference_manifest.get("task_ids") != expected_task_ids
-        or reference_manifest.get("manifest_sha256")
-        != VERIFIER_PARITY_REFERENCE_MANIFEST_SHA256
+        or reference_manifest.get("manifest_sha256") != VERIFIER_PARITY_REFERENCE_MANIFEST_SHA256
     ):
         raise BenchmarkProtocolError("verifier parity certificate corpus identity mismatch")
 
@@ -311,8 +295,7 @@ def verifier_parity_certificate_identity(
         verifier.get("callable") != "experimental.effort.humaneval.verify_candidate"
         or verifier.get("source_path") != "experimental/effort/humaneval.py"
         or verifier.get("source_hash_scope") != "complete_module_files"
-        or verifier.get("timeout_seconds_per_task")
-        != VERIFIER_PARITY_TIMEOUT_SECONDS
+        or verifier.get("timeout_seconds_per_task") != VERIFIER_PARITY_TIMEOUT_SECONDS
         or not isinstance(source_files, Mapping)
         or set(source_files) != VERIFIER_PARITY_SOURCE_PATHS
         or any(not _is_sha256(digest) for digest in source_files.values())
@@ -324,19 +307,12 @@ def verifier_parity_certificate_identity(
     try:
         for relative_path, certified_digest in source_files.items():
             source_path = (repository_root / str(relative_path)).resolve(strict=True)
-            if (
-                repository_root not in source_path.parents
-                or _file_sha256(source_path) != certified_digest
-            ):
-                raise BenchmarkProtocolError(
-                    "verifier parity certificate source bundle is stale"
-                )
+            if repository_root not in source_path.parents or _file_sha256(source_path) != certified_digest:
+                raise BenchmarkProtocolError("verifier parity certificate source bundle is stale")
     except BenchmarkProtocolError:
         raise
     except (OSError, RuntimeError) as exc:
-        raise BenchmarkProtocolError(
-            "verifier parity certificate source bundle cannot be verified"
-        ) from exc
+        raise BenchmarkProtocolError("verifier parity certificate source bundle cannot be verified") from exc
 
     git = report.get("git")
     if not isinstance(git, Mapping):
@@ -543,13 +519,8 @@ class CalibrationArtifact:
             settings = CalibrationConfig(**dict(config))
         except (TypeError, ValueError) as exc:
             raise BenchmarkProtocolError("calibration artifact config is invalid") from exc
-        if (
-            settings.hidden_evaluator_timeout_seconds
-            != parity_identity["timeout_seconds_per_task"]
-        ):
-            raise BenchmarkProtocolError(
-                "calibration timeout does not match verifier parity certificate"
-            )
+        if settings.hidden_evaluator_timeout_seconds != parity_identity["timeout_seconds_per_task"]:
+            raise BenchmarkProtocolError("calibration timeout does not match verifier parity certificate")
         if self.provenance.policy_sha256 != calibration_policy_sha256(settings):
             raise BenchmarkProtocolError("calibration policy provenance mismatch")
         static_hashes = expected_static_provenance_hashes()
@@ -602,12 +573,8 @@ class CalibrationArtifact:
         if not isinstance(excluded, list):
             raise BenchmarkProtocolError("excluded strata must be a list")
         try:
-            calibrator = FrozenUncertaintyCalibrator.from_mapping(
-                value["uncertainty_calibrator"]
-            )
-            transition_model = frozen_transition_model_from_mapping(
-                value["transition_model"]
-            )
+            calibrator = FrozenUncertaintyCalibrator.from_mapping(value["uncertainty_calibrator"])
+            transition_model = frozen_transition_model_from_mapping(value["transition_model"])
         except (TypeError, ValueError) as exc:
             raise BenchmarkProtocolError("invalid frozen calibration payload") from exc
         return cls(
@@ -617,9 +584,7 @@ class CalibrationArtifact:
             provenance=_provenance_from_mapping(value["provenance"]),
             calibration_manifest=dict(value["calibration_manifest"]),
             protocol=dict(value["protocol"]),
-            excluded_strata=tuple(
-                ExcludedTransitionStratum.from_mapping(row) for row in excluded
-            ),
+            excluded_strata=tuple(ExcludedTransitionStratum.from_mapping(row) for row in excluded),
             summary=dict(value["summary"]),
         )
 
@@ -793,9 +758,7 @@ def _generate_calibration_exploration(
                 profile.max_extra_output_tokens,
                 profile.max_output_tokens_per_candidate,
             )
-            deadline = direct_candidate.observed_e2e_seconds * (
-                profile.max_latency_ratio - 1.0
-            )
+            deadline = direct_candidate.observed_e2e_seconds * (profile.max_latency_ratio - 1.0)
             for action in profile.allowed_actions:
                 feedback = PublicGenerationFeedback(
                     action=action,
@@ -812,9 +775,7 @@ def _generate_calibration_exploration(
                 if not isinstance(generated, GeneratedCandidate):
                     raise TypeError("generator must return GeneratedCandidate")
                 if generated.metrics.output_tokens > token_allocation:
-                    raise BenchmarkProtocolError(
-                        "extra calibration candidate exceeded its token allocation"
-                    )
+                    raise BenchmarkProtocolError("extra calibration candidate exceeded its token allocation")
                 validation = public_validator(public, generated.completion)
                 if not isinstance(validation, PublicValidationResult):
                     raise TypeError("public_validator must return PublicValidationResult")
@@ -859,11 +820,7 @@ def _best_public_candidate(
 
     def rank(candidate: _ExplorationCandidate) -> tuple[float, ...]:
         raw_uncertainty = candidate.generated.raw_uncertainty
-        uncertainty = (
-            calibrator.transform(raw_uncertainty)
-            if raw_uncertainty is not None
-            else 1.0
-        )
+        uncertainty = calibrator.transform(raw_uncertainty) if raw_uncertainty is not None else 1.0
         return (
             float(validation_rank[candidate.validation.outcome]),
             -float(uncertainty),
@@ -922,9 +879,7 @@ def filter_underpowered_transition_observations(
         rows = grouped.get((context, trigger, depth, action), [])
         clusters = {row.task_cluster_id for row in rows}
         if len(clusters) != len(rows):
-            raise BenchmarkProtocolError(
-                f"duplicate task cluster in {context}/{trigger.value}/d{depth}/{action.value}"
-            )
+            raise BenchmarkProtocolError(f"duplicate task cluster in {context}/{trigger.value}/d{depth}/{action.value}")
         if len(clusters) < min_task_clusters:
             excluded.append(
                 ExcludedTransitionStratum(
@@ -953,18 +908,14 @@ def _pinned_split_proof(
 ) -> dict[str, Any]:
     full = tuple(cases)
     if len(full) != EXPECTED_HUMANEVAL_TASKS:
-        raise BenchmarkProtocolError(
-            f"pinned HumanEval corpus must contain {EXPECTED_HUMANEVAL_TASKS} tasks"
-        )
+        raise BenchmarkProtocolError(f"pinned HumanEval corpus must contain {EXPECTED_HUMANEVAL_TASKS} tasks")
     if len({case.task_id for case in full}) != len(full):
         raise BenchmarkProtocolError("pinned HumanEval corpus has duplicate task ids")
     calibration = split_humaneval(full, "calibration")
     heldout = split_humaneval(full, "heldout")
     calibration_ids = {case.task_id for case in calibration}
     heldout_ids = {case.task_id for case in heldout}
-    if calibration_ids & heldout_ids or calibration_ids | heldout_ids != {
-        case.task_id for case in full
-    }:
+    if calibration_ids & heldout_ids or calibration_ids | heldout_ids != {case.task_id for case in full}:
         raise BenchmarkProtocolError("pinned HumanEval split is not disjoint and exhaustive")
     proof = {
         "verified": True,
@@ -980,9 +931,7 @@ def _pinned_split_proof(
     }
     for split_name, digest in expected.items():
         if proof[split_name]["manifest_sha256"] != digest:
-            raise BenchmarkProtocolError(
-                f"{split_name} cases do not match the official pinned manifest"
-            )
+            raise BenchmarkProtocolError(f"{split_name} cases do not match the official pinned manifest")
     return proof
 
 
@@ -994,9 +943,7 @@ def calibrate_markov_humaneval(
     provenance: RunProvenance,
     generator: CandidateGenerator,
     hidden_evaluator: CalibrationHiddenEvaluator,
-    public_validator: Callable[
-        [PublicHumanEvalCase, str], PublicValidationResult
-    ] = validate_candidate_public,
+    public_validator: Callable[[PublicHumanEvalCase, str], PublicValidationResult] = validate_candidate_public,
     config: CalibrationConfig | None = None,
 ) -> CalibrationArtifact:
     """Fit frozen effort artifacts on the exact 32-task calibration split.
@@ -1008,21 +955,14 @@ def calibrate_markov_humaneval(
     parity_identity = verifier_parity_certificate_identity()
     selected = tuple(cases)
     settings = config or CalibrationConfig()
-    if (
-        settings.hidden_evaluator_timeout_seconds
-        != parity_identity["timeout_seconds_per_task"]
-    ):
-        raise BenchmarkProtocolError(
-            "calibration timeout does not match verifier parity certificate"
-        )
+    if settings.hidden_evaluator_timeout_seconds != parity_identity["timeout_seconds_per_task"]:
+        raise BenchmarkProtocolError("calibration timeout does not match verifier parity certificate")
     split_proof = _pinned_split_proof(pinned_corpus)
     expected_calibration = split_humaneval(tuple(pinned_corpus), "calibration")
     if selected != expected_calibration:
         raise BenchmarkProtocolError("calibration cases do not match the pinned split exactly")
     if len(selected) != CALIBRATION_TASKS:
-        raise BenchmarkProtocolError(
-            f"calibration requires exactly {CALIBRATION_TASKS} pinned-split tasks"
-        )
+        raise BenchmarkProtocolError(f"calibration requires exactly {CALIBRATION_TASKS} pinned-split tasks")
     if len({case.task_id for case in selected}) != len(selected):
         raise BenchmarkProtocolError("calibration task ids must be unique")
     expected_split_identity = f"{SPLIT_SALT}:calibration:{CALIBRATION_TASKS}"
@@ -1078,9 +1018,7 @@ def calibrate_markov_humaneval(
         direct = by_id[0]
         raw_uncertainty = direct.generated.raw_uncertainty
         if raw_uncertainty is None:
-            raise BenchmarkProtocolError(
-                f"direct candidate {exploration.case.task_id} has no raw uncertainty"
-            )
+            raise BenchmarkProtocolError(f"direct candidate {exploration.case.task_id} has no raw uncertainty")
         direct_hidden = hidden[(exploration.case.task_id, 0)]
         uncertainty_rows.append(
             UncertaintyCalibrationObservation(
@@ -1153,14 +1091,10 @@ def calibrate_markov_humaneval(
         expected_keys=(key for key in expected_keys if key[2] == 1),
         min_task_clusters=settings.min_task_clusters,
     )
-    deeper_groups: dict[
-        tuple[str, Trigger, int, ControllerAction], set[str]
-    ] = defaultdict(set)
+    deeper_groups: dict[tuple[str, Trigger, int, ControllerAction], set[str]] = defaultdict(set)
     for row in transition_rows:
         if row.depth > 1:
-            deeper_groups[
-                (row.context_bucket, row.trigger, row.depth, row.action)
-            ].add(row.task_cluster_id)
+            deeper_groups[(row.context_bucket, row.trigger, row.depth, row.action)].add(row.task_cluster_id)
     structural = tuple(
         ExcludedTransitionStratum(
             context_bucket=context,
@@ -1189,9 +1123,7 @@ def calibrate_markov_humaneval(
             list[TransitionCalibrationObservation],
         ] = defaultdict(list)
         for row in included:
-            included_by_key[
-                (row.context_bucket, row.trigger, row.depth, row.action)
-            ].append(row)
+            included_by_key[(row.context_bucket, row.trigger, row.depth, row.action)].append(row)
         transition_model = FrozenTransitionModel(
             identity,
             (
@@ -1250,13 +1182,8 @@ def calibrate_markov_humaneval(
             "diagnostic_only: controller state key omits action history, so depth>1 "
             "behavior-policy estimates are not published"
         ),
-        "profile_contexts": {
-            tier.value: _profile_context(settings.context_bucket, tier)
-            for tier in TIERS[1:]
-        },
-        "profiles": {
-            tier.value: asdict(EFFORT_PROFILES[tier]) for tier in TIERS
-        },
+        "profile_contexts": {tier.value: _profile_context(settings.context_bucket, tier) for tier in TIERS[1:]},
+        "profiles": {tier.value: asdict(EFFORT_PROFILES[tier]) for tier in TIERS},
         "cost_envelope": "maximum_observed_task_cost_per_stratum",
         "config": asdict(settings),
     }
@@ -1266,9 +1193,7 @@ def calibrate_markov_humaneval(
         "hidden_evaluations": hidden_calls,
         "uncertainty_observations": len(uncertainty_rows),
         "transition_observations_observed": len(transition_rows),
-        "transition_observations_state_aliasing_excluded": sum(
-            row.depth > 1 for row in transition_rows
-        ),
+        "transition_observations_state_aliasing_excluded": sum(row.depth > 1 for row in transition_rows),
         "transition_observations_published": len(included),
         "transition_strata_published": len(transition_model.estimates),
         "transition_strata_excluded": len(excluded),
@@ -1307,11 +1232,7 @@ def _feedback_cache_key(
         feedback.validator_feedback,
         feedback.max_output_tokens,
         feedback.max_additional_e2e_seconds,
-        (
-            None
-            if feedback.action is ControllerAction.GENERATE_DIRECT
-            else feedback.seed
-        ),
+        (None if feedback.action is ControllerAction.GENERATE_DIRECT else feedback.seed),
     )
 
 
@@ -1320,9 +1241,7 @@ class MemoizingDirectGenerator:
 
     def __init__(self, generator: CandidateGenerator, *, deterministic: bool) -> None:
         if not deterministic:
-            raise BenchmarkProtocolError(
-                "paired direct sharing requires a deterministic generator"
-            )
+            raise BenchmarkProtocolError("paired direct sharing requires a deterministic generator")
         self._generator = generator
         self._cache: dict[tuple[Any, ...], GeneratedCandidate] = {}
         self._timing: dict[tuple[Any, ...], dict[str, Any]] = {}
@@ -1427,18 +1346,14 @@ def _serialize_run(
                 "parent_id": trace.parent_id,
                 "action": trace.action.value,
                 "completion": trace.completion,
-                "completion_sha256": hashlib.sha256(
-                    trace.completion.encode("utf-8", errors="replace")
-                ).hexdigest(),
+                "completion_sha256": hashlib.sha256(trace.completion.encode("utf-8", errors="replace")).hexdigest(),
                 "generation_feedback": {
                     "seed": trace.generation_feedback.seed,
                     "parent_node_id": trace.generation_feedback.parent_node_id,
                     "validator_status": trace.generation_feedback.validator_status,
                     "validator_feedback": trace.generation_feedback.validator_feedback,
                     "max_output_tokens": trace.generation_feedback.max_output_tokens,
-                    "max_additional_e2e_seconds": (
-                        trace.generation_feedback.max_additional_e2e_seconds
-                    ),
+                    "max_additional_e2e_seconds": (trace.generation_feedback.max_additional_e2e_seconds),
                 },
                 "public_validation": {
                     "outcome": trace.public_validation.outcome.value,
@@ -1464,12 +1379,8 @@ def _serialize_run(
                 "generation_seconds": metrics.total_seconds,
                 "controller_seconds": trace.controller_seconds,
                 "runtime_e2e_seconds": node_e2e,
-                "prefill_tokens_per_second": _finite_rate(
-                    metrics.prompt_tokens, metrics.prefill_seconds
-                ),
-                "decode_tokens_per_second": _finite_rate(
-                    metrics.timed_decode_tokens, metrics.decode_seconds
-                ),
+                "prefill_tokens_per_second": _finite_rate(metrics.prompt_tokens, metrics.prefill_seconds),
+                "decode_tokens_per_second": _finite_rate(metrics.timed_decode_tokens, metrics.decode_seconds),
                 "allocated_output_tokens": trace.allocated_output_tokens,
                 "allocated_e2e_seconds": trace.allocated_e2e_seconds,
                 "deadline_exceeded": trace.deadline_exceeded,
@@ -1486,9 +1397,7 @@ def _serialize_run(
         raise BenchmarkProtocolError("evaluation runtime E2E latency must be positive")
     prompt_tokens = sum(node.generation_metrics.prompt_tokens for node in run.tree)
     output_tokens = sum(node.generation_metrics.output_tokens for node in run.tree)
-    timed_decode_tokens = sum(
-        node.generation_metrics.timed_decode_tokens for node in run.tree
-    )
+    timed_decode_tokens = sum(node.generation_metrics.timed_decode_tokens for node in run.tree)
     prefill_seconds = sum(node.generation_metrics.prefill_seconds for node in run.tree)
     decode_seconds = sum(node.generation_metrics.decode_seconds for node in run.tree)
     return {
@@ -1496,9 +1405,7 @@ def _serialize_run(
         "terminal_action": run.controller_state.terminal_action.value,
         "terminal_reason": run.controller_state.terminal_reason,
         "selected_node_id": run.controller_state.selected_node_id,
-        "terminal_output_sha256": hashlib.sha256(
-            run.terminal_output.encode("utf-8", errors="replace")
-        ).hexdigest(),
+        "terminal_output_sha256": hashlib.sha256(run.terminal_output.encode("utf-8", errors="replace")).hexdigest(),
         "hidden_terminal": {
             "passed": run.hidden_evaluation.passed,
             "score": run.hidden_evaluation.score,
@@ -1520,9 +1427,7 @@ def _serialize_run(
             "runtime_e2e_seconds": runtime_e2e,
             "benchmark_e2e_seconds": runtime_e2e + run.hidden_evaluation.elapsed_seconds,
             "prefill_tokens_per_second": _finite_rate(prompt_tokens, prefill_seconds),
-            "decode_tokens_per_second": _finite_rate(
-                timed_decode_tokens, decode_seconds
-            ),
+            "decode_tokens_per_second": _finite_rate(timed_decode_tokens, decode_seconds),
             "deadline_violations": len(run.deadline_overshoot_node_ids),
             "deadline_overshoot_node_ids": list(run.deadline_overshoot_node_ids),
         },
@@ -1563,9 +1468,7 @@ def evaluate_markov_humaneval(
     generator: CandidateGenerator,
     hidden_evaluator: CalibrationHiddenEvaluator,
     generator_deterministic: bool,
-    public_validator: Callable[
-        [PublicHumanEvalCase, str], PublicValidationResult
-    ] = validate_candidate_public,
+    public_validator: Callable[[PublicHumanEvalCase, str], PublicValidationResult] = validate_candidate_public,
     initial_max_output_tokens: int = 256,
     context_bucket: str = DEFAULT_CONTEXT_BUCKET,
     bootstrap_samples: int = 10_000,
@@ -1577,13 +1480,8 @@ def evaluate_markov_humaneval(
     parity_identity = verifier_parity_certificate_identity()
     if artifact.protocol.get("verifier_parity_certificate") != parity_identity:
         raise BenchmarkProtocolError("evaluation verifier parity certificate mismatch")
-    if (
-        hidden_evaluator_timeout_seconds
-        != parity_identity["timeout_seconds_per_task"]
-    ):
-        raise BenchmarkProtocolError(
-            "evaluation timeout does not match verifier parity certificate"
-        )
+    if hidden_evaluator_timeout_seconds != parity_identity["timeout_seconds_per_task"]:
+        raise BenchmarkProtocolError("evaluation timeout does not match verifier parity certificate")
     selected = tuple(cases)
     pinned = tuple(pinned_corpus)
     split_proof = _pinned_split_proof(pinned)
@@ -1599,9 +1497,7 @@ def evaluate_markov_humaneval(
         raise BenchmarkProtocolError("full evaluation does not match the pinned split manifest")
     if artifact.calibration_manifest != split_proof["calibration"]:
         raise BenchmarkProtocolError("artifact calibration split differs from pinned corpus")
-    if split == "heldout" and set(artifact.calibration_manifest["task_ids"]) & {
-        case.task_id for case in selected
-    }:
+    if split == "heldout" and set(artifact.calibration_manifest["task_ids"]) & {case.task_id for case in selected}:
         raise BenchmarkProtocolError("heldout evaluation overlaps calibration tasks")
     if artifact.identity != expected_identity:
         raise BenchmarkProtocolError("calibration artifact identity mismatch")
@@ -1618,10 +1514,7 @@ def evaluate_markov_humaneval(
         raise BenchmarkProtocolError("calibration/evaluation direct token budget mismatch")
     if artifact_config.get("context_bucket") != context_bucket:
         raise BenchmarkProtocolError("calibration/evaluation context bucket mismatch")
-    if (
-        artifact_config.get("hidden_evaluator_timeout_seconds")
-        != hidden_evaluator_timeout_seconds
-    ):
+    if artifact_config.get("hidden_evaluator_timeout_seconds") != hidden_evaluator_timeout_seconds:
         raise BenchmarkProtocolError("calibration/evaluation hidden timeout mismatch")
     manifest = corpus_manifest(selected)
     if provenance.task_manifest_sha256 != manifest["manifest_sha256"]:
@@ -1683,13 +1576,9 @@ def evaluate_markov_humaneval(
 
     expected_direct_cache_hits = len(selected) * (len(TIERS) - 1)
     if memoized.direct_cache_hits != expected_direct_cache_hits:
-        raise BenchmarkProtocolError(
-            "paired tiers did not share exactly one deterministic direct generation per task"
-        )
+        raise BenchmarkProtocolError("paired tiers did not share exactly one deterministic direct generation per task")
 
-    tier_rows_by_task: dict[str, dict[str, Any]] = {
-        case.task_id: {} for case in selected
-    }
+    tier_rows_by_task: dict[str, dict[str, Any]] = {case.task_id: {} for case in selected}
     # Hidden verification can contain timeout/process nondeterminism.  Two
     # tiers that selected the exact same output for the same task therefore
     # must consume one shared verdict, not independently sampled labels.  The
@@ -1729,9 +1618,7 @@ def evaluate_markov_humaneval(
         )
 
     for case in selected:
-        task_rows.append(
-            {"task_id": case.task_id, "tiers": tier_rows_by_task[case.task_id]}
-        )
+        task_rows.append({"task_id": case.task_id, "tiers": tier_rows_by_task[case.task_id]})
 
     gate_policy = PreregisteredGatePolicy(planned_comparisons=4)
     claim_failures = _claim_failures(
@@ -1744,9 +1631,7 @@ def evaluate_markov_humaneval(
     comparisons: dict[str, Any] = {}
     gates: dict[str, Any] = {}
     for comparison_index, tier in enumerate(TIERS[1:], start=1):
-        selected_rows = [
-            row for row in statistics_rows if row.strategy in {EffortTier.LOW.value, tier.value}
-        ]
+        selected_rows = [row for row in statistics_rows if row.strategy in {EffortTier.LOW.value, tier.value}]
         statistics = analyze_paired_rows(
             selected_rows,
             baseline_strategy=EffortTier.LOW.value,
@@ -1787,9 +1672,7 @@ def evaluate_markov_humaneval(
         },
         "artifact_sha256": _canonical_sha256(artifact_mapping),
         "calibration_identity": _identity_to_mapping(expected_identity),
-        "calibration_artifact_provenance": _provenance_to_mapping(
-            artifact.provenance
-        ),
+        "calibration_artifact_provenance": _provenance_to_mapping(artifact.provenance),
         "evaluation_manifest": manifest,
         "pinned_split_proof": split_proof,
         "verifier_parity_certificate": parity_identity,
@@ -1894,10 +1777,7 @@ def _runtime_identity(
         sampler=_canonical_sha256(asdict(settings)),
         corpus=f"HumanEval@{HUMANEVAL_REVISION}:{HUMANEVAL_SHA256}",
         split=f"{SPLIT_SALT}:calibration:{CALIBRATION_TASKS}",
-        backend=(
-            f"mlx={_package_version('mlx')};mlx-lm={_package_version('mlx-lm')};"
-            f"timing={TIMING_METHOD}"
-        ),
+        backend=(f"mlx={_package_version('mlx')};mlx-lm={_package_version('mlx-lm')};timing={TIMING_METHOD}"),
     )
 
 
