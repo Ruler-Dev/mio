@@ -8,8 +8,10 @@ The protocol has a hard channel boundary:
   are not run until generation for *all* calibration tasks is complete.
 * ``evaluate`` loads the frozen calibration artifact, verifies its exact
   experiment identity, and runs the real :class:`MarkovTreeEffortController`
-  for ``low``, ``medium``, ``high``, ``xhigh``, and ``ultra``.  The hidden
-  evaluator is called exactly once after terminal selection for each strategy.
+  for ``low``, ``medium``, ``high``, ``xhigh``, and ``ultra``.  After every
+  strategy has terminally selected, the hidden evaluator is called once per
+  distinct task/terminal-output artifact and its immutable verdict is reused
+  by tiers that selected the same artifact.
 
 Calibration outcomes never appear in prompts or request-time state.  A
 transition's quality label is net terminal change (+1 rescue, -1 regression,
@@ -93,10 +95,11 @@ from experimental.markov_effort_controller import (
 
 
 CALIBRATION_ARTIFACT_SCHEMA = "mio.markov-effort-calibration.v1"
-EVALUATION_SCHEMA = "mio.markov-effort-humaneval-evaluation.v1"
+EVALUATION_SCHEMA = "mio.markov-effort-humaneval-evaluation.v2"
 PROTOCOL_REVISION = "mio-markov-humaneval-two-phase-v2"
 EXPECTED_HUMANEVAL_TASKS = 164
 EXPECTED_HELDOUT_TASKS = EXPECTED_HUMANEVAL_TASKS - CALIBRATION_TASKS
+HIDDEN_TERMINAL_EVALUATION_UNIT = "task_id_and_exact_terminal_output"
 OFFICIAL_FULL_MANIFEST_SHA256 = "8a99055becc53543c0553b340b5dc1c3a964f37e4b7c2f8d581dca73de92d79d"
 OFFICIAL_CALIBRATION_MANIFEST_SHA256 = "a3e588c4f625d4a7f911ce108eca03d886cd5cafd86f9452ae2f13ba8243fefb"
 OFFICIAL_HELDOUT_MANIFEST_SHA256 = "cfbcdb420dd9d269b184dbb8f2c97d9c0994270c6828757fc0d30270e8b2c3ef"
@@ -157,6 +160,8 @@ PREREGISTRATION = {
         "frozen_transition_bounds",
     ],
     "evaluation_only": ["hidden_tests", "hidden_pass_fail", "aggregate_accuracy"],
+    "hidden_terminal_evaluation_unit": HIDDEN_TERMINAL_EVALUATION_UNIT,
+    "reuse_hidden_terminal_verdict_across_tiers": True,
     "verifier_parity_certificate_required": True,
 }
 
@@ -1685,12 +1690,25 @@ def evaluate_markov_humaneval(
     tier_rows_by_task: dict[str, dict[str, Any]] = {
         case.task_id: {} for case in selected
     }
+    # Hidden verification can contain timeout/process nondeterminism.  Two
+    # tiers that selected the exact same output for the same task therefore
+    # must consume one shared verdict, not independently sampled labels.  The
+    # exact completion remains an in-memory key only; no cache key or content
+    # is added to the source-free summary.
+    hidden_verdicts: dict[tuple[str, str], HiddenEvaluationResult] = {}
     hidden_calls = 0
+    hidden_verdict_reuses = 0
     for case, tier, deferred_run in pending:
-        hidden_result = hidden_evaluator(case, deferred_run.terminal_output)
-        if not isinstance(hidden_result, HiddenEvaluationResult):
-            raise TypeError("hidden_evaluator must return HiddenEvaluationResult")
-        hidden_calls += 1
+        artifact_key = (case.task_id, deferred_run.terminal_output)
+        if artifact_key in hidden_verdicts:
+            hidden_result = hidden_verdicts[artifact_key]
+            hidden_verdict_reuses += 1
+        else:
+            hidden_result = hidden_evaluator(case, deferred_run.terminal_output)
+            if not isinstance(hidden_result, HiddenEvaluationResult):
+                raise TypeError("hidden_evaluator must return HiddenEvaluationResult")
+            hidden_verdicts[artifact_key] = hidden_result
+            hidden_calls += 1
         run = replace(
             deferred_run,
             hidden_terminal_score=hidden_result.score,
@@ -1761,6 +1779,12 @@ def evaluate_markov_humaneval(
         "limited": limited,
         "tiers": [tier.value for tier in TIERS],
         "planned_comparisons": 4,
+        "hidden_evaluation_policy": {
+            "unit": HIDDEN_TERMINAL_EVALUATION_UNIT,
+            "verdict_reused_across_tiers": True,
+            "all_strategy_generation_completed_before_evaluation": True,
+            "serialized_cache_keys": False,
+        },
         "artifact_sha256": _canonical_sha256(artifact_mapping),
         "calibration_identity": _identity_to_mapping(expected_identity),
         "calibration_artifact_provenance": _provenance_to_mapping(
@@ -1779,6 +1803,8 @@ def evaluate_markov_humaneval(
             "tasks": len(selected),
             "strategy_runs": len(selected) * len(TIERS),
             "hidden_terminal_evaluations": hidden_calls,
+            "hidden_terminal_verdict_reuses": hidden_verdict_reuses,
+            "distinct_terminal_artifacts": len(hidden_verdicts),
             "backend_generation_calls": memoized.backend_calls,
             "shared_direct_cache_hits": memoized.direct_cache_hits,
         },
@@ -1933,19 +1959,34 @@ def expected_static_provenance_hashes() -> dict[str, str]:
     }
 
 
+def _evaluation_policy(
+    *,
+    initial_max_output_tokens: int,
+    bootstrap_samples: int,
+    seed: int,
+) -> dict[str, Any]:
+    return {
+        "phase": "evaluate",
+        "tiers": [tier.value for tier in TIERS],
+        "hidden_terminal_evaluation_unit": HIDDEN_TERMINAL_EVALUATION_UNIT,
+        "reuse_hidden_terminal_verdict_across_tiers": True,
+        "initial_max_output_tokens": initial_max_output_tokens,
+        "bootstrap_samples": bootstrap_samples,
+        "seed": seed,
+    }
+
+
 def evaluation_policy_sha256(
     *,
     initial_max_output_tokens: int,
     bootstrap_samples: int,
     seed: int,
 ) -> str:
-    policy = {
-        "phase": "evaluate",
-        "tiers": [tier.value for tier in TIERS],
-        "initial_max_output_tokens": initial_max_output_tokens,
-        "bootstrap_samples": bootstrap_samples,
-        "seed": seed,
-    }
+    policy = _evaluation_policy(
+        initial_max_output_tokens=initial_max_output_tokens,
+        bootstrap_samples=bootstrap_samples,
+        seed=seed,
+    )
     return _canonical_sha256({"policy": policy, "sources": _source_hashes()})
 
 
@@ -2126,13 +2167,11 @@ def main(argv: list[str] | None = None) -> int:
     provenance = _make_provenance(
         model_revision=resolved_model.canonical_model_id,
         manifest=manifest,
-        policy={
-            "phase": "evaluate",
-            "tiers": [tier.value for tier in TIERS],
-            "initial_max_output_tokens": args.initial_max_output_tokens,
-            "bootstrap_samples": args.bootstrap_samples,
-            "seed": args.seed,
-        },
+        policy=_evaluation_policy(
+            initial_max_output_tokens=args.initial_max_output_tokens,
+            bootstrap_samples=args.bootstrap_samples,
+            seed=args.seed,
+        ),
         split=args.split,
         leakage_detected=(args.split != "heldout"),
     )

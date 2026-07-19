@@ -172,6 +172,20 @@ def _public_failure(
     )
 
 
+def _public_success(
+    case: PublicHumanEvalCase,
+    completion: str,
+) -> PublicValidationResult:
+    assert type(case) is PublicHumanEvalCase
+    return PublicValidationResult(
+        outcome=ValidationOutcome.PASS,
+        status="public_success",
+        feedback="syntax_only_success",
+        elapsed_seconds=0.001,
+        source_sha256=hashlib.sha256(completion.encode("utf-8")).hexdigest(),
+    )
+
+
 class _FakeHiddenEvaluator:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
@@ -180,6 +194,71 @@ class _FakeHiddenEvaluator:
         self.calls.append((case.task_id, completion))
         is_direct = f"action={ControllerAction.GENERATE_DIRECT.value}" in completion
         passed = (not is_direct) or _task_index(case.task_id) % 2 == 0
+        return HiddenEvaluationResult(
+            score=float(passed),
+            passed=passed,
+            status="passed" if passed else "assertion_failed",
+            elapsed_seconds=0.002,
+        )
+
+
+class _RelabelingHiddenEvaluator:
+    """Would relabel a timeout as passing when the same artifact is retried."""
+
+    def __init__(self, first_passing_task: str) -> None:
+        self.first_passing_task = first_passing_task
+        self.calls: list[tuple[str, str]] = []
+        self.calls_by_task: dict[str, int] = {}
+
+    def __call__(self, case: HumanEvalCase, completion: str) -> HiddenEvaluationResult:
+        self.calls.append((case.task_id, completion))
+        count = self.calls_by_task.get(case.task_id, 0) + 1
+        self.calls_by_task[case.task_id] = count
+        first_passed = case.task_id == self.first_passing_task
+        passed = first_passed if count == 1 else not first_passed
+        return HiddenEvaluationResult(
+            score=float(passed),
+            passed=passed,
+            status="passed" if passed else "timeout",
+            elapsed_seconds=0.002 if passed else 10.0,
+        )
+
+
+class _ConstantGenerator:
+    """Emit byte-identical artifacts for distinct tasks without hidden access."""
+
+    def __init__(self, hidden_calls: list[tuple[str, str]]) -> None:
+        self.hidden_calls = hidden_calls
+        self.calls: list[str] = []
+
+    def __call__(
+        self,
+        case: PublicHumanEvalCase,
+        feedback: PublicGenerationFeedback,
+    ) -> GeneratedCandidate:
+        assert self.hidden_calls == []
+        assert feedback.action is ControllerAction.GENERATE_DIRECT
+        self.calls.append(case.task_id)
+        return GeneratedCandidate(
+            completion="identical terminal artifact",
+            metrics=GenerationMetrics(
+                prompt_tokens=40,
+                output_tokens=4,
+                prefill_seconds=0.05,
+                decode_seconds=0.05,
+            ),
+            raw_uncertainty=0.0,
+        )
+
+
+class _TaskSensitiveHiddenEvaluator:
+    def __init__(self, passing_task: str) -> None:
+        self.passing_task = passing_task
+        self.calls: list[tuple[str, str]] = []
+
+    def __call__(self, case: HumanEvalCase, completion: str) -> HiddenEvaluationResult:
+        self.calls.append((case.task_id, completion))
+        passed = case.task_id == self.passing_task
         return HiddenEvaluationResult(
             score=float(passed),
             passed=passed,
@@ -477,8 +556,26 @@ def test_evaluation_runs_all_five_tiers_once_and_shares_direct_generation(
 
     assert result["tiers"] == [tier.value for tier in EffortTier]
     assert result["summary"]["strategy_runs"] == len(cases) * 5
-    assert result["summary"]["hidden_terminal_evaluations"] == len(cases) * 5
-    assert len(hidden.calls) == len(cases) * 5
+    distinct_terminal_artifacts = sum(
+        len(
+            {
+                tier["terminal_output_sha256"]
+                for tier in task["tiers"].values()
+            }
+        )
+        for task in result["tasks"]
+    )
+    assert result["summary"]["hidden_terminal_evaluations"] == (
+        distinct_terminal_artifacts
+    )
+    assert result["summary"]["distinct_terminal_artifacts"] == (
+        distinct_terminal_artifacts
+    )
+    assert result["summary"]["hidden_terminal_verdict_reuses"] == (
+        len(cases) * 5 - distinct_terminal_artifacts
+    )
+    assert len(hidden.calls) == distinct_terminal_artifacts
+    assert len(set(hidden.calls)) == len(hidden.calls)
     assert result["summary"]["shared_direct_cache_hits"] == len(cases) * 4
     # One direct plus one repair for each of the four non-low tiers.
     assert result["summary"]["backend_generation_calls"] == len(cases) * 5
@@ -497,6 +594,126 @@ def test_evaluation_runs_all_five_tiers_once_and_shares_direct_generation(
             for tier in EffortTier
         }
         assert len(direct_hashes) == 1
+
+
+def test_identical_terminal_artifact_reuses_one_nondeterministic_verdict_per_task(
+    calibration_bundle,
+) -> None:
+    artifact, _, _, _, full_cases = calibration_bundle
+    cases = split_humaneval(full_cases, "calibration")[:3]
+    hidden = _RelabelingHiddenEvaluator(cases[0].task_id)
+    generator = _FakeGenerator(hidden.calls)
+
+    result = evaluate_markov_humaneval(
+        cases=cases,
+        pinned_corpus=full_cases,
+        split="calibration",
+        limited=True,
+        artifact=artifact,
+        expected_identity=IDENTITY,
+        provenance=_provenance(
+            cases,
+            leakage=True,
+            split="calibration-deduplication",
+            policy_sha256=evaluation_policy_sha256(
+                initial_max_output_tokens=64,
+                bootstrap_samples=32,
+                seed=29,
+            ),
+        ),
+        generator=generator,
+        hidden_evaluator=hidden,
+        generator_deterministic=True,
+        public_validator=_public_success,
+        initial_max_output_tokens=64,
+        bootstrap_samples=32,
+        seed=29,
+    )
+
+    assert len(generator.calls) == len(cases)
+    assert len(hidden.calls) == len(cases)
+    assert hidden.calls_by_task == {case.task_id: 1 for case in cases}
+    assert result["summary"]["strategy_runs"] == len(cases) * 5
+    assert result["summary"]["hidden_terminal_evaluations"] == len(cases)
+    assert result["summary"]["distinct_terminal_artifacts"] == len(cases)
+    assert result["summary"]["hidden_terminal_verdict_reuses"] == len(cases) * 4
+    assert result["summary"]["shared_direct_cache_hits"] == len(cases) * 4
+    for task in result["tasks"]:
+        assert len(
+            {
+                tier["terminal_output_sha256"]
+                for tier in task["tiers"].values()
+            }
+        ) == 1
+        observed_verdicts = {
+            (
+                tier["hidden_terminal"]["passed"],
+                tier["hidden_terminal"]["status"],
+                tier["hidden_terminal"]["elapsed_seconds"],
+            )
+            for tier in task["tiers"].values()
+        }
+        expected_verdict = (
+            {(True, "passed", 0.002)}
+            if task["task_id"] == cases[0].task_id
+            else {(False, "timeout", 10.0)}
+        )
+        assert observed_verdicts == expected_verdict
+
+
+def test_identical_output_from_different_tasks_keeps_task_scoped_verdicts(
+    calibration_bundle,
+) -> None:
+    artifact, _, _, _, full_cases = calibration_bundle
+    cases = split_humaneval(full_cases, "calibration")[:2]
+    hidden = _TaskSensitiveHiddenEvaluator(cases[0].task_id)
+    generator = _ConstantGenerator(hidden.calls)
+
+    result = evaluate_markov_humaneval(
+        cases=cases,
+        pinned_corpus=full_cases,
+        split="calibration",
+        limited=True,
+        artifact=artifact,
+        expected_identity=IDENTITY,
+        provenance=_provenance(
+            cases,
+            leakage=True,
+            split="calibration-task-scoped-deduplication",
+            policy_sha256=evaluation_policy_sha256(
+                initial_max_output_tokens=64,
+                bootstrap_samples=32,
+                seed=31,
+            ),
+        ),
+        generator=generator,
+        hidden_evaluator=hidden,
+        generator_deterministic=True,
+        public_validator=_public_success,
+        initial_max_output_tokens=64,
+        bootstrap_samples=32,
+        seed=31,
+    )
+
+    assert len(generator.calls) == len(cases)
+    assert len(hidden.calls) == len(cases)
+    assert {task_id for task_id, _completion in hidden.calls} == {
+        case.task_id for case in cases
+    }
+    assert {completion for _task_id, completion in hidden.calls} == {
+        "identical terminal artifact"
+    }
+    assert result["summary"]["hidden_terminal_evaluations"] == len(cases)
+    assert result["summary"]["hidden_terminal_verdict_reuses"] == len(cases) * 4
+    by_task = {row["task_id"]: row for row in result["tasks"]}
+    assert {
+        tier["hidden_terminal"]["passed"]
+        for tier in by_task[cases[0].task_id]["tiers"].values()
+    } == {True}
+    assert {
+        tier["hidden_terminal"]["passed"]
+        for tier in by_task[cases[1].task_id]["tiers"].values()
+    } == {False}
 
 
 def test_evaluation_schema_metrics_provenance_and_claims_fail_closed(
@@ -531,9 +748,22 @@ def test_evaluation_schema_metrics_provenance_and_claims_fail_closed(
         seed=23,
     )
 
+    assert EVALUATION_SCHEMA == "mio.markov-effort-humaneval-evaluation.v2"
     assert result["schema"] == EVALUATION_SCHEMA
     assert result["protocol_revision"] == PROTOCOL_REVISION
     assert result["planned_comparisons"] == 4
+    assert result["hidden_evaluation_policy"] == {
+        "unit": "task_id_and_exact_terminal_output",
+        "verdict_reused_across_tiers": True,
+        "all_strategy_generation_completed_before_evaluation": True,
+        "serialized_cache_keys": False,
+    }
+    assert benchmark_module.PREREGISTRATION[
+        "hidden_terminal_evaluation_unit"
+    ] == "task_id_and_exact_terminal_output"
+    assert benchmark_module.PREREGISTRATION[
+        "reuse_hidden_terminal_verdict_across_tiers"
+    ] is True
     assert set(result["comparisons_vs_low"]) == {"medium", "high", "xhigh", "ultra"}
     assert result["claim"] == {
         "eligible": False,
