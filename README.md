@@ -647,10 +647,14 @@ V3 fixed and sealed raw active-phase timing, completed eight direct roots, then
 aborted before hidden evaluation or an aggregate because terminal bookkeeping
 could cross a wall budget without recording exhaustion. V4 keeps every budget,
 aligns the fail-closed validator to the runtime's inclusive boundary, takes one
-final wall-time sample, and records a late crossing as an inadmissible `root_incomplete` trajectory instead of
-contradictory telemetry. Exact v3 start/abort receipts and incident analysis
-are committed and v3 cannot be rerun or reused. There is still no four-arm
-quality or speed result; see the
+final wall-time sample, and records a late crossing as an inadmissible
+`root_incomplete` trajectory instead of contradictory telemetry. Exact v3
+start/abort receipts and incident analysis are committed and v3 cannot be
+rerun or reused. The one-shot v4 smoke then completed end to end: every arm
+passed `3/4`, the one routed/static recovery was not selected, quality gain was
+zero, and Markov/Quality cost was `1.1313x` model time, `1.0785x` tokens, and
+`1.2648x` wall time. It is an exploratory no-claim result and does not authorize
+the larger cohort; see the
 [protocol and incident analysis](docs/22-markov-quality-pilot.md).
 
 Mio has not yet measured general edit correctness, tool-call accuracy,

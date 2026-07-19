@@ -1,8 +1,12 @@
 # Repository-level Markov quality pilot
 
-> Status: v4 preregistered exploratory protocol; no result yet. The
+> Status: the single v4 smoke is complete with an exploratory no-claim result.
+> The
 > machine-readable source of truth is
 > [`benchmarks/repository-quality-four-arm-preregistration-v4.json`](../benchmarks/repository-quality-four-arm-preregistration-v4.json).
+> The exact source-free [result](../benchmarks/results/repository-quality-four-arm-v4-smoke-f5d04dc.json)
+> and [start receipt](../benchmarks/results/repository-quality-four-arm-v4-smoke-attempt-start-f5d04dc.json)
+> are committed separately.
 > V2 and v3 are immutable failed attempts, not benchmark results. V2 has a
 > [post-hoc incident record](../benchmarks/incidents/repository-quality-four-arm-v2-smoke-aborted-8bf6e6e.json).
 > V3 has the exact native [start receipt](../benchmarks/incidents/repository-quality-four-arm-v3-smoke-attempt-start-16213e2.json),
@@ -269,8 +273,45 @@ has SHA-256
 `43c36131409f8edb132ab2fada88d17bcf9e203c3d6dfacadca1d70f0e8e4c6b`.
 JSON parsing, source-free/privacy scans, exact v3 receipt bindings, the 34-file
 manifest, and `git diff --check` also pass. These are integrity attestations,
-not quality, speed, or breakthrough results. The v4 native start will
-independently bind the eventual clean Git revision and complete source digest.
+not quality, speed, or breakthrough results. The v4 native start subsequently
+bound clean Git revision `f5d04dc2accff53a909fa4c11fe8a448754124b9`
+and the complete 34-file source digest.
+
+## V4 smoke result
+
+The create-once attempt completed normally. Its start SHA-256 is
+`2523a4a9849f4c49e36a964961f074460003adc365c2fe9c2e9e328ed38b67cc`;
+the result SHA-256 is
+`f34a58a375fe5a392a140664e3659e1d788a2d2e11d74fe6a5cdf0e799d84d88`.
+All eight scheduled roots and the one unique scheduled extra completed before
+eight single-use hidden evaluations. Selection was sealed first, the model was
+unloaded before hidden evaluation, source/model/runtime identity remained
+stable, and no hidden label is serialized.
+
+| arm | composite pass | terminal complete | selected child | model seconds | wall seconds | output tokens |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Plain | 3/4 | 3/4 | — | 42.6149 | 79.0953 | 2,230 |
+| Quality | 3/4 | 3/4 | — | 39.6131 | 75.9603 | 1,376 |
+| Static extra | 3/4 | 3/4 | 0/1 | 44.8145 | 96.0713 | 1,484 |
+| Markov Quality | 3/4 | 3/4 | 0/1 | 44.8145 | 96.0713 | 1,484 |
+
+Quality versus Plain was neutral on correctness (`0.75` each) in this four-task
+smoke. The router selected one task; the allocation-matched static control
+selected the same task, so they shared one physical recovery. That child did
+not strictly improve public state and was not selected. Markov versus Quality
+therefore had zero composite and workspace-evaluator gain while costing
+`1.1313x` model time, `1.0785x` output tokens, and `1.2648x` wall time. Three
+physical candidate observations contained a budget/deadline/snapshot/telemetry violation
+and correctly remained incomplete.
+
+The frozen analysis is not promotion-eligible: this is not the required all
+cohort, there was only one independent route, both gain lower bounds and rescue
+probability were zero, wall cost exceeded the `1.25x` gate, and integrity-cost
+violations were nonzero. Consequently the result supports no quality, speed,
+Markov, or breakthrough claim and does not authorize the `all` cohort. Its
+useful result is narrower: the raw DFlash timing, sandboxed coding harness,
+allocation barrier, recovery fallback, hidden-evaluation isolation, and
+source-free publication path now complete end to end.
 
 ## Allocation-matched static control
 

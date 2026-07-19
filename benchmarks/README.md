@@ -53,6 +53,14 @@ reused. The clean source-bound
 SHA-256 `43c36131409f8edb132ab2fada88d17bcf9e203c3d6dfacadca1d70f0e8e4c6b`;
 it certifies verifier parity only, not model accuracy or adaptive-policy gain.
 
+The single v4 smoke is now published as an exact source-free
+[result](results/repository-quality-four-arm-v4-smoke-f5d04dc.json) with its
+[create-once start receipt](results/repository-quality-four-arm-v4-smoke-attempt-start-f5d04dc.json).
+All four arms passed `3/4`; the single routed/static recovery was not selected,
+and Markov had zero gain over Quality at `1.2648x` logical wall cost. The frozen
+promotion gate failed, so this is a harness-validation result only: no larger
+cohort and no quality, speed, or breakthrough claim are authorized.
+
 ## Qwen 3.6 matrix harness
 
 `scripts/bench_qwen36_matrix.py` compares:

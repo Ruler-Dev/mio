@@ -30,6 +30,13 @@ repairs that accounting with one final same-sample wall probe. It does not
 increase either budget, relax the strict validator, or support a quality/speed
 claim.
 
+The v4 smoke subsequently completed with `3/4` passes for every arm. Its one
+routed/static recovery was not selected; Markov gained no pass and cost
+`1.1313x` model time, `1.0785x` output tokens, and `1.2648x` wall time versus
+Quality. The result is integrity-valid but promotion-ineligible, so the larger
+cohort remains unauthorized. See the exact source-free artifact linked from
+the protocol documentation.
+
 ## Verified engineering checkpoint (2026-07-18)
 
 The current evidence is summarized in

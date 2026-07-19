@@ -1,0 +1,447 @@
+{
+  "aggregate": {
+    "analysis": {
+      "bootstrap": {
+        "confidence": 0.95,
+        "index_generator": "sha256-counter-modulo-n-v1",
+        "lower_order_statistic_zero_based": 499,
+        "samples": 10000,
+        "seed": 20260719
+      },
+      "budget_deadline_snapshot_or_telemetry_violation_count": 3,
+      "byte_changed_selected_child_count": 0,
+      "composite_pass_counts": {
+        "markov_quality": 3,
+        "quality": 3,
+        "quality_static_extra": 3
+      },
+      "failures": [
+        "analysis_population_not_single_all_cohort",
+        "markov_route_count_below_8",
+        "quality_gain_lcb_below_0.01",
+        "workspace_evaluator_gain_lcb_below_0.01",
+        "rescue_probability_lcb_below_0.10",
+        "markov_over_quality_wall_point_ratio_invalid_or_above_limit",
+        "budget_deadline_snapshot_or_telemetry_violation"
+      ],
+      "logical_markov_over_quality_point_ratios": {
+        "model_seconds": 1.131305483877131,
+        "output_tokens": 1.0784883720930232,
+        "wall_seconds": 1.26475664533308
+      },
+      "population": {
+        "cohort": "smoke",
+        "fixture_count": 4,
+        "pooled_cohorts": false
+      },
+      "promotion_eligible": false,
+      "quality_gain": {
+        "lcb_95_one_sided": 0.0,
+        "point": 0.0
+      },
+      "quality_to_markov_regressions": 0,
+      "rescue_mechanism_counts": {
+        "changed_terminal": 0,
+        "same_terminal": 0,
+        "trajectory_only_rescue": 0,
+        "workspace_evaluator_rescue": 0
+      },
+      "rescue_probability": {
+        "denominator": 1,
+        "lcb_95_one_sided": 0.0,
+        "numerator": 0,
+        "point": 0.0
+      },
+      "route_count": 1,
+      "status": "complete_frozen_analysis",
+      "workspace_evaluator_gain": {
+        "lcb_95_one_sided": 0.0,
+        "point": 0.0
+      },
+      "workspace_evaluator_pass_counts": {
+        "markov_quality": 3,
+        "quality": 3,
+        "quality_static_extra": 3
+      },
+      "workspace_evaluator_regressions": 0
+    },
+    "arm_metrics": {
+      "markov_quality": {
+        "extra_candidate_count": 1,
+        "logical_candidate_count": 5,
+        "logical_cost": {
+          "model_rounds": 25,
+          "model_seconds": 44.814490284,
+          "output_tokens": 1484,
+          "tool_calls": 26,
+          "wall_seconds": 96.07127291709185
+        },
+        "passed_count": 3,
+        "passed_rate": 0.75,
+        "regression_free_count": 3,
+        "regression_free_rate": 0.75,
+        "run_count": 4,
+        "selected_child_count": 0,
+        "terminal_completion_count": 3,
+        "terminal_completion_rate": 0.75,
+        "workspace_evaluator_passed_count": 3,
+        "workspace_evaluator_passed_rate": 0.75
+      },
+      "plain": {
+        "extra_candidate_count": 0,
+        "logical_candidate_count": 4,
+        "logical_cost": {
+          "model_rounds": 27,
+          "model_seconds": 42.61489911300001,
+          "output_tokens": 2230,
+          "tool_calls": 28,
+          "wall_seconds": 79.09527708240785
+        },
+        "passed_count": 3,
+        "passed_rate": 0.75,
+        "regression_free_count": 3,
+        "regression_free_rate": 0.75,
+        "run_count": 4,
+        "selected_child_count": 0,
+        "terminal_completion_count": 3,
+        "terminal_completion_rate": 0.75,
+        "workspace_evaluator_passed_count": 3,
+        "workspace_evaluator_passed_rate": 0.75
+      },
+      "quality": {
+        "extra_candidate_count": 0,
+        "logical_candidate_count": 4,
+        "logical_cost": {
+          "model_rounds": 23,
+          "model_seconds": 39.613076152,
+          "output_tokens": 1376,
+          "tool_calls": 23,
+          "wall_seconds": 75.96028316719458
+        },
+        "passed_count": 3,
+        "passed_rate": 0.75,
+        "regression_free_count": 3,
+        "regression_free_rate": 0.75,
+        "run_count": 4,
+        "selected_child_count": 0,
+        "terminal_completion_count": 3,
+        "terminal_completion_rate": 0.75,
+        "workspace_evaluator_passed_count": 3,
+        "workspace_evaluator_passed_rate": 0.75
+      },
+      "quality_static_extra": {
+        "extra_candidate_count": 1,
+        "logical_candidate_count": 5,
+        "logical_cost": {
+          "model_rounds": 25,
+          "model_seconds": 44.814490284,
+          "output_tokens": 1484,
+          "tool_calls": 26,
+          "wall_seconds": 96.07127291709185
+        },
+        "passed_count": 3,
+        "passed_rate": 0.75,
+        "regression_free_count": 3,
+        "regression_free_rate": 0.75,
+        "run_count": 4,
+        "selected_child_count": 0,
+        "terminal_completion_count": 3,
+        "terminal_completion_rate": 0.75,
+        "workspace_evaluator_passed_count": 3,
+        "workspace_evaluator_passed_rate": 0.75
+      }
+    },
+    "claim": {
+      "advance_to_new_calibration_eligible": false,
+      "nonpromotable_reason": null,
+      "promotion_failures": [
+        "analysis_population_not_single_all_cohort",
+        "markov_route_count_below_8",
+        "quality_gain_lcb_below_0.01",
+        "workspace_evaluator_gain_lcb_below_0.01",
+        "rescue_probability_lcb_below_0.10",
+        "markov_over_quality_wall_point_ratio_invalid_or_above_limit",
+        "budget_deadline_snapshot_or_telemetry_violation"
+      ],
+      "scientific_claim_eligible": false,
+      "status": "exploratory_no_claim"
+    },
+    "hidden_labels_serialized": false,
+    "integrity": {
+      "all_generation_before_hidden_evaluation": true,
+      "budget_deadline_snapshot_or_telemetry_violation_count": 3,
+      "fallback_to_root_count": 2,
+      "fixture_count": 4,
+      "hidden_evaluation_count": 8,
+      "hidden_evaluation_single_use": true,
+      "markov_extra_count": 1,
+      "route_count": 1,
+      "selected_outputs_consistent": true,
+      "shared_quality_root": true,
+      "static_extra_count": 1,
+      "static_markov_k_equal": true,
+      "terminal_selection_precedes_hidden_evaluation": true,
+      "unique_terminal_artifact_count": 8
+    },
+    "paired_contrasts": {
+      "markov_vs_quality": {
+        "baseline": "quality",
+        "candidate": "markov_quality",
+        "logical_cost_ratios": {
+          "model_seconds": 1.131305483877131,
+          "output_tokens": 1.0784883720930232,
+          "wall_seconds": 1.26475664533308
+        },
+        "paired_contingency": {
+          "baseline_only": 0,
+          "both_pass": 3,
+          "candidate_only": 0,
+          "neither_pass": 1
+        },
+        "pass_rate_delta": 0.0,
+        "workspace_evaluator_paired_contingency": {
+          "baseline_only": 0,
+          "both_pass": 3,
+          "candidate_only": 0,
+          "neither_pass": 1
+        },
+        "workspace_evaluator_pass_rate_delta": 0.0
+      },
+      "markov_vs_static": {
+        "baseline": "quality_static_extra",
+        "candidate": "markov_quality",
+        "logical_cost_ratios": {
+          "model_seconds": 1.0,
+          "output_tokens": 1.0,
+          "wall_seconds": 1.0
+        },
+        "paired_contingency": {
+          "baseline_only": 0,
+          "both_pass": 3,
+          "candidate_only": 0,
+          "neither_pass": 1
+        },
+        "pass_rate_delta": 0.0,
+        "workspace_evaluator_paired_contingency": {
+          "baseline_only": 0,
+          "both_pass": 3,
+          "candidate_only": 0,
+          "neither_pass": 1
+        },
+        "workspace_evaluator_pass_rate_delta": 0.0
+      },
+      "quality_vs_plain": {
+        "baseline": "plain",
+        "candidate": "quality",
+        "logical_cost_ratios": {
+          "model_seconds": 0.9295593085169529,
+          "output_tokens": 0.6170403587443947,
+          "wall_seconds": 0.9603643348774544
+        },
+        "paired_contingency": {
+          "baseline_only": 0,
+          "both_pass": 3,
+          "candidate_only": 0,
+          "neither_pass": 1
+        },
+        "pass_rate_delta": 0.0,
+        "workspace_evaluator_paired_contingency": {
+          "baseline_only": 0,
+          "both_pass": 3,
+          "candidate_only": 0,
+          "neither_pass": 1
+        },
+        "workspace_evaluator_pass_rate_delta": 0.0
+      },
+      "static_vs_quality": {
+        "baseline": "quality",
+        "candidate": "quality_static_extra",
+        "logical_cost_ratios": {
+          "model_seconds": 1.131305483877131,
+          "output_tokens": 1.0784883720930232,
+          "wall_seconds": 1.26475664533308
+        },
+        "paired_contingency": {
+          "baseline_only": 0,
+          "both_pass": 3,
+          "candidate_only": 0,
+          "neither_pass": 1
+        },
+        "pass_rate_delta": 0.0,
+        "workspace_evaluator_paired_contingency": {
+          "baseline_only": 0,
+          "both_pass": 3,
+          "candidate_only": 0,
+          "neither_pass": 1
+        },
+        "workspace_evaluator_pass_rate_delta": 0.0
+      }
+    },
+    "physical_costs": {
+      "cost": {
+        "model_rounds": 52,
+        "model_seconds": 87.429389397,
+        "output_tokens": 3714,
+        "tool_calls": 54,
+        "wall_seconds": 175.1665499994997
+      },
+      "logical_candidate_reference_count": 18,
+      "markov_extra_count": 1,
+      "plain_root_count": 4,
+      "shared_or_deduplicated_reference_count": 9,
+      "shared_quality_root_count": 4,
+      "static_extra_count": 1,
+      "unique_candidate_count": 9,
+      "unique_extra_count": 1
+    },
+    "protocol": {
+      "classifier_precedence": [
+        "root_incomplete",
+        "scope_invalid",
+        "public_fail",
+        "public_unknown"
+      ],
+      "cohort": "smoke",
+      "extra": {
+        "action": "refine",
+        "budget": {
+          "max_context_tokens": 8192,
+          "max_output_tokens": 384,
+          "max_rounds": 4,
+          "max_tool_calls": 8,
+          "max_wall_seconds": 20.0
+        },
+        "effort": "high",
+        "prompt_revision": "mio.repository-quality.recovery-prompt.v1"
+      },
+      "extra_schedule_revision": "mio.repository-quality.extra-order.v1",
+      "logical_arms": [
+        "plain",
+        "quality",
+        "quality_static_extra",
+        "markov_quality"
+      ],
+      "retry_policy": "none_terminal_public_state_v1",
+      "root_budget": {
+        "max_context_tokens": 8192,
+        "max_output_tokens": 2048,
+        "max_rounds": 12,
+        "max_tool_calls": 32,
+        "max_wall_seconds": 120.0
+      },
+      "root_effort": "medium",
+      "root_schedule_revision": "mio.repository-quality.root-order.v1",
+      "router_mode": "exploratory",
+      "seed": 20260719,
+      "selector": "strict_public_improvement_else_root",
+      "shared_quality_root_arms": [
+        "quality",
+        "quality_static_extra",
+        "markov_quality"
+      ],
+      "static_allocation_revision": "mio.repository-quality.static-order.v1",
+      "suite_sha256": "d0fef6c7ccfcccbf6dcbc70f973d931f5dba023f45f4335482d72f626c824afc",
+      "transition_identity_sha256": null,
+      "visible_pass_semantics": "public_unknown"
+    },
+    "schema_version": "mio.repository-quality-four-arm-pilot.v2"
+  },
+  "attempt": {
+    "start_schema": "mio.repository-quality-four-arm-attempt-start.v4",
+    "start_sha256": "2523a4a9849f4c49e36a964961f074460003adc365c2fe9c2e9e328ed38b67cc"
+  },
+  "generation_integrity": {
+    "allocation_sealed_after_all_roots": true,
+    "completed_root_generation_count": 8,
+    "completed_unique_extra_generation_count": 1,
+    "expected_root_generation_count": 8,
+    "expected_unique_extra_generation_count": 1,
+    "extra_schedule_sealed_before_first_extra": true,
+    "fixture_count": 4,
+    "root_schedule_sealed_before_first_generation": true
+  },
+  "hardware": {
+    "label": "darwin-arm64-mac16-5-16cpu-51539607552b"
+  },
+  "hidden_labels_serialized": false,
+  "implementation": {
+    "git_clean": true,
+    "git_revision": "f5d04dc2accff53a909fa4c11fe8a448754124b9",
+    "post_run_source_stable": true,
+    "source_file_count": 34,
+    "source_lock_schema": "mio.repository-quality-source-lock.v1",
+    "source_sha256": "9f613c08ac6189ee507583d6d19680edd93844aa6da67aaf19af437a55fa99eb"
+  },
+  "models": {
+    "drafter": {
+      "backend": "dflash",
+      "content_identity": "local-sha256-v1:4b60bced36f602da85a6447d3648e7ac37a0c5cce68d505a49664252c0586b98",
+      "repository_label": "z-lab/Qwen3.5-4B-DFlash"
+    },
+    "post_run_identities_stable": true,
+    "target": {
+      "content_identity": "local-sha256-v1:7d7ea69d09ada4f1d2f49f6ca651441ac279b95b6d280f259da04fbde504376f",
+      "repository_label": "mlx-community/Qwen3.5-4B-4bit"
+    }
+  },
+  "protocol": {
+    "predecessor_abort_sha256": "c0e18e1878fb5956003115f4658d1c2d06cf1a8d36c52d4becf091a3a099764a",
+    "predecessor_attempt_start_sha256": "daae7a1e1c895fa8fa328b5d8a8794a5d211cb26bb429d7c74ff27acc8706c1f",
+    "predecessor_incident_record_sha256": "c3b9f098258916f324452f5611ede11a021974af66b50173c47102c589a4e09a",
+    "predecessor_preregistration_sha256": "d3ddbfa29bc99f2b480797fadf6686cbc200f973e6fa6325805855494d600d3d",
+    "preregistration_revision": "mio-repository-quality-four-arm-pilot-v4",
+    "preregistration_schema": "mio.repository-quality-four-arm-preregistration.v4",
+    "preregistration_sha256": "ae49deb27e1929c76b032a65ee1515e3a0ac270d78cdb49fa791aa6d9ca93381",
+    "private_evaluator_bundle_sha256": "d5a65bdea7edd992976aee5f1a39794b21dc94072cf73a45f9f2f359ac8c6140",
+    "public_suite_sha256": "d0fef6c7ccfcccbf6dcbc70f973d931f5dba023f45f4335482d72f626c824afc",
+    "quality_profile_schema": "mio.coding-quality-effort-profiles.v2",
+    "quality_profile_sha256": "aa5b24c3d98e5f7d294d4329e76a3259c9d6134b4addd9d2ac6b326a9c8a5585"
+  },
+  "runtime": {
+    "bmp_paths": 1,
+    "cold_physical_generation_state": true,
+    "context_window": 8192,
+    "ddtree_budget": 0,
+    "dflash_draft_sink": 64,
+    "dflash_draft_window": 1024,
+    "dflash_exact_commit_oracle": false,
+    "dflash_exact_components": "gdn,attention,mlp,head",
+    "dflash_max_context": 131072,
+    "dflash_qmv_staging": false,
+    "dflash_qmv_vectors": "auto",
+    "dflash_quantize_draft": false,
+    "dflash_verify_len_override": false,
+    "draft_fallback_model": null,
+    "drafter_backend": "dflash",
+    "drafter_strict": true,
+    "dspark_prefix_cache": false,
+    "environment_overrides": false,
+    "max_output_tokens": 2048,
+    "mcp_tools_exposed": false,
+    "network_enabled": false,
+    "pq_bits": 16,
+    "prefill_chunk": 2048,
+    "sampler_seed": null,
+    "schedule_and_bootstrap_seed": 20260719,
+    "split": "smoke",
+    "temperature": 0.0,
+    "tier": "small",
+    "top_k": 0,
+    "top_p": 1.0,
+    "tq_bits": 16
+  },
+  "schema_version": "mio.repository-quality-four-arm-result-envelope.v4",
+  "software": {
+    "packages": {
+      "dflash-mlx": "0.1.8",
+      "huggingface-hub": "1.24.0",
+      "mlx": "0.32.0",
+      "mlx-audio": "0.4.4",
+      "mlx-dspark": "0.5.0",
+      "mlx-lm": "0.31.3",
+      "mlx-vlm": "0.6.5",
+      "transformers": "5.14.1"
+    },
+    "python_version": "3.12.0"
+  }
+}

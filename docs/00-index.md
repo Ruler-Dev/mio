@@ -28,7 +28,7 @@ explicitly marked as historical/experimental.
 ## Research
 
 - [Mio on Qwen 3.6: local harnessing, prefill, and speculative decode](../papers/mio-qwen36-research.md)
-- [22 — Repository-level Markov quality pilot](22-markov-quality-pilot.md) — preregistered exploratory protocol; no result yet
+- [22 — Repository-level Markov quality pilot](22-markov-quality-pilot.md) — completed v4 smoke; exploratory no-claim result
 - [BMP-DFlash technical note](../papers/bmp-dflash.md) — historical Qwen 3/3.5 experiments
 - [Prefill speedups technical note](../papers/prefill-speedups.md) — historical prefix/LM-head experiments
 - [Raw benchmark artifacts](../benchmarks/results/)
