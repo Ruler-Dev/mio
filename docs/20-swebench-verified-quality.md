@@ -200,9 +200,30 @@ precommitted go/no-go limits are:
 | Quality/Plain model-seconds ratio | at most 1.25 | at most 1.25 |
 | Quality/Plain output-token ratio | at most 1.15 | at most 1.10 |
 
-A fresh 27B non-evidence smoke proceeds only if those correctness and cost
-gates pass. The 500-pair Verified run remains the only planned confirmatory
-quality study.
+### Observed Quality v2 calibration and stop decision
+
+The 4-pair smoke was neutral at `3/4` passes in both arms, with zero discordant
+pairs. Its Quality/Plain ratios were `0.9536` wall time, `0.9116` model time,
+and `0.6170` output tokens, so it met the six precommitted advancement limits.
+Each arm completed only `3/4` generations; the artifact therefore failed its
+integrity and minimum-pair claim gates and remains a calibration signal rather
+than claim-eligible evidence. The immutable source-free artifact is
+[`miocodebench-quality-v2-smoke-278f294.json`](../benchmarks/results/miocodebench-quality-v2-smoke-278f294.json).
+
+The one-use 8-pair development holdout failed the go/no-go decision. Plain and
+Quality each passed only `2/8`, with `2` both-pass and `6` neither-pass pairs:
+there were no Quality rescues and no Plain-only regressions. Quality completed
+`6/8` generations versus Plain's `8/8`, despite recording trusted validation
+success on `7/8`. Its Quality/Plain cost ratios were `2.5444` wall time,
+`2.6413` model time, and `2.1858` output tokens, all far beyond the frozen
+limits. The artifact is
+[`miocodebench-quality-v2-development-278f294.json`](../benchmarks/results/miocodebench-quality-v2-development-278f294.json).
+
+Therefore Quality v2 is not promoted, no fresh 27B Quality smoke proceeds, and
+neither artifact supports a coding-quality or speed claim. The next policy
+iteration must reduce recovery work and demonstrate hidden-task rescues; merely
+increasing effort or validation counts is not justified. The 500-pair Verified
+run remains reserved for a later intervention that first passes these gates.
 
 The primary outcome is the official harness `resolved` result. The primary
 estimand is:

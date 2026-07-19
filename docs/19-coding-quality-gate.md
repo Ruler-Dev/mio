@@ -1,8 +1,10 @@
 # Coding quality gate and MioCodeBench v1 preregistration
 
-> Status: preregistered protocol; no benchmark result is reported on this
-> page. The machine-readable source of truth is
-> [`benchmarks/coding-quality-preregistration-v1.json`](../benchmarks/coding-quality-preregistration-v1.json).
+> Status: preregistered protocol executed for the 4-pair smoke and one-use
+> 8-pair development split. The holdout was neutral in quality and failed the
+> frozen cost gates, so the intervention was not promoted. Protocol source:
+> [`benchmarks/coding-quality-preregistration-v1.json`](../benchmarks/coding-quality-preregistration-v1.json);
+> result interpretation: [`docs/20-swebench-verified-quality.md`](20-swebench-verified-quality.md).
 
 Mio's coding quality gate is a deterministic control around the native agent
 loop. It does not claim to make the base model intrinsically more capable. It

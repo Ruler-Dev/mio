@@ -14,8 +14,14 @@ leakage isolation, paired statistics, explicit claim gates, and content-free
 evidence. The readable protocol is
 [`docs/19-coding-quality-gate.md`](../docs/19-coding-quality-gate.md).
 
-This is a preregistration, not a result. No coding-quality or speed claim is
-currently supported by it.
+The protocol has now been executed for its 4-pair smoke and one-use 8-pair
+development split. Published source-free results:
+
+- [`results/miocodebench-quality-v2-smoke-278f294.json`](results/miocodebench-quality-v2-smoke-278f294.json): `3/4` versus `3/4`, neutral;
+- [`results/miocodebench-quality-v2-development-278f294.json`](results/miocodebench-quality-v2-development-278f294.json): `2/8` versus `2/8`, with Quality cost ratios of `2.5444x` wall, `2.6413x` model time, and `2.1858x` output tokens.
+
+The development result fails the frozen go/no-go gates. No coding-quality or
+speed improvement is supported, and the planned follow-up 27B smoke is stopped.
 
 ## Qwen 3.6 matrix harness
 

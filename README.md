@@ -626,11 +626,19 @@ The final bounded model round remains tool-capable for a restricted
 validate invocations, recognized evidence, and validation-like commands sent
 to Bash. These changes do not alter MLX prefill or decode kernels, so they do
 not intrinsically reduce tok/s; they can add agent-level prompt/tool wall time.
-Their quality/cost effect is not yet established and will be calibrated on the
-paired MioCodeBench smoke/development splits before another 27B run.
 The content-bound telemetry is emitted as `mio.coding-quality-gate.v3`:
 initial and current workspace-content hashes are distinct from Git/probe
 metadata, and both snapshots must be complete before a net change can pass.
+
+The paired Quality v2 calibration is now complete. Smoke was neutral at `3/4`
+for both arms and met the precommitted advancement limits, but the one-use
+development holdout was also neutral at only `2/8` and failed every cost
+guardrail: Quality/Plain was `2.5444x` wall time, `2.6413x` model time, and
+`2.1858x` output tokens. Quality completed only `6/8` generations versus
+Plain's `8/8`. The negative source-free artifacts are
+[`smoke`](benchmarks/results/miocodebench-quality-v2-smoke-278f294.json) and
+[`development`](benchmarks/results/miocodebench-quality-v2-development-278f294.json).
+No follow-up 27B Quality run is authorized by this result.
 
 Mio has not yet measured general edit correctness, tool-call accuracy,
 Caveman/Ponytail quality, long-context scaling, or multi-user throughput. A

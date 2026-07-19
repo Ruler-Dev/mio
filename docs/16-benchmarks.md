@@ -300,6 +300,11 @@ Currently supported:
   can use a restricted `validate` recovery without increasing the 12-round
   ceiling. This is an implementation claim, not evidence of higher task
   quality.
+- The subsequent MioCodeBench v2-policy smoke was neutral at `3/4` versus
+  `3/4`; the one-use development holdout was neutral at `2/8` versus `2/8`
+  and failed the frozen cost limits at `2.5444x` wall time, `2.6413x` model
+  time, and `2.1858x` output tokens for Quality/Plain. This supports the stop
+  decision, not a quality or speed improvement.
 
 Not currently supported:
 
@@ -309,7 +314,8 @@ Not currently supported:
 - PolarQuant zero overhead or exact parity;
 - TurboQuant memory savings on long context;
 - improved coding-agent quality from MCP, skills, Caveman, Ponytail, or
-  Headroom or the Quality gate;
+  Headroom or the Quality gate; the current paired development result is
+  explicitly neutral and too costly;
 - either an intrinsic tok/s loss or speedup from Quality v2. It uses the same
   MLX backend, while extra prompts and validation can change end-to-end agent
   wall time and must be reported separately;

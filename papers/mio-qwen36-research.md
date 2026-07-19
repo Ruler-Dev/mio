@@ -821,9 +821,26 @@ over Bash, and makes the final bounded round a restricted recovery round. It
 keeps the 12-round ceiling and does not modify MLX inference kernels. Thus its
 expected cost, if any, is agent-level prompt/tool wall time rather than an
 intrinsic change in prefill or decode tok/s. These design corrections are not
-retroactive evidence: the v2 policy must pass paired MioCodeBench calibration
-and internal holdout cost gates before another 27B smoke, and only the frozen
-500-pair Verified experiment can support a quality claim.
+retroactive evidence: the v2 policy had to pass paired MioCodeBench calibration
+and internal holdout cost gates before another 27B smoke.
+
+That gate has now been exercised. The 4-pair smoke was neutral at `3/4` for
+Plain and `3/4` for Quality, with Quality/Plain ratios of `0.9536` wall time,
+`0.9116` model time, and `0.6170` output tokens. It met the precommitted pilot
+limits, but each arm completed only `3/4` generations, so the artifact failed
+its integrity and minimum-pair claim gates.
+The one-use 8-pair development holdout then failed: both arms passed only
+`2/8`, with no discordant successes, while Quality used `2.5444x` wall time,
+`2.6413x` model time, and `2.1858x` output tokens and completed only `6/8`
+generations. In this holdout, Quality's `7/8` trusted-validation success did
+not coincide with higher hidden-task correctness than Plain.
+The source-free artifacts are
+[`smoke`](../benchmarks/results/miocodebench-quality-v2-smoke-278f294.json) and
+[`development`](../benchmarks/results/miocodebench-quality-v2-development-278f294.json).
+
+Quality v2 is therefore not promoted and no additional 27B Quality smoke is
+run. Only a redesigned intervention that first passes the frozen gates should
+reach the 500-pair Verified experiment.
 
 A proper coding study should compare at least:
 
@@ -1174,6 +1191,8 @@ requirement, not a declaration of breakthrough.
 - [`benchmarks/results/qwen36-core-256.json`](../benchmarks/results/qwen36-core-256.json)
 - [`benchmarks/results/qwen36-cache-256.json`](../benchmarks/results/qwen36-cache-256.json)
 - [`benchmarks/results/swebench-quality-27b-smoke-0fd8389.json`](../benchmarks/results/swebench-quality-27b-smoke-0fd8389.json)
+- [`benchmarks/results/miocodebench-quality-v2-smoke-278f294.json`](../benchmarks/results/miocodebench-quality-v2-smoke-278f294.json)
+- [`benchmarks/results/miocodebench-quality-v2-development-278f294.json`](../benchmarks/results/miocodebench-quality-v2-development-278f294.json)
 - [`scripts/bench_qwen36_matrix.py`](../scripts/bench_qwen36_matrix.py)
 - [`benchmarks/results/qwen36-20260715-192941.json`](../benchmarks/results/qwen36-20260715-192941.json)
 - [`benchmarks/results/qwen36-20260715-193332.json`](../benchmarks/results/qwen36-20260715-193332.json)
