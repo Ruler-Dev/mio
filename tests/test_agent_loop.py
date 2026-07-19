@@ -1370,6 +1370,79 @@ def test_wall_deadline_reduces_injected_command_timeout_and_blocks_next_call(
     assert engine.deadlines == [0.5]
 
 
+def test_terminal_quality_refresh_crossing_wall_deadline_is_attested(
+    monkeypatch,
+    tmp_path,
+):
+    from mio.coding_quality import CodingQualityGate
+
+    monkeypatch.setattr(
+        agent,
+        "console",
+        Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+    clock = {"now": 0.0}
+    monkeypatch.setattr(agent.time, "perf_counter", lambda: clock["now"])
+    original_refresh = CodingQualityGate.refresh
+    refresh_calls = 0
+
+    def refresh_after_deadline(gate):
+        nonlocal refresh_calls
+        refresh_calls += 1
+        snapshot = original_refresh(gate)
+        if refresh_calls == 2:
+            clock["now"] = 0.6
+        return snapshot
+
+    monkeypatch.setattr(CodingQualityGate, "refresh", refresh_after_deadline)
+    state = _enable_quality_gate(_state(tmp_path))
+    state["quality_gate_require_change"] = False
+    state["execution_budget"] = agent.AgentExecutionBudget(
+        max_rounds=2,
+        max_tool_calls=2,
+        max_wall_seconds=0.5,
+    )
+
+    result = agent._process_user_input(
+        "Explain the current state without changing files.",
+        _ScriptedEngine(["Done."]),
+        _Manager(),
+        MioConfig.default(),
+        state,
+    )
+
+    assert refresh_calls == 2
+    assert result.wall_time_s == pytest.approx(0.6)
+    assert result.budget_exhaustion == "wall time limit 0.5s reached"
+    assert result.terminal_reason == "budget_exhausted"
+    assert state["messages"][-1]["content"] == result.assistant_text
+
+
+@pytest.mark.parametrize(
+    ("terminal_reason", "expected_reason"),
+    (
+        ("model_final", "budget_exhausted"),
+        ("quality_incomplete", "quality_incomplete"),
+        ("tool_timeout", "tool_timeout"),
+        ("budget_finalization", "budget_finalization"),
+    ),
+)
+def test_terminal_wall_attestation_uses_inclusive_boundary_and_preserves_reason(
+    terminal_reason,
+    expected_reason,
+):
+    exhaustion, observed_reason = agent._attest_terminal_wall_budget(
+        turn_finished=10.5,
+        wall_deadline=10.5,
+        max_wall_seconds=0.5,
+        budget_exhaustion=None,
+        terminal_reason=terminal_reason,
+    )
+
+    assert exhaustion == "wall time limit 0.5s reached"
+    assert observed_reason == expected_reason
+
+
 def test_execution_budget_state_rejects_untrusted_mapping(tmp_path):
     state = _state(tmp_path)
     state["execution_budget"] = {"max_tool_calls": 10_000}

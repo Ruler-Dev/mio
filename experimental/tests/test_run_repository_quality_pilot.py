@@ -606,7 +606,7 @@ def test_batch_identity_cannot_be_replaced_even_with_identical_values(tmp_path: 
         )
 
 
-def test_preregistration_v3_exact_bytes_and_source_scope_are_sealed(tmp_path: Path) -> None:
+def test_preregistration_v4_exact_bytes_and_source_scope_are_sealed(tmp_path: Path) -> None:
     assert pilot_runner._assert_preregistration_seal() == pilot_runner.PREREGISTRATION_SHA256
     document = json.loads(
         (pilot_runner._REPOSITORY_ROOT / pilot_runner.PREREGISTRATION_RELATIVE_PATH).read_text(encoding="utf-8")
@@ -619,7 +619,10 @@ def test_preregistration_v3_exact_bytes_and_source_scope_are_sealed(tmp_path: Pa
     assert integrity["attempt_start_schema"] == pilot_runner.ATTEMPT_START_SCHEMA
     assert integrity["source_lock_schema"] == pilot_runner.SOURCE_LOCK_SCHEMA
     assert revision["predecessor_sha256"] == pilot_runner.PREDECESSOR_PREREGISTRATION_SHA256
-    assert revision["post_hoc_incident_record_sha256"] == pilot_runner.V2_INCIDENT_SHA256
+    assert revision["v3_attempt_start_sha256"] == pilot_runner.PREDECESSOR_ATTEMPT_START_SHA256
+    assert revision["v3_abort_sha256"] == pilot_runner.PREDECESSOR_ABORT_SHA256
+    assert revision["v3_incident_record_sha256"] == pilot_runner.PREDECESSOR_INCIDENT_SHA256
+    assert revision["v3_rerun_forbidden"] is True
     pilot_runner._assert_predecessor_and_incident_seals()
 
     tampered = tmp_path / "tampered-preregistration.json"
@@ -627,6 +630,44 @@ def test_preregistration_v3_exact_bytes_and_source_scope_are_sealed(tmp_path: Pa
     tampered.write_bytes(source + b"\n")
     with pytest.raises(RepositoryPilotProtocolError, match="frozen SHA-256"):
         pilot_runner._assert_preregistration_seal(tampered)
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "expected_sha256"),
+    (
+        (
+            pilot_runner.PREDECESSOR_PREREGISTRATION_RELATIVE_PATH,
+            pilot_runner.PREDECESSOR_PREREGISTRATION_SHA256,
+        ),
+        (
+            pilot_runner.PREDECESSOR_ATTEMPT_START_RELATIVE_PATH,
+            pilot_runner.PREDECESSOR_ATTEMPT_START_SHA256,
+        ),
+        (
+            pilot_runner.PREDECESSOR_ABORT_RELATIVE_PATH,
+            pilot_runner.PREDECESSOR_ABORT_SHA256,
+        ),
+        (
+            pilot_runner.PREDECESSOR_INCIDENT_RELATIVE_PATH,
+            pilot_runner.PREDECESSOR_INCIDENT_SHA256,
+        ),
+    ),
+)
+def test_each_v4_predecessor_artifact_fails_closed_when_tampered(
+    tmp_path: Path,
+    relative_path: str,
+    expected_sha256: str,
+) -> None:
+    original = (pilot_runner._REPOSITORY_ROOT / relative_path).read_bytes()
+    tampered = tmp_path / Path(relative_path).name
+    tampered.write_bytes(original + b"\n")
+
+    with pytest.raises(RepositoryPilotProtocolError, match="frozen SHA-256"):
+        pilot_runner._read_exact_json_seal(
+            tampered,
+            expected_sha256=expected_sha256,
+            unavailable_message="tampered predecessor",
+        )
 
 
 class _FakeNativeManager:

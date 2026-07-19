@@ -1,0 +1,55 @@
+{
+  "schema": "mio.repository-quality-four-arm-incident-record.v2",
+  "status": "native_abort_no_result",
+  "recorded_at_utc": "2026-07-19T15:32:33Z",
+  "protocol": {
+    "schema": "mio.repository-quality-four-arm-preregistration.v3",
+    "revision": "mio-repository-quality-four-arm-pilot-v3",
+    "preregistration_sha256": "d3ddbfa29bc99f2b480797fadf6686cbc200f973e6fa6325805855494d600d3d",
+    "git_revision": "16213e264d38993f8e5b074588d424a199269dbe",
+    "v3_rerun_allowed": false
+  },
+  "native_receipts": {
+    "attempt_start": {
+      "path": "benchmarks/incidents/repository-quality-four-arm-v3-smoke-attempt-start-16213e2.json",
+      "sha256": "daae7a1e1c895fa8fa328b5d8a8794a5d211cb26bb429d7c74ff27acc8706c1f"
+    },
+    "abort": {
+      "path": "benchmarks/incidents/repository-quality-four-arm-v3-smoke-abort-16213e2.json",
+      "sha256": "c0e18e1878fb5956003115f4658d1c2d06cf1a8d36c52d4becf091a3a099764a"
+    },
+    "attempt_binding_verified": true,
+    "requested_external_result_absent_at_record_time": true
+  },
+  "observed_execution": {
+    "failure_boundary": "allocation_sealed",
+    "reason_code": "protocol_failure",
+    "failure_message_sha256": "228aa14d81c3a556615f1b3d47046929b9491a532cc3cf68869fc06016884057",
+    "completed_root_generation_count": 8,
+    "completed_unique_extra_generation_count": 0,
+    "generation_receipt_issued": false,
+    "hidden_evaluator_constructed": false,
+    "hidden_evaluation_started": false,
+    "aggregate_produced": false,
+    "manager_state": "unloaded",
+    "work_root_cleanup": "complete",
+    "post_abort_frozen_input_verification": "passed"
+  },
+  "failure_analysis": {
+    "reason_code": "terminal_wall_budget_exhaustion_unattested",
+    "message_identification_method": "The native receipt stores only SHA-256(str(exception)). The digest was matched exactly against static literal RepositoryPilotProtocolError messages in the committed source; no private workspace, candidate, or hidden outcome was inspected.",
+    "matched_source_message": "observed wall time exceeds the budget without exhaustion",
+    "matched_source_path": "experimental/effort/bench_repository_quality_pilot.py",
+    "matched_source_line_in_git_revision": 1340,
+    "root_cause": "AgentTurnResult.wall_time_s includes terminal quality refresh, snapshot, report, and bookkeeping after the last model/tool decision, but that post-loop path did not set budget_exhaustion when it alone crossed max_wall_seconds.",
+    "required_fix": "At the final monotonic wall-time observation, attest a newly crossed wall deadline as bounded exhaustion and prevent model_final from contradicting that exhaustion. Add deterministic fault-injection coverage before a new protocol revision.",
+    "endpoint_impact": "No v3 cohort endpoint exists. Completed roots and any unbound in-flight extra artifact cannot be reused under the v3 disposition, regardless of their individual validity."
+  },
+  "disposition": {
+    "partial_generation_reuse_allowed": false,
+    "quality_claim_allowed": false,
+    "speed_claim_allowed": false,
+    "breakthrough_claim_allowed": false,
+    "required_next_step": "Commit the terminal wall-budget accounting fix and a new sealed v4 protocol before any further inference attempt."
+  }
+}
